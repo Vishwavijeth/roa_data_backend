@@ -210,3 +210,24 @@ def run_brokerage_engine():
         })
 
     return results
+
+#skyslope api
+def get_skyslope_data():
+
+    sales, _ = load_data()   # only use sales data
+
+    results = []
+
+    for s in sales:
+
+        results.append({
+            "saleguid": s.get("saleguid"),
+            "contract_date": s.get("contractacceptancedate"),
+            "close_date": s.get("escrowclosingdate"),
+            "buyer_name": s.get("buyer_full_name"),
+            "buyer_agent_name": s.get("agent_full_name"),
+            "status": s.get("status"),
+            "reviewer": s.get("reviewer_full_name")
+        })
+
+    return results

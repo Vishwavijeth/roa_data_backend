@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from services.engine import run_field, run_brokerage_engine
+from services.engine import run_field, run_brokerage_engine, get_skyslope_data
 
 app = FastAPI()
 
@@ -19,3 +19,7 @@ def compare(field: str):
 @app.get("/brokerage_engine")
 def brokerage_engine():
     return run_brokerage_engine()
+
+@app.get("/skyslope_api")
+def skyslope_api():
+    return get_skyslope_data()
