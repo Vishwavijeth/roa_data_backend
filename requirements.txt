@@ -1,8 +1,5 @@
 fastapi
 uvicorn
-<<<<<<< HEAD
 psgcopg2
 python-dotenv
-=======
 psycopg2-binary
->>>>>>> 6188f5b34793b2d3b9843949f00f54145882249e
