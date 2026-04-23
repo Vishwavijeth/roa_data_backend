@@ -129,3 +129,27 @@ def compare_transaction_specialist(be, ss):
     if be is None or ss is None:
         return "null"
     return "match" if ss.lower() in be.lower() else "mismatch"
+
+#status comparison
+STATUS_KEYWORDS = [
+    "Approved for Processing",
+    "Approved for Commission",
+    "Distribution Sent to Title",
+    "Commission Verified"
+]
+
+def extract_be_status(tags):
+    if not tags:
+        return []
+
+    tags_lower = tags.lower()
+
+    found = [
+        status for status in STATUS_KEYWORDS
+        if status.lower() in tags_lower
+    ]
+
+    # always include Pending for this comparison logic
+    found.append("Pending")
+
+    return found
