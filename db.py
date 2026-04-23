@@ -1,12 +1,13 @@
 import psycopg2
+import os
+from dotenv import load_dotenv
 
-DB_CONFIG = {
-    "host": "localhost",
-    "port": "5432",
-    "database": "roa_data_1",
-    "user": "postgres",
-    "password": "2621"
-}
+load_dotenv()  # loads .env locally
 
 def get_conn():
-    return psycopg2.connect(**DB_CONFIG)
+    db_url = os.getenv("DB_URL")
+
+    if not db_url:
+        raise Exception("DB_URL is missing")
+
+    return psycopg2.connect(db_url, sslmode="require")
