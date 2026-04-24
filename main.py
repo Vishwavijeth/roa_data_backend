@@ -211,3 +211,70 @@ def transaction_specialist_dashboard():
 
     finally:
         conn.close()
+
+@app.get("/compare/reviewer_dashboard")
+def reviewer_dashboard():
+    conn = get_conn()
+
+    try:
+        query = """
+        SELECT
+            s.saleguid AS transactionid,
+            be.property_address AS propertyaddress,
+
+            s.saleprice AS sale_price,
+            s.listingprice AS listing_price,
+            s.escrowclosingdate AS escrow_close_date,
+
+            s.status AS ss_status,
+
+            -- workflow status (complete / revoked / pending)
+            TRIM(
+                CONCAT_WS(', ',
+
+                    CASE
+                        WHEN LOWER(COALESCE(be.tags, '')) LIKE '%complete%'
+                        THEN 'Complete'
+                    END,
+
+                    CASE
+                        WHEN LOWER(COALESCE(be.tags, '')) LIKE '%revoked%'
+                        THEN 'Revoked'
+                    END,
+
+                    CASE
+                        WHEN NOT (
+                            LOWER(COALESCE(be.tags, '')) LIKE '%complete%' OR
+                            LOWER(COALESCE(be.tags, '')) LIKE '%revoked%'
+                        )
+                        THEN 'Pending'
+                    END
+
+                )
+            ) AS be_workflow_status,
+
+            -- reviewer name (CORRECT SOURCE)
+            COALESCE(r.firstname || ' ' || r.lastname, '') AS reviewer_name
+
+        FROM sale s
+
+        LEFT JOIN users r
+            ON s.reviewerguid = r.userguid
+
+        JOIN brokerage_engine be
+            ON s.saleguid = be.skyslopefileid
+
+        ORDER BY s.saleguid;
+        """
+
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query)
+            rows = cur.fetchall()
+
+        return {
+            "count": len(rows),
+            "data": rows
+        }
+
+    finally:
+        conn.close()
