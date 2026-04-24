@@ -6,16 +6,16 @@ from .comparison import (
 )
 
 FIELD_MAP = {
-    "sale_price": {
-        "be": "sale_price",
-        "ss": "saleprice",
-        "compare": compare_values
-    },
-    "close_date": {
-        "be": "closed_date",
-        "ss": "escrowclosingdate",
-        "compare": compare_values
-    },
+    # "sale_price": {
+    #     "be": "sale_price",
+    #     "ss": "saleprice",
+    #     "compare": compare_values
+    # },
+    # "close_date": {
+    #     "be": "closed_date",
+    #     "ss": "escrowclosingdate",
+    #     "compare": compare_values
+    # },
     "contract_date": {
         "be": "contract_date",
         "ss": "contractacceptancedate",

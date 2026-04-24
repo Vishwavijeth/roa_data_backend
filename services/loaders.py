@@ -100,3 +100,4 @@ def get_be(conn):
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(query)
         return cur.fetchall()
+    
