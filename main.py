@@ -551,3 +551,82 @@ def reviewer_dashboard():
 
     finally:
         conn.close()
+
+@app.get("/compare/transaction_specialist_summary")
+def transaction_specialist_summary():
+    conn = get_conn()
+
+    try:
+        query = """
+        SELECT
+            be.transaction_specialist,
+
+            -- outstanding = pending
+            COUNT(*) FILTER (
+                WHERE LOWER(COALESCE(s.status, '')) = 'pending'
+            ) AS transactions_outstanding,
+
+            -- closed
+            COUNT(*) FILTER (
+                WHERE LOWER(COALESCE(s.status, '')) = 'closed'
+            ) AS transactions_closed
+
+        FROM sale s
+        JOIN brokerage_engine be
+            ON s.saleguid = be.skyslopefileid
+
+        GROUP BY be.transaction_specialist
+        ORDER BY be.transaction_specialist;
+        """
+
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query)
+            rows = cur.fetchall()
+
+        return {
+            "count": len(rows),
+            "data": rows
+        }
+
+    finally:
+        conn.close()
+
+@app.get("/compare/reviewer_summary")
+def reviewer_summary():
+    conn = get_conn()
+
+    try:
+        query = """
+        SELECT
+            COALESCE(r.firstname || ' ' || r.lastname, 'Unassigned') AS reviewer_full_name,
+
+            -- outstanding = pending
+            COUNT(*) FILTER (
+                WHERE LOWER(COALESCE(s.status, '')) = 'pending'
+            ) AS transactions_outstanding,
+
+            -- closed
+            COUNT(*) FILTER (
+                WHERE LOWER(COALESCE(s.status, '')) = 'closed'
+            ) AS transactions_closed
+
+        FROM sale s
+
+        LEFT JOIN users r
+            ON s.reviewerguid = r.userguid
+
+        GROUP BY reviewer_full_name
+        ORDER BY reviewer_full_name;
+        """
+
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query)
+            rows = cur.fetchall()
+
+        return {
+            "count": len(rows),
+            "data": rows
+        }
+
+    finally:
+        conn.close()
