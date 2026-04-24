@@ -71,59 +71,75 @@ def run_field(field_name: str):
         return {"error": "Invalid field"}
 
     sales, be_data = load_data()
-    be_lookup = build_lookup(be_data)
+
+    # Skyslope lookup: saleguid keyed by BE file id
+    sale_lookup = {s["saleguid"]: s for s in sales}
 
     results = []
 
-    for s in sales:
-        sale_id = s["saleguid"]
+    for b in be_data:
 
-        if sale_id not in be_lookup:
+        # 1. filter BE rows
+        tags = (b.get("tags") or "").lower()
+        if "complete" in tags or "revoked" in tags:
             continue
 
-        b = be_lookup[sale_id]
+        be_file_id = b.get("skyslopefileid")
 
+        # 2. match Skyslope record
+        s = sale_lookup.get(be_file_id)
+
+        # 3. IMPORTANT: only real Skyslope match gets saleguid
+        skyslope_saleguid = s.get("saleguid") if s else None
+
+        transaction_id = b.get("transaction_identifier_transactionid")
+        property_address = b.get("property_address")
+
+        # ---------------- STATUS ----------------
         if field_name == "status":
 
-            skyslope_status = normalize_value(s.get("status"))
-
+            skyslope_status = normalize_value(s.get("status")) if s else None
             be_status_list = extract_be_status(b.get("tags"))
             be_status = ", ".join(be_status_list)
 
-            # comparison logic (ONLY against Pending rule)
-            match_result = "match" if skyslope_status == "Pending" else "mismatch"
+            if not s:
+                match_result = "no_skyslope_record"
+            else:
+                match_result = "match" if skyslope_status == "Pending" else "mismatch"
 
             results.append({
-                "saleguid": sale_id,
-                "transactionid": b.get("transaction_identifier_transactionid"),
-                "propertyaddress": b.get("property_address"),
-
+                "saleguid": skyslope_saleguid,
+                "transactionid": transaction_id,
+                "propertyaddress": property_address,
                 "skyslope_status": skyslope_status,
                 "be_status": be_status,
-
                 "match_result": match_result
             })
 
             continue
 
+        # ---------------- GENERIC FIELDS ----------------
         config = FIELD_MAP[field_name]
 
         be_val = normalize_value(b.get(config["be"]))
-        ss_val = normalize_value(s.get(config["ss"]))
+        ss_val = normalize_value(s.get(config["ss"])) if s else None
 
-        result = ""
-
-        if field_name in COMPARE_VALUES_FIELDS:
-            result = compare_values(be_val, ss_val)
-        elif field_name in BUYER_SELLER_NAME_FIELD:
-            result = compare_names(be_val, ss_val)
-        elif field_name in BUYING_AGENT_NAME_FIELD:
-            result = compare_buying_agent(be_val, ss_val)
+        if not s:
+            result = "no_skyslope_record"
+        else:
+            if field_name in COMPARE_VALUES_FIELDS:
+                result = compare_values(be_val, ss_val)
+            elif field_name in BUYER_SELLER_NAME_FIELD:
+                result = compare_names(be_val, ss_val)
+            elif field_name in BUYING_AGENT_NAME_FIELD:
+                result = compare_buying_agent(be_val, ss_val)
+            else:
+                result = ""
 
         results.append({
-            "saleguid": sale_id,
-            "transactionId": b.get("transaction_identifier_transactionid"),
-            "propertyaddress": b.get("property_address"),
+            "saleguid": skyslope_saleguid,   # ONLY real match or None
+            "transactionId": transaction_id,
+            "propertyaddress": property_address,
 
             f"be_{field_name}": be_val,
             f"skyslope_{field_name}": ss_val,
