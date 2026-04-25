@@ -239,6 +239,7 @@ def get_skyslope_data():
         results.append({
             "saleguid": s.get("saleguid"),
             "contract_date": s.get("contractacceptancedate"),
+            "propertyaddress": s.get("propertyaddress"),
             "close_date": s.get("escrowclosingdate"),
             "buyer_name": s.get("buyer_full_name"),
             "buyer_agent_name": s.get("agent_full_name"),

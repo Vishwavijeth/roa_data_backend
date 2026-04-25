@@ -21,6 +21,14 @@ def get_sales(conn):
             s.contractacceptancedate,
             s.status,
 
+            -- build property address
+            CONCAT_WS(', ',
+                CONCAT_WS(' ', sp.streetnumber, sp.streetaddress),
+                sp.city,
+                sp.state,
+                sp.zip
+            ) AS propertyaddress,
+
             COALESCE(u.firstname || ' ' || u.lastname, '') as agent_full_name,
 
             COALESCE(r.firstname || ' ' || r.lastname, '') as reviewer_full_name,
@@ -67,6 +75,9 @@ def get_sales(conn):
 
         LEFT JOIN users r 
             ON s.reviewerguid = r.userguid
+
+        LEFT JOIN sale_property sp
+            ON s.saleguid = sp.saleguid
 
         LEFT JOIN sale_commission scn
             ON scn.saleguid = s.saleguid
