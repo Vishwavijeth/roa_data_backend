@@ -422,8 +422,8 @@ ORDER BY s.saleguid;
     finally:
         conn.close()
 
-@app.get("/compare/transaction_specialist_dashboard")
-def transaction_specialist_dashboard():
+@app.get("/transaction_specialist_listing")
+def transaction_specialist_listing():
     conn = get_conn()
 
     try:
@@ -436,7 +436,7 @@ def transaction_specialist_dashboard():
             be.listing_price AS listing_price,
             be.closed_date AS be_closed_date,
 
-            s.status AS ss_status,
+            NULL AS ss_status,  -- no skyslope join anymore
 
             -- workflow status (ONLY complete, revoked, pending)
             TRIM(
@@ -464,13 +464,12 @@ def transaction_specialist_dashboard():
             ) AS be_workflow_status,
 
             be.transaction_specialist AS transaction_specialist,
-            s.saleguid AS saleguid
 
-        FROM sale s
-        JOIN brokerage_engine be
-            ON s.saleguid = be.skyslopefileid
+            NULL AS saleguid  -- since no join
 
-        ORDER BY s.saleguid;
+        FROM brokerage_engine be
+
+        ORDER BY be.transaction_identifier_transactionid;
         """
 
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -485,15 +484,15 @@ def transaction_specialist_dashboard():
     finally:
         conn.close()
 
-@app.get("/compare/reviewer_dashboard")
-def reviewer_dashboard():
+@app.get("/reviewer_listing")
+def reviewer_listing():
     conn = get_conn()
 
     try:
         query = """
         SELECT
             s.saleguid AS transactionid,
-            be.property_address AS propertyaddress,
+            NULL AS propertyaddress,
 
             s.saleprice AS sale_price,
             s.listingprice AS listing_price,
@@ -501,41 +500,15 @@ def reviewer_dashboard():
 
             s.status AS ss_status,
 
-            -- workflow status (complete / revoked / pending)
-            TRIM(
-                CONCAT_WS(', ',
+            NULL AS be_workflow_status,
 
-                    CASE
-                        WHEN LOWER(COALESCE(be.tags, '')) LIKE '%complete%'
-                        THEN 'Complete'
-                    END,
-
-                    CASE
-                        WHEN LOWER(COALESCE(be.tags, '')) LIKE '%revoked%'
-                        THEN 'Revoked'
-                    END,
-
-                    CASE
-                        WHEN NOT (
-                            LOWER(COALESCE(be.tags, '')) LIKE '%complete%' OR
-                            LOWER(COALESCE(be.tags, '')) LIKE '%revoked%'
-                        )
-                        THEN 'Pending'
-                    END
-
-                )
-            ) AS be_workflow_status,
-
-            -- reviewer name (CORRECT SOURCE)
+            -- reviewer name
             COALESCE(r.firstname || ' ' || r.lastname, '') AS reviewer_name
 
         FROM sale s
 
         LEFT JOIN users r
             ON s.reviewerguid = r.userguid
-
-        JOIN brokerage_engine be
-            ON s.saleguid = be.skyslopefileid
 
         ORDER BY s.saleguid;
         """
@@ -552,31 +525,40 @@ def reviewer_dashboard():
     finally:
         conn.close()
 
-@app.get("/compare/transaction_specialist_summary")
-def transaction_specialist_summary():
+@app.get("/transaction_specialist_dashboard")
+def transaction_specialist_dashboard():
     conn = get_conn()
 
     try:
         query = """
         SELECT
-            be.transaction_specialist,
+            COALESCE(be.transaction_specialist, 'Unassigned') AS transaction_specialist,
 
-            -- outstanding = pending
+            -- Outstanding = Pending
             COUNT(*) FILTER (
-                WHERE LOWER(COALESCE(s.status, '')) = 'pending'
+                WHERE NOT (
+                    LOWER(COALESCE(be.tags, '')) LIKE '%complete%' OR
+                    LOWER(COALESCE(be.tags, '')) LIKE '%revoked%'
+                )
             ) AS transactions_outstanding,
 
-            -- closed
+            -- Closed = Complete OR Revoked
             COUNT(*) FILTER (
-                WHERE LOWER(COALESCE(s.status, '')) = 'closed'
-            ) AS transactions_closed
+                WHERE 
+                    LOWER(COALESCE(be.tags, '')) LIKE '%complete%' OR
+                    LOWER(COALESCE(be.tags, '')) LIKE '%revoked%'
+            ) AS transactions_closed,
 
-        FROM sale s
-        JOIN brokerage_engine be
-            ON s.saleguid = be.skyslopefileid
+            MAX(be.closed_date) FILTER (
+                WHERE 
+                    LOWER(COALESCE(be.tags, '')) LIKE '%complete%' OR
+                    LOWER(COALESCE(be.tags, '')) LIKE '%revoked%'
+            ) AS latest_closed_date
 
-        GROUP BY be.transaction_specialist
-        ORDER BY be.transaction_specialist;
+        FROM brokerage_engine be
+
+        GROUP BY COALESCE(be.transaction_specialist, 'Unassigned')
+        ORDER BY transaction_specialist;
         """
 
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -591,8 +573,8 @@ def transaction_specialist_summary():
     finally:
         conn.close()
 
-@app.get("/compare/reviewer_summary")
-def reviewer_summary():
+@app.get("/reviewer_dashboard")
+def reviewer_dashboard():
     conn = get_conn()
 
     try:
