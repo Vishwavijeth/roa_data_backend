@@ -491,7 +491,7 @@ def reviewer_listing():
     try:
         query = """
         SELECT
-            s.saleguid AS transactionid,
+            s.saleguid AS saleguid,
 
             -- build property address
             CONCAT_WS(', ',
