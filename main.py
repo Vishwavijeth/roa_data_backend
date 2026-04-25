@@ -436,8 +436,6 @@ def transaction_specialist_listing():
             be.listing_price AS listing_price,
             be.closed_date AS be_closed_date,
 
-            NULL AS ss_status,  -- no skyslope join anymore
-
             -- workflow status (ONLY complete, revoked, pending)
             TRIM(
                 CONCAT_WS(', ',
@@ -464,8 +462,7 @@ def transaction_specialist_listing():
             ) AS be_workflow_status,
 
             be.transaction_specialist AS transaction_specialist,
-
-            NULL AS saleguid  -- since no join
+            be.skyslopefileid AS skyslopefileid
 
         FROM brokerage_engine be
 
