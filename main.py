@@ -492,7 +492,14 @@ def reviewer_listing():
         query = """
         SELECT
             s.saleguid AS transactionid,
-            NULL AS propertyaddress,
+
+            -- build property address
+            CONCAT_WS(', ',
+                CONCAT_WS(' ', sp.streetnumber, sp.streetaddress),
+                sp.city,
+                sp.state,
+                sp.zip
+            ) AS propertyaddress,
 
             s.saleprice AS sale_price,
             s.listingprice AS listing_price,
@@ -506,6 +513,9 @@ def reviewer_listing():
             COALESCE(r.firstname || ' ' || r.lastname, '') AS reviewer_name
 
         FROM sale s
+
+        LEFT JOIN sale_property sp
+            ON s.saleguid = sp.saleguid
 
         LEFT JOIN users r
             ON s.reviewerguid = r.userguid
