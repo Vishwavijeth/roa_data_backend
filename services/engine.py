@@ -53,7 +53,8 @@ COMPARE_VALUES_FIELDS = {
 
 BUYER_SELLER_NAME_FIELD = {
     "buyer_name",
-    "seller_name"
+    "seller_name",
+    "title_company"
 }
 
 BUYING_AGENT_NAME_FIELD = {

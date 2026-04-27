@@ -51,4 +51,9 @@ FIELD_MAP = {
     #     "ss": "reviewer_full_name",
     #     "compare": compare_transaction_specialist
     # }
+    "title_company": {
+    "be": "da_title_company",
+    "ss": "title_company",
+    "compare": compare_names
+    },
 }
