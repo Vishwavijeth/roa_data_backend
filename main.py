@@ -554,16 +554,9 @@ def transaction_specialist_dashboard():
                 WHERE 
                     LOWER(COALESCE(be.tags, '')) LIKE '%complete%' OR
                     LOWER(COALESCE(be.tags, '')) LIKE '%revoked%'
-            ) AS transactions_closed,
-
-            MAX(be.closed_date) FILTER (
-                WHERE 
-                    LOWER(COALESCE(be.tags, '')) LIKE '%complete%' OR
-                    LOWER(COALESCE(be.tags, '')) LIKE '%revoked%'
-            ) AS latest_closed_date
+            ) AS transactions_closed
 
         FROM brokerage_engine be
-
         GROUP BY COALESCE(be.transaction_specialist, 'Unassigned')
         ORDER BY transaction_specialist;
         """

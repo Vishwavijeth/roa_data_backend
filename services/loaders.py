@@ -104,7 +104,8 @@ def get_be(conn):
             buying_agent_name,
             total_gross_commission,
             transaction_specialist,
-            property_address
+            property_address,
+            skyslopefileid
         FROM brokerage_engine
      """
 

@@ -222,7 +222,8 @@ def run_brokerage_engine():
             "contract_date": b.get("contract_date"),
             "close_date": b.get("closed_date"),
             "transaction_specialist": b.get("transaction_specialist"),
-            "status": be_status
+            "status": be_status,
+            "skyslopefileid": b.get("skyslopefileid")
         })
 
     return results
