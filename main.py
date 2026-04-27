@@ -532,10 +532,14 @@ def reviewer_listing():
     finally:
         conn.close()
 
+from fastapi import Query
+from psycopg2.extras import RealDictCursor
+
 @app.get("/transaction_specialist_dashboard")
 def transaction_specialist_dashboard(
     from_date: str = Query(None),
-    to_date: str = Query(None)
+    to_date: str = Query(None),
+    state: str = Query(None)
 ):
     conn = get_conn()
 
@@ -563,6 +567,7 @@ def transaction_specialist_dashboard(
 
         params = []
 
+        # date filter
         if from_date:
             query += " AND be.closed_date::date >= %s"
             params.append(from_date)
@@ -571,17 +576,18 @@ def transaction_specialist_dashboard(
             query += " AND be.closed_date::date <= %s"
             params.append(to_date)
 
+        # state filter
+        if state:
+            query += " AND LOWER(COALESCE(be.state, '')) = LOWER(%s)"
+            params.append(state)
+
         query += """
         GROUP BY COALESCE(be.transaction_specialist, 'Unassigned')
         ORDER BY transaction_specialist;
         """
 
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            if params:
-                cur.execute(query, tuple(params))
-            else:
-                cur.execute(query)
-
+            cur.execute(query, tuple(params))
             rows = cur.fetchall()
 
         return {
@@ -592,10 +598,39 @@ def transaction_specialist_dashboard(
     finally:
         conn.close()
 
+from psycopg2.extras import RealDictCursor
+
+@app.get("/transaction_specialist/state")
+def get_states():
+    conn = get_conn()
+
+    try:
+        query = """
+        SELECT DISTINCT state
+        FROM brokerage_engine
+        WHERE state IS NOT NULL AND TRIM(state) <> ''
+        ORDER BY state;
+        """
+
+        with conn.cursor() as cur:
+            cur.execute(query)
+            rows = cur.fetchall()
+
+        states = [r[0] for r in rows]
+
+        return {
+            "count": len(states),
+            "data": states
+        }
+
+    finally:
+        conn.close()
+
 @app.get("/reviewer_dashboard")
 def reviewer_dashboard(
     from_date: str = Query(None),
-    to_date: str = Query(None)
+    to_date: str = Query(None),
+    state: str = Query(None)
 ):
     conn = get_conn()
 
@@ -615,6 +650,8 @@ def reviewer_dashboard(
         FROM sale s
         LEFT JOIN users r
             ON s.reviewerguid = r.userguid
+        LEFT JOIN sale_property sp
+            ON s.saleguid = sp.saleguid
 
         WHERE 1=1
         """
@@ -622,24 +659,25 @@ def reviewer_dashboard(
         params = []
 
         if from_date:
-            query += " AND s.escrowclosingdate::date >= %s"
+            query += " AND s.escrowclosingdate >= %s"
             params.append(from_date)
 
         if to_date:
-            query += " AND s.escrowclosingdate::date <= %s"
+            query += " AND s.escrowclosingdate <= %s"
             params.append(to_date)
 
+        # ✅ CORRECT state filter
+        if state:
+            query += " AND LOWER(sp.state) = LOWER(%s)"
+            params.append(state)
+
         query += """
-        GROUP BY COALESCE(r.firstname || ' ' || r.lastname, 'Unassigned')
+        GROUP BY reviewer_full_name
         ORDER BY reviewer_full_name;
         """
 
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            if params:
-                cur.execute(query, tuple(params))
-            else:
-                cur.execute(query)
-
+            cur.execute(query, tuple(params))
             rows = cur.fetchall()
 
         return {
@@ -650,57 +688,25 @@ def reviewer_dashboard(
     finally:
         conn.close()
 
-@app.get("/reviewer_dashboard")
-def reviewer_dashboard(
-    from_date: str = Query(None),
-    to_date: str = Query(None)
-):
+@app.get("/reviewer_dashboard/state")
+def get_states():
     conn = get_conn()
 
     try:
         query = """
-        SELECT
-            COALESCE(r.firstname || ' ' || r.lastname, 'Unassigned') AS reviewer_full_name,
-
-            COUNT(*) FILTER (
-                WHERE LOWER(COALESCE(s.status, '')) = 'pending'
-            ) AS transactions_outstanding,
-
-            COUNT(*) FILTER (
-                WHERE LOWER(COALESCE(s.status, '')) = 'closed'
-            ) AS transactions_closed
-
-        FROM sale s
-        LEFT JOIN users r
-            ON s.reviewerguid = r.userguid
-
-        WHERE 1=1
+        SELECT DISTINCT state
+        FROM sale_property
+        WHERE state IS NOT NULL AND TRIM(state) <> ''
+        ORDER BY state;
         """
 
-        params = []
-
-        if from_date:
-            query += " AND s.escrowclosingdate::date >= %s"
-            params.append(from_date)
-
-        if to_date:
-            query += " AND s.escrowclosingdate::date <= %s"
-            params.append(to_date)
-
-        query += """
-        GROUP BY COALESCE(r.firstname || ' ' || r.lastname, 'Unassigned')
-        ORDER BY reviewer_full_name;
-        """
-
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(query, tuple(params)) if params else cur.execute(query)
+        with conn.cursor() as cur:
+            cur.execute(query)
             rows = cur.fetchall()
 
         return {
-            "count": len(rows),
-            "data": rows
+            "data": [row[0] for row in rows]
         }
 
     finally:
         conn.close()
-
