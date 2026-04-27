@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from db import get_conn
 from psycopg2.extras import RealDictCursor
@@ -21,10 +21,6 @@ def compare(field: str):
 @app.get("/brokerage_engine")
 def brokerage_engine():
     return run_brokerage_engine()
-
-from fastapi import FastAPI, HTTPException
-
-app = FastAPI()
 
 @app.get("/brokerage_engine/detail")
 def brokerage_detail(transactionid: str):
@@ -593,9 +589,6 @@ def reviewer_listing():
 
     finally:
         conn.close()
-
-from fastapi import Query
-from psycopg2.extras import RealDictCursor
 
 @app.get("/transaction_specialist_dashboard")
 def transaction_specialist_dashboard(
