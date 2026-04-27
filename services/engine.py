@@ -1,4 +1,5 @@
 from .loaders import load_data
+from fastapi import HTTPException
 import json
 from .field_registry import FIELD_MAP
 from .comparison import (

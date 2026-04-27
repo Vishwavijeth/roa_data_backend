@@ -2,7 +2,7 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from db import get_conn
 from psycopg2.extras import RealDictCursor
-from services.engine import run_field, run_brokerage_engine, get_skyslope_data
+from services.engine import run_field, run_brokerage_engine, get_skyslope_data, load_data
 
 app = FastAPI()
 
@@ -22,10 +22,72 @@ def compare(field: str):
 def brokerage_engine():
     return run_brokerage_engine()
 
+from fastapi import FastAPI, HTTPException
+
+app = FastAPI()
+
+@app.get("/brokerage_engine/detail")
+def brokerage_detail(transactionid: str):
+    sales, be_data = load_data()
+
+    normalized_txn = transactionid.strip().lower()
+
+    be_record = next(
+        (
+            b for b in be_data
+            if str(b.get("transaction_identifier_transactionid", "")).strip().lower() == normalized_txn
+        ),
+        None
+    )
+
+    if not be_record:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+
+    skyslopefileid = be_record.get("skyslopefileid")
+
+    sale_record = next(
+        (
+            s for s in sales
+            if str(s.get("saleguid", "")).strip().lower() == str(skyslopefileid).strip().lower()
+        ),
+        None
+    )
+
+    return {
+        "transactionid": transactionid,
+        "brokerage_engine": {
+            "property_address": be_record.get("property_address"),
+            "sale_price": be_record.get("sale_price"),
+            "listing_price": be_record.get("listing_price"),
+            "office": be_record.get("listing_office"),
+            "buying_agent_name": be_record.get("buying_agent_name"),
+            "contract_date": be_record.get("contract_date"),
+            "closed_date": be_record.get("closed_date"),
+            "tags": be_record.get("tags"),
+            "transaction_specialist": be_record.get("transaction_specialist"),
+            "skyslopefileid": skyslopefileid
+        },
+        "skyslope": {
+            "saleguid": sale_record.get("saleguid") if sale_record else None,
+            "property_address": sale_record.get("propertyaddress") if sale_record else None,
+            "listingprice": sale_record.get("listingprice") if sale_record else None,
+            "saleprice": sale_record.get("saleprice") if sale_record else None,
+            "mlsnumber": sale_record.get("mlsnumber") if sale_record else None,
+            "seller": sale_record.get("seller_full_name") if sale_record else None,
+            "buyer": sale_record.get("buyer_full_name") if sale_record else None,
+            "buying_agent": sale_record.get("agent_full_name") if sale_record else None,
+            "buying_agent_email": sale_record.get("agent_mail_id") if sale_record else None,
+            "transaction_specialist": sale_record.get("reviewer_full_name") if sale_record else None,
+            "status": sale_record.get("status") if sale_record else None,
+            "contractacceptancedate": sale_record.get("contractacceptancedate") if sale_record else None,
+            "escrowclosingdate": sale_record.get("escrowclosingdate") if sale_record else None,
+            "canceldate": sale_record.get("canceldate") if sale_record else None
+        }
+    }
+
 @app.get("/skyslope_api")
 def skyslope_api():
     return get_skyslope_data()
-
 
 @app.get("/compare/sale_price")
 def sale_price():

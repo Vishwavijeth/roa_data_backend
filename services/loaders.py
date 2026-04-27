@@ -18,6 +18,7 @@ def get_sales(conn):
             s.saleprice,
             s.escrowclosingdate,
             s.listingprice,
+            s.mlsnumber,
             s.contractacceptancedate,
             s.status,
 
@@ -30,7 +31,7 @@ def get_sales(conn):
             ) AS propertyaddress,
 
             COALESCE(u.firstname || ' ' || u.lastname, '') as agent_full_name,
-
+            COALESCE(u.email, '') AS agent_mail_id,
             COALESCE(r.firstname || ' ' || r.lastname, '') as reviewer_full_name,
 
             COALESCE(
@@ -93,6 +94,7 @@ def get_be(conn):
             SELECT
             skyslopefileid,
             listingguid,
+            listing_office,
             transaction_identifier_transactionid,
             sale_price,
             closed_date,
