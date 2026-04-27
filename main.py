@@ -73,7 +73,7 @@ def brokerage_detail(transactionid: str):
             "buyer": sale_record.get("buyer_full_name") if sale_record else None,
             "buying_agent": sale_record.get("agent_full_name") if sale_record else None,
             "buying_agent_email": sale_record.get("agent_mail_id") if sale_record else None,
-            "transaction_specialist": sale_record.get("reviewer_full_name") if sale_record else None,
+            "reviewer_full_name": sale_record.get("reviewer_full_name") if sale_record else None,
             "status": sale_record.get("status") if sale_record else None,
             "contractacceptancedate": sale_record.get("contractacceptancedate") if sale_record else None,
             "escrowclosingdate": sale_record.get("escrowclosingdate") if sale_record else None,
