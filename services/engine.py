@@ -232,15 +232,23 @@ def run_brokerage_engine():
 
 #skyslope api
 def get_skyslope_data():
+    sales, be_data = load_data()
 
-    sales, _ = load_data()   # only use sales data
+    # skyslopefileid -> transaction_identifier_transactionid
+    be_map = {
+        b.get("skyslopefileid"): b.get("transaction_identifier_transactionid")
+        for b in be_data
+        if b.get("skyslopefileid") is not None
+    }
 
     results = []
 
     for s in sales:
+        sale_guid = s.get("saleguid")
 
         results.append({
-            "saleguid": s.get("saleguid"),
+            "saleguid": sale_guid,
+            "transaction_id": be_map.get(sale_guid, ""),  # blank if no match
             "contract_date": s.get("contractacceptancedate"),
             "propertyaddress": s.get("propertyaddress"),
             "close_date": s.get("escrowclosingdate"),
