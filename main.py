@@ -48,6 +48,11 @@ def brokerage_detail(transactionid: str):
          if norm(s.get("saleguid")) == norm(skyslopefileid)),
         None
     )
+    match = True
+    if sale_record:
+        match = norm(skyslopefileid) == norm(sale_record.get("saleguid"))
+    else:
+        match = False
 
     return {
         "transactionid": transactionid,
@@ -66,6 +71,7 @@ def brokerage_detail(transactionid: str):
             "skyslopefileid": skyslopefileid
         },
         "skyslope": {
+            "match": match,
             "saleguid": sale_record.get("saleguid") if sale_record else None,
             "property_address": sale_record.get("propertyaddress") if sale_record else None,
             "listingprice": sale_record.get("listingprice") if sale_record else None,
