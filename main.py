@@ -93,8 +93,6 @@ def brokerage_detail(transactionid: str):
 def skyslope_api():
     return get_skyslope_data()
 
-from fastapi import HTTPException
-
 @app.get("/skyslope/detail")
 def skyslope_detail(saleguid: str):
     sales, be_data = load_data()
