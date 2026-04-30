@@ -5,9 +5,10 @@ from dotenv import load_dotenv
 load_dotenv()  # loads .env locally
 
 def get_conn():
-    db_url = os.getenv("DB_URL")
-
-    if not db_url:
-        raise Exception("DB_URL is missing")
-
-    return psycopg2.connect(db_url, sslmode="require")
+    return psycopg2.connect(
+        dbname=os.getenv("DB_NAME"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD"),
+        host=os.getenv("DB_HOST"),
+        port=os.getenv("DB_PORT"),
+    )
