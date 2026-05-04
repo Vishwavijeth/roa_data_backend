@@ -16,20 +16,10 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Global exception handler — ensures CORS headers are present even on 500 errors.
-# Without this, an unhandled exception bypasses the CORS middleware response,
-# causing the browser to report a CORS error instead of the actual server error.
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    return JSONResponse(
-        status_code=500,
-        content={"detail": str(exc)},
-    )
 
 app.include_router(brokerage_router)
 app.include_router(skyslope_router)
