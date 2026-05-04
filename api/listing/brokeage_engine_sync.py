@@ -1,7 +1,6 @@
 from fastapi import APIRouter, HTTPException
-import psycopg2, csv, io, httpx
-from db import DB_CONFIG
-from datetime import datetime
+import csv, io, httpx
+from db import get_conn
 from services.sync_helpers import build_row_values, INSERT_SQL
 
 router = APIRouter()
@@ -47,13 +46,7 @@ async def sync_brokerage_engine():
     )
 
     # 3. Connect to DB ─────────────────────────────────────────────────────
-    try:
-        conn = psycopg2.connect(**DB_CONFIG)
-    except psycopg2.Error as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Database connection failed: {exc}",
-        )
+    conn = get_conn()
 
     cur = conn.cursor()
 
