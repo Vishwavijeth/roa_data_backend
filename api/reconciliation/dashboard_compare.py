@@ -15,7 +15,6 @@ WITH base AS (
         s.saleguid,
         be.transaction_identifier_transactionid AS transactionid,
         be.property_address AS propertyaddress,
-
         s.saleprice AS skyslope_sale_price,
         be.sale_price AS be_sale_price,
         be.tags AS tags,
