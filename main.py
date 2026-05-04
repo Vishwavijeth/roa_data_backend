@@ -30,3 +30,7 @@ app.include_router(trans_dash_router)
 app.include_router(review_dash_router)
 app.include_router(comparison_router)
 #app.include_router(brokerage_sync_router)
+
+from mangum import Mangum
+
+handler = Mangum(app)
