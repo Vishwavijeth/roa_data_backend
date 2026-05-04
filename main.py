@@ -8,18 +8,14 @@ from api.reconciliation.dashboard_comparison import router as comparison_router
 from api.listing.transaction_specialist import router as specialist_router
 from api.listing.reviewer import router as reviewer_router
 from api.dashboards.transaction_specialist import router as trans_dash_router
-from api.listing.brokeage_engine_sync import router as brokerage_sync_router
+#from api.listing.brokeage_engine_sync import router as brokerage_sync_router
 from api.dashboards.reviewer import router as review_dash_router
 
 app = FastAPI()
 
-ALLOWED_ORIGINS = [
-    "https://roa-data-ui.vercel.app",
-]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -43,4 +39,4 @@ app.include_router(reviewer_router)
 app.include_router(trans_dash_router)
 app.include_router(review_dash_router)
 app.include_router(comparison_router)
-app.include_router(brokerage_sync_router)
+#app.include_router(brokerage_sync_router)
