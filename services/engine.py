@@ -73,25 +73,15 @@ def run_field(field_name: str):
         return {"error": "Invalid field"}
 
     sales, be_data = load_data()
-
-    # Skyslope lookup: saleguid keyed by BE file id
     sale_lookup = {s["saleguid"]: s for s in sales}
 
     results = []
 
     for b in be_data:
 
-        # 1. filter BE rows
-        tags = (b.get("tags") or "").lower()
-        if "complete" in tags or "revoked" in tags:
-            continue
-
         be_file_id = b.get("skyslopefileid")
-
-        # 2. match Skyslope record
         s = sale_lookup.get(be_file_id)
 
-        # 3. IMPORTANT: only real Skyslope match gets saleguid
         skyslope_saleguid = s.get("saleguid") if s else None
 
         transaction_id = b.get("transaction_identifier_transactionid")
@@ -100,14 +90,47 @@ def run_field(field_name: str):
         # ---------------- STATUS ----------------
         if field_name == "status":
 
-            skyslope_status = normalize_value(s.get("status")) if s else None
-            be_status_list = extract_be_status(b.get("tags"))
+            skyslope_status = s.get("status") if s else None
+            be_tags = b.get("tags") or ""
+
+            tags_lower = be_tags.lower().replace(" ", "")
+
+            be_status_list = []
+
+            # Complete
+            if "complete" in tags_lower:
+                be_status_list.append("Complete")
+
+            # Revoked
+            if "revoked" in tags_lower:
+                be_status_list.append("Revoked")
+
+            # FellThrough (NO pending)
+            if "fellthrough" in tags_lower:
+                be_status_list.append("FellThrough")
+
+            # Open → adds Pending
+            if "open" in tags_lower:
+                be_status_list.append("Open")
+                be_status_list.append("Pending")
+
+            # fallback only if nothing matched
+            if not be_status_list:
+                be_status_list.append("Pending")
+
+            be_status_list = list(dict.fromkeys(be_status_list))
             be_status = ", ".join(be_status_list)
 
+            # ---------------- MATCH LOGIC ----------------
             if not s:
                 match_result = "no_skyslope_record"
             else:
-                match_result = "match" if skyslope_status == "Pending" else "mismatch"
+                if "Complete" in be_status_list and skyslope_status == "Closed":
+                    match_result = "match"
+                elif skyslope_status and skyslope_status in be_status_list:
+                    match_result = "match"
+                else:
+                    match_result = "mismatch"
 
             results.append({
                 "saleguid": skyslope_saleguid,
@@ -139,13 +162,11 @@ def run_field(field_name: str):
                 result = ""
 
         results.append({
-            "saleguid": skyslope_saleguid,   # ONLY real match or None
+            "saleguid": skyslope_saleguid,
             "transactionId": transaction_id,
             "propertyaddress": property_address,
-
             f"be_{field_name}": be_val,
             f"skyslope_{field_name}": ss_val,
-
             "match_result": result
         })
 

@@ -10,40 +10,34 @@ def sale_price():
 
     try:
         query = """
-WITH base AS (
-    SELECT
-        s.saleguid,
-        be.transaction_identifier_transactionid AS transactionid,
-        be.property_address AS propertyaddress,
-        s.saleprice AS skyslope_sale_price,
-        be.sale_price AS be_sale_price,
-        be.tags AS tags,
+            WITH base AS (
+                SELECT
+                    s.saleguid,
+                    be.transaction_identifier_transactionid AS transactionid,
+                    be.property_address AS propertyaddress,
+                    s.saleprice AS skyslope_sale_price,
+                    be.sale_price AS be_sale_price,
 
-        CASE 
-            WHEN s.saleguid IS NULL THEN 'no_skyslope_record'
-            WHEN s.saleprice IS DISTINCT FROM be.sale_price THEN 'mismatch'
-            ELSE 'match'
-        END AS match_result
+                    CASE 
+                        WHEN s.saleguid IS NULL THEN 'no_skyslope_record'
+                        WHEN s.saleprice IS DISTINCT FROM be.sale_price THEN 'mismatch'
+                        ELSE 'match'
+                    END AS match_result
 
-    FROM brokerage_engine be
-    LEFT JOIN sale s
-        ON s.saleguid = be.skyslopefileid
+                FROM brokerage_engine be
+                LEFT JOIN sale s
+                    ON s.saleguid = be.skyslopefileid
+            )
 
-    WHERE
-        COALESCE(LOWER(be.tags), '') NOT LIKE '%complete%'
-        AND COALESCE(LOWER(be.tags), '') NOT LIKE '%revoked%'
-)
-
-SELECT
-    saleguid,
-    transactionid,
-    propertyaddress,
-    skyslope_sale_price,
-    be_sale_price,
-    tags,
-    match_result
-FROM base
-ORDER BY saleguid;
+            SELECT
+                saleguid,
+                transactionid,
+                propertyaddress,
+                skyslope_sale_price,
+                be_sale_price,
+                match_result
+            FROM base
+            ORDER BY saleguid;
         """
 
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -55,10 +49,7 @@ ORDER BY saleguid;
                 FROM sale s
                 JOIN brokerage_engine be
                     ON s.saleguid = be.skyslopefileid
-                WHERE
-                    LOWER(be.tags) NOT LIKE '%complete%'
-                    AND LOWER(be.tags) NOT LIKE '%revoked%'
-                    AND s.saleprice IS DISTINCT FROM be.sale_price
+                WHERE s.saleprice IS DISTINCT FROM be.sale_price
             """)
             mismatch_count = cur.fetchone()["mismatch_count"]
 
@@ -85,8 +76,6 @@ def close_date():
                     s.escrowclosingdate AS skyslope_close_date,
                     be.closed_date AS be_close_date,
 
-                    be.tags AS tags,
-
                     CASE
                         WHEN s.saleguid IS NULL THEN 'no_skyslope_record'
                         WHEN s.escrowclosingdate IS DISTINCT FROM be.closed_date THEN 'mismatch'
@@ -96,10 +85,6 @@ def close_date():
                 FROM brokerage_engine be
                 LEFT JOIN sale s
                     ON s.saleguid = be.skyslopefileid
-
-                WHERE
-                    COALESCE(LOWER(be.tags), '') NOT LIKE '%complete%'
-                    AND COALESCE(LOWER(be.tags), '') NOT LIKE '%revoked%'
             )
 
             SELECT
@@ -108,7 +93,6 @@ def close_date():
                 propertyaddress,
                 skyslope_close_date,
                 be_close_date,
-                tags,
                 match_result
             FROM base
             ORDER BY saleguid;
@@ -123,10 +107,7 @@ def close_date():
                 FROM sale s
                 JOIN brokerage_engine be
                     ON s.saleguid = be.skyslopefileid
-                WHERE
-                    LOWER(be.tags) NOT LIKE '%complete%'
-                    AND LOWER(be.tags) NOT LIKE '%revoked%'
-                    AND s.escrowclosingdate IS DISTINCT FROM be.closed_date
+                WHERE s.escrowclosingdate IS DISTINCT FROM be.closed_date
             """)
             mismatch_count = cur.fetchone()["mismatch_count"]
 
@@ -153,8 +134,6 @@ def contract_date():
                     s.contractacceptancedate AS skyslope_contract_date,
                     be.contract_date AS be_contract_date,
 
-                    be.tags AS tags,
-
                     CASE
                         WHEN s.saleguid IS NULL THEN 'no_skyslope_record'
                         WHEN s.contractacceptancedate IS DISTINCT FROM be.contract_date THEN 'mismatch'
@@ -164,10 +143,6 @@ def contract_date():
                 FROM brokerage_engine be
                 LEFT JOIN sale s
                     ON s.saleguid = be.skyslopefileid
-
-                WHERE
-                    COALESCE(LOWER(be.tags), '') NOT LIKE '%complete%'
-                    AND COALESCE(LOWER(be.tags), '') NOT LIKE '%revoked%'
             )
 
             SELECT
@@ -190,10 +165,7 @@ def contract_date():
                 FROM sale s
                 JOIN brokerage_engine be
                     ON s.saleguid = be.skyslopefileid
-                WHERE
-                    LOWER(be.tags) NOT LIKE '%complete%'
-                    AND LOWER(be.tags) NOT LIKE '%revoked%'
-                    AND s.contractacceptancedate IS DISTINCT FROM be.contract_date
+                WHERE s.contractacceptancedate IS DISTINCT FROM be.contract_date
             """)
             mismatch_count = cur.fetchone()["mismatch_count"]
 
@@ -220,8 +192,6 @@ def listing_price():
                     s.listingprice AS skyslope_listing_price,
                     be.listing_price AS be_listing_price,
 
-                    be.tags AS tags,
-
                     CASE
                         WHEN s.saleguid IS NULL THEN 'no_skyslope_record'
                         WHEN s.listingprice IS NULL
@@ -237,10 +207,6 @@ def listing_price():
                 FROM brokerage_engine be
                 LEFT JOIN sale s
                     ON s.saleguid = be.skyslopefileid
-
-                WHERE
-                    COALESCE(LOWER(be.tags), '') NOT LIKE '%complete%'
-                    AND COALESCE(LOWER(be.tags), '') NOT LIKE '%revoked%'
             )
 
             SELECT
@@ -264,9 +230,7 @@ def listing_price():
                 JOIN brokerage_engine be
                     ON s.saleguid = be.skyslopefileid
                 WHERE
-                    LOWER(be.tags) NOT LIKE '%complete%'
-                    AND LOWER(be.tags) NOT LIKE '%revoked%'
-                    AND s.listingprice IS NOT NULL
+                    s.listingprice IS NOT NULL
                     AND be.listing_price IS NOT NULL
                     AND s.listingprice <> 0
                     AND be.listing_price <> 0
@@ -315,10 +279,6 @@ def compare_gross_commission():
 
                 LEFT JOIN sale_commission scn
                     ON scn.saleguid = s.saleguid
-
-                WHERE
-                    COALESCE(LOWER(be.tags), '') NOT LIKE '%complete%'
-                    AND COALESCE(LOWER(be.tags), '') NOT LIKE '%revoked%'
             )
 
             SELECT *
@@ -338,9 +298,7 @@ def compare_gross_commission():
                 JOIN brokerage_engine be
                     ON s.saleguid = be.skyslopefileid
                 WHERE
-                    LOWER(be.tags) NOT LIKE '%complete%'
-                    AND LOWER(be.tags) NOT LIKE '%revoked%'
-                    AND scn.officeGrossCommissionOnSale IS NOT NULL
+                    scn.officeGrossCommissionOnSale IS NOT NULL
                     AND be.total_gross_commission IS NOT NULL
                     AND scn.officeGrossCommissionOnSale <> 0
                     AND be.total_gross_commission <> 0
@@ -363,28 +321,24 @@ def transaction_reviewer_mapping():
 
     try:
         query = """
-SELECT
-    s.saleguid,
-    be.transaction_identifier_transactionid AS transactionid,
-    be.property_address AS propertyaddress,
+            SELECT
+                s.saleguid,
+                be.transaction_identifier_transactionid AS transactionid,
+                be.property_address AS propertyaddress,
 
-    COALESCE(r.firstname || ' ' || r.lastname, NULL) AS skyslope_reviewer_name,
+                COALESCE(r.firstname || ' ' || r.lastname, NULL) AS skyslope_reviewer_name,
 
-    be.transaction_specialist AS be_transaction_specialist
+                be.transaction_specialist AS be_transaction_specialist
 
-FROM brokerage_engine be
+            FROM brokerage_engine be
 
-LEFT JOIN sale s
-    ON s.saleguid = be.skyslopefileid
+            LEFT JOIN sale s
+                ON s.saleguid = be.skyslopefileid
 
-LEFT JOIN users r
-    ON s.reviewerguid = r.userguid
+            LEFT JOIN users r
+                ON s.reviewerguid = r.userguid
 
-WHERE
-    COALESCE(LOWER(be.tags), '') NOT LIKE '%complete%'
-    AND COALESCE(LOWER(be.tags), '') NOT LIKE '%revoked%'
-
-ORDER BY s.saleguid;
+            ORDER BY s.saleguid;
         """
 
         with conn.cursor(cursor_factory=RealDictCursor) as cur:

@@ -130,26 +130,62 @@ def compare_transaction_specialist(be, ss):
         return "null"
     return "match" if ss.lower() in be.lower() else "mismatch"
 
-#status comparison
+# status comparison
 STATUS_KEYWORDS = [
-    "Approved for Processing",
-    "Approved for Commission",
-    "Distribution Sent to Title",
-    "Commission Verified"
+    "FellThrough",
+    "Complete",
+    "Revoked",
+    "Open"
 ]
+
+
+def normalize_status(value):
+    if not value:
+        return None
+
+    v = value.lower()
+
+    if "complete" in v:
+        return "complete"
+    if "revoked" in v:
+        return "revoked"
+    if "closed" in v:
+        return "closed"
+    if "fellthrough" in v or "fell through" in v:
+        return "fell_through"
+    if "open" in v:
+        return "open"
+    if "pending" in v:
+        return "pending"
+
+    return v
+
 
 def extract_be_status(tags):
     if not tags:
-        return []
+        return ["Pending"]
 
-    tags_lower = tags.lower()
+    tags_lower = tags.lower().replace(" ", "")
 
-    found = [
-        status for status in STATUS_KEYWORDS
-        if status.lower() in tags_lower
-    ]
+    be_status_list = []
 
-    # always include Pending for this comparison logic
-    found.append("Pending")
+    # priority statuses
+    if "complete" in tags_lower:
+        be_status_list.append("Complete")
 
-    return found
+    if "revoked" in tags_lower:
+        be_status_list.append("Revoked")
+
+    if "fellthrough" in tags_lower:
+        be_status_list.append("FellThrough")
+
+    # Open → adds Pending (ONLY case where Pending is added)
+    if "open" in tags_lower:
+        be_status_list.append("Open")
+        be_status_list.append("Pending")
+
+    # if nothing matched at all
+    if not be_status_list:
+        be_status_list.append("Pending")
+
+    return list(dict.fromkeys(be_status_list))
