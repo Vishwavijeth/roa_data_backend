@@ -1,15 +1,12 @@
 from fastapi import APIRouter, HTTPException
-import csv, io, httpx
+import csv, io, httpx, os
 from db import get_conn
 from services.sync_helpers import build_row_values, INSERT_SQL
 
 router = APIRouter()
 
 BATCH_SIZE = 1000
-BE_CSV_URL = (
-    "https://transactions.roaworld.com/api/export/data-export/"
-    "690b6622e3021ece5b301c64"
-)
+BE_CSV_URL = os.getenv("BE_CSV_URL")
 
 
 @router.post("/sync/brokerage-engine")
