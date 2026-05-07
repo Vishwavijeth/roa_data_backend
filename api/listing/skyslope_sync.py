@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-SALES_FILTER_URL = "https://api.skyslope.com/api/files?modifiedAfter=2024-05-01T00:00:00&type=sale&page=1"
+SALES_FILTER_URL = "https://api.skyslope.com/api/files?modifiedAfter=2024-05-01T00:00:00&type=sale"
 
 REQUEST_TIMEOUT = 1000
 MAX_RETRIES = 3
