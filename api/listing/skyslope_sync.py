@@ -3,28 +3,68 @@ import logging
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
-from db import get_conn
-from services.session import get_session_token
+import os
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import psycopg2
 from psycopg2.extras import execute_values
-from fastapi import BackgroundTasks, APIRouter
+from fastapi import APIRouter
+from db import get_conn
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+from services.session import get_session_token
+
 router = APIRouter()
 
+SALES_BASE_URL = "https://api.skyslope.com/api/files"
+SALES_FILTER_TYPE = "sale"
+DEFAULT_SYNC_DATE = "2026-04-01"  # Fallback date if no sync state exists
+SYNC_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sync_state.json")
 
-SALES_FILTER_URL = "https://api.skyslope.com/api/files?modifiedAfter=2024-05-01T00:00:00&type=sale"
-
-REQUEST_TIMEOUT = 1000
+REQUEST_TIMEOUT = 300
 MAX_RETRIES = 3
 BACKOFF_FACTOR = 2
 DEFAULT_NUM_WORKERS = 10
 BATCH_SIZE = 100
+
+
+def get_last_sync_date() -> str:
+    """
+    Read the last sync date from sync_state.json.
+    Returns the stored date string (YYYY-MM-DD) or the DEFAULT_SYNC_DATE if the file
+    does not exist or is invalid.
+    """
+    try:
+        if os.path.exists(SYNC_STATE_FILE):
+            with open(SYNC_STATE_FILE, "r") as f:
+                state = json.load(f)
+                date_str = state.get("last_sync_date", "")
+                if date_str:
+                    # Validate the stored date
+                    datetime.strptime(date_str, "%Y-%m-%d")
+                    logger.info(f"Last sync date loaded: {date_str}")
+                    return date_str
+    except (json.JSONDecodeError, ValueError, OSError) as e:
+        logger.warning(f"Could not read sync state file, using default: {e}")
+    logger.info(f"No valid sync state found. Using default date: {DEFAULT_SYNC_DATE}")
+    return DEFAULT_SYNC_DATE
+
+
+def update_sync_date():
+    """
+    Write today's date as the new last_sync_date in sync_state.json.
+    Called after a successful sync run.
+    """
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    try:
+        with open(SYNC_STATE_FILE, "w") as f:
+            json.dump({"last_sync_date": today, "updated_at": datetime.utcnow().isoformat()}, f, indent=2)
+        logger.info(f"Sync date updated to: {today}")
+    except OSError as e:
+        logger.error(f"Failed to update sync state file: {e}")
 
 
 def build_session():
@@ -418,7 +458,12 @@ def fetch_api(url):
 
 def fetch_sales():
     sales = []
-    url = SALES_FILTER_URL
+
+    # Build the filter URL dynamically using the stored sync date
+    sync_date = get_last_sync_date()
+    modified_after = f"{sync_date}T00:00:00"
+    url = f"{SALES_BASE_URL}?modifiedAfter={modified_after}&type={SALES_FILTER_TYPE}"
+    logger.info(f"Fetching sales modified after: {modified_after}")
 
     try:
         token = get_session_token()
@@ -1096,26 +1141,21 @@ def process_sale_batch(sales_batch, worker_id):
 
 
 @router.post("/sync/skyslope-sales")
-def trigger_sales_sync(background_tasks: BackgroundTasks):
-    background_tasks.add_task(run_sync_job)
-    return {"message": "SkySlope Sales sync started in the background."}
-
-def run_sync_job():
+def trigger_sales_sync():
     global processed_count, saved_count_global, error_count_global
     processed_count = 0
     saved_count_global = 0
     error_count_global = 0
 
-    logger.info("Starting background sync job...")
+    logger.info("Starting sync job...")
     sales = fetch_sales()
     if not sales:
         logger.info("No sales found to sync.")
-        return
+        return {"message": "No sales found to sync.", "saved": 0, "errors": 0}
 
     total_sales = len(sales)
     logger.info(f"Found {total_sales} sales to process.")
 
-    # Process all sales in parallel batches (direct upsert, no copy tables)
     batches = [sales[i:i + BATCH_SIZE] for i in range(0, total_sales, BATCH_SIZE)]
 
     with ThreadPoolExecutor(max_workers=DEFAULT_NUM_WORKERS) as executor:
@@ -1131,3 +1171,12 @@ def run_sync_job():
 
     logger.info(f"Sync completed! Saved: {saved_count_global}, Errors: {error_count_global}")
 
+    # Update the sync date to today so the next run only fetches new/changed records
+    update_sync_date()
+
+    return {
+        "message": "Sync completed successfully.",
+        "total_fetched": total_sales,
+        "saved": saved_count_global,
+        "errors": error_count_global,
+    }
