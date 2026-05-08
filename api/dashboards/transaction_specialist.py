@@ -17,6 +17,7 @@ def transaction_specialist_dashboard(
         SELECT
             COALESCE(be.transaction_specialist, 'Unassigned') AS transaction_specialist,
 
+            -- outstanding
             COUNT(*) FILTER (
                 WHERE NOT (
                     LOWER(COALESCE(be.tags, '')) LIKE '%%complete%%' OR
@@ -24,11 +25,32 @@ def transaction_specialist_dashboard(
                 )
             ) AS transactions_outstanding,
 
+            -- closed
             COUNT(*) FILTER (
                 WHERE
                     LOWER(COALESCE(be.tags, '')) LIKE '%%complete%%' OR
                     LOWER(COALESCE(be.tags, '')) LIKE '%%revoked%%'
-            ) AS transactions_closed
+            ) AS transactions_closed,
+
+            -- open
+            COUNT(*) FILTER (
+                WHERE LOWER(COALESCE(be.tags, '')) LIKE '%%open%%'
+            ) AS open_count,
+
+            -- commission verified
+            COUNT(*) FILTER (
+                WHERE LOWER(COALESCE(be.tags, '')) LIKE '%%commissionverified%%'
+            ) AS commission_verified_count,
+
+            -- cda sent
+            COUNT(*) FILTER (
+                WHERE LOWER(COALESCE(be.tags, '')) LIKE '%%cdasent%%'
+            ) AS cda_sent_count,
+
+            -- title payment received
+            COUNT(*) FILTER (
+                WHERE LOWER(COALESCE(be.tags, '')) LIKE '%%titlepaymentreceived%%'
+            ) AS title_payment_received_count
 
         FROM brokerage_engine be
         WHERE 1=1
