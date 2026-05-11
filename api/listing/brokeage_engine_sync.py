@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 import csv, io, httpx, os
 from db import get_conn
+from datetime import datetime
 from services.sync_helpers import build_row_values, INSERT_SQL
 
 router = APIRouter()
@@ -76,6 +77,22 @@ async def sync_brokerage_engine():
             except Exception as flush_err:
                 conn.rollback()
                 errors.append(f"Final batch flush error: {flush_err}")
+        
+        now = datetime.now()
+        cur.execute(
+            """
+            INSERT INTO brokerage_sync (
+                sync_date,
+                sync_timestamp
+            )
+            VALUES (%s, %s)
+            """,
+            (
+                now.date(),
+                now
+            )
+        )
+        conn.commit()
 
     finally:
         cur.close()
