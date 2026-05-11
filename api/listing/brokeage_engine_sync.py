@@ -2,7 +2,6 @@ from fastapi import APIRouter, HTTPException
 import csv, io, httpx, os
 from db import get_conn
 from datetime import datetime
-from zoneinfo import ZoneInfo
 from services.sync_helpers import build_row_values, INSERT_SQL
 
 router = APIRouter()
@@ -79,7 +78,7 @@ async def sync_brokerage_engine():
                 conn.rollback()
                 errors.append(f"Final batch flush error: {flush_err}")
         
-        now = datetime.now(ZoneInfo("Asia/Kolkata"))
+        now = datetime.now()
         cur.execute(
             """
             UPDATE brokerage_sync
