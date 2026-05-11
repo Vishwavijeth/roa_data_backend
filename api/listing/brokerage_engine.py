@@ -1,11 +1,18 @@
 from fastapi import HTTPException, APIRouter
 from services.engine import run_brokerage_engine, load_data
+from services.loaders import get_last_sync
 
 router = APIRouter()
 
 @router.get("/brokerage_engine")
 def brokerage_engine():
-    return run_brokerage_engine()
+    data =  run_brokerage_engine()
+    sync_info = get_last_sync()
+
+    return {
+        "sync_info": sync_info,
+        "data": data
+    }
 
 def norm(x):
     return str(x or "").replace("\u00A0", "").strip().lower()
