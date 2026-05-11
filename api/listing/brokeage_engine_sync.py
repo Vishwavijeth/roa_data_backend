@@ -81,11 +81,11 @@ async def sync_brokerage_engine():
         now = datetime.now()
         cur.execute(
             """
-            INSERT INTO brokerage_sync (
-                sync_date,
-                sync_timestamp
-            )
-            VALUES (%s, %s)
+            UPDATE brokerage_sync
+            SET
+                sync_date = %s,
+                sync_timestamp = %s
+            WHERE id = 1
             """,
             (
                 now.date(),
