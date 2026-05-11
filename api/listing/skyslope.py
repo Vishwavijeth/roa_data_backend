@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from services.engine import get_skyslope_data, load_data
+from services.loaders import get_skyslope_sync
 
 router = APIRouter()
 
@@ -8,7 +9,13 @@ def norm(x):
 
 @router.get("/skyslope_api")
 def skyslope_api():
-    return get_skyslope_data()
+    data =  get_skyslope_data()
+    sync_info = get_skyslope_sync()
+
+    return {
+        "sync_info": sync_info,
+        "data": data
+    }
 
 @router.get("/skyslope/detail")
 def skyslope_detail(saleguid: str):

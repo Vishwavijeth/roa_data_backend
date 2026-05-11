@@ -21,7 +21,7 @@ router = APIRouter()
 
 SALES_BASE_URL = "https://api.skyslope.com/api/files"
 SALES_FILTER_TYPE = "sale"
-DEFAULT_SYNC_DATE = "2026-04-01"  # Fallback date if no record exists in DB yet
+DEFAULT_SYNC_DATE = "2026-05-05"  # Fallback date if no record exists in DB yet
 
 REQUEST_TIMEOUT = 300
 MAX_RETRIES = 3
@@ -30,57 +30,73 @@ DEFAULT_NUM_WORKERS = 10
 BATCH_SIZE = 100
 
 
+from datetime import datetime
+
 def get_last_sync_date() -> str:
     """
-    Read the last sync date from the sync_state table in the database.
-    Returns the stored date string (YYYY-MM-DD) or DEFAULT_SYNC_DATE if no record exists.
+    Returns last sync date (YYYY-MM-DD).
+    If not present, returns DEFAULT_SYNC_DATE.
+    Ensures a single-row sync tracker exists (id = 1).
     """
+
     try:
         conn = get_conn()
         cur = conn.cursor()
+
+        # 1. Ensure table exists
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS sync_state (
-                key varchar PRIMARY KEY,
-                value varchar,
-                updated_at timestamp
+            CREATE TABLE IF NOT EXISTS skyslope_sync (
+                id serial PRIMARY KEY,
+                sync_date date,
+                sync_timestamp timestamp
             )
         """)
-        conn.commit()
-        cur.execute("SELECT value FROM sync_state WHERE key = 'skyslope_sales_last_sync_date'")
+
+        cur.execute("""
+            SELECT sync_date
+            FROM skyslope_sync
+            WHERE id = 1
+        """)
         row = cur.fetchone()
+
         cur.close()
         conn.close()
+
         if row and row[0]:
-            date_str = row[0]
-            datetime.strptime(date_str, "%Y-%m-%d")  # Validate
+            sync_date = row[0]  # already a date object
+
+            date_str = sync_date.strftime("%Y-%m-%d")
+
             logger.info(f"Last sync date loaded from DB: {date_str}")
             return date_str
+
     except Exception as e:
         logger.warning(f"Could not read sync date from DB, using default: {e}")
+
     logger.info(f"No sync date found in DB. Using default: {DEFAULT_SYNC_DATE}")
     return DEFAULT_SYNC_DATE
 
 
 def update_sync_date():
-    """
-    Write today's date as the new last_sync_date into the sync_state DB table.
-    Called after a successful sync run.
-    """
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    now = datetime.now()
     try:
         conn = get_conn()
         cur = conn.cursor()
+
         cur.execute("""
-            INSERT INTO sync_state (key, value, updated_at)
-            VALUES ('skyslope_sales_last_sync_date', %s, NOW())
-            ON CONFLICT (key) DO UPDATE SET
-                value = EXCLUDED.value,
-                updated_at = EXCLUDED.updated_at
-        """, (today,))
+            UPDATE skyslope_sync
+            SET
+                sync_date = %s,
+                sync_timestamp = NOW()
+            WHERE id = 1
+        """, (now.date(),))   # <-- FIX: single value tuple
+
         conn.commit()
         cur.close()
         conn.close()
-        logger.info(f"Sync date updated in DB to: {today}")
+
+        logger.info(f"Sync date updated in DB to: {now.date()}")
+
     except Exception as e:
         logger.error(f"Failed to update sync date in DB: {e}")
 

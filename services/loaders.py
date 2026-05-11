@@ -1,6 +1,7 @@
 from psycopg2.extras import RealDictCursor
 from db import get_conn
-
+from datetime import timezone
+from zoneinfo import ZoneInfo
 
 def load_data():
     conn = get_conn()
@@ -133,12 +134,10 @@ def get_be(conn):
         cur.execute(query)
         return cur.fetchall()
     
-from datetime import timezone
-from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
 
-def get_last_sync():
+def get_be_sync():
     conn = get_conn()
     cur = conn.cursor()
 
@@ -158,13 +157,45 @@ def get_last_sync():
         sync_ts_str = None
 
         if sync_ts:
-            # treat DB timestamp as UTC
             sync_ts = sync_ts.replace(tzinfo=timezone.utc)
 
-            # convert to IST
             sync_ts = sync_ts.astimezone(IST)
 
-            # only time, no microseconds
+            sync_ts_str = sync_ts.strftime("%H:%M:%S")
+
+        return {
+            "sync_date": sync_date,
+            "sync_timestamp": sync_ts_str
+        }
+
+    finally:
+        cur.close()
+        conn.close()
+
+def get_skyslope_sync():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("""
+            SELECT sync_date, sync_timestamp
+            FROM skyslope_sync
+        """)
+
+        row = cur.fetchone()
+
+        if not row:
+            return None
+
+        sync_date, sync_ts = row
+
+        sync_ts_str = None
+
+        if sync_ts:
+            sync_ts = sync_ts.replace(tzinfo=timezone.utc)
+
+            sync_ts = sync_ts.astimezone(IST)
+
             sync_ts_str = sync_ts.strftime("%H:%M:%S")
 
         return {
