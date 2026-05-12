@@ -61,14 +61,15 @@ INSERT INTO brokerage_engine (
     closed_date,
     finalized_date,
     skyslopefileid,
-    transaction_specialist
+    transaction_specialist,
+    transaction_status
 ) VALUES (
     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-    %s, %s, %s, %s, %s, %s, %s
+    %s, %s, %s, %s, %s, %s, %s, %s
 )
 ON CONFLICT (transaction_identifier_transactionid) DO UPDATE SET
     transaction_identifier_transactionguid = EXCLUDED.transaction_identifier_transactionguid,
@@ -126,7 +127,8 @@ ON CONFLICT (transaction_identifier_transactionid) DO UPDATE SET
     closed_date                            = EXCLUDED.closed_date,
     finalized_date                         = EXCLUDED.finalized_date,
     skyslopefileid                         = EXCLUDED.skyslopefileid,
-    transaction_specialist                 = EXCLUDED.transaction_specialist
+    transaction_specialist                 = EXCLUDED.transaction_specialist,
+    transaction_status                     = EXCLUDED.transaction_status
 """
 
 # ──────────────────────────────────────────────
@@ -289,4 +291,5 @@ def build_row_values(row: dict) -> list:
         transform("SkySlopeFileID",                         row.get("SkySlopeFileID", "")),
         # CSV header has a space: "Transaction Specialist"
         transform("Transaction_Specialist",                 row.get("Transaction Specialist", "")),
+        transform("Transaction_Status",                     row.get("Transaction_Status", "")),
     ]
