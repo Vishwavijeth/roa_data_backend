@@ -392,7 +392,7 @@ def status():
                 transactionid,
                 propertyaddress,
                 be_status,
-                sale_status,
+                skyslope_status,
                 match_result
             FROM base
             ORDER BY saleguid;
