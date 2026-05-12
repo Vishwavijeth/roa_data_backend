@@ -364,7 +364,7 @@ def status():
                     be.transaction_identifier_transactionid AS transactionid,
                     be.property_address AS propertyaddress,
                     be.transaction_status AS be_status,
-                    s.status AS sale_status,
+                    s.status AS skyslope_status,
 
                     CASE
                         -- both null handling (optional safety)
