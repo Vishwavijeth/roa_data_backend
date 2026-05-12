@@ -60,6 +60,7 @@ def brokerage_detail(transactionid: str):
             "contract_date": be_record.get("contract_date"),
             "closed_date": be_record.get("closed_date"),
             "tags": be_record.get("tags"),
+            "status": be_record.get("transaction_status"),
             "transaction_specialist": be_record.get("transaction_specialist"),
             "skyslopefileid": skyslopefileid
         },

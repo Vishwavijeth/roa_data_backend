@@ -126,7 +126,8 @@ def get_be(conn):
             transaction_specialist,
             property_address,
             skyslopefileid,
-            da_title_company
+            da_title_company,
+            transaction_status
         FROM brokerage_engine
      """
 

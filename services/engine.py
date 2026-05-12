@@ -183,49 +183,6 @@ WORKFLOW_STATUSES = [
     "Commission Verified",
 ]
 
-def extract_brokerage_status(tags):
-
-    if not tags:
-        return ["Pending"]
-
-    # normalize tags
-    if isinstance(tags, list):
-        tag_list = tags
-    else:
-        try:
-            tag_list = json.loads(tags)
-            if not isinstance(tag_list, list):
-                tag_list = [str(tag_list)]
-        except:
-            tag_list = [t.strip() for t in str(tags).split(",")]
-
-    found = set()
-
-    has_terminal = False  # Complete or Revoked flag
-
-    for tag in tag_list:
-        t = str(tag).lower()
-
-        # terminal statuses
-        if "complete" in t:
-            found.add("Complete")
-            has_terminal = True
-
-        if "revoked" in t:
-            found.add("Revoked")
-            has_terminal = True
-
-        # workflow statuses
-        for ws in WORKFLOW_STATUSES:
-            if ws.lower() in t:
-                found.add(ws)
-
-    # if NO complete/revoked → ONLY Pending (ignore workflow entirely)
-    if not has_terminal:
-        return ["Pending"]
-
-    return list(found)
-
 def run_brokerage_engine():
 
     _, be_data = load_data()
@@ -233,9 +190,6 @@ def run_brokerage_engine():
     results = []
 
     for b in be_data:
-
-        status_list = extract_brokerage_status(b.get("tags"))
-        be_status = ", ".join(status_list)
 
         results.append({
             "transactionid": b.get("transaction_identifier_transactionid"),
@@ -245,7 +199,7 @@ def run_brokerage_engine():
             "contract_date": b.get("contract_date"),
             "close_date": b.get("closed_date"),
             "transaction_specialist": b.get("transaction_specialist"),
-            "status": be_status,
+            "status": b.get("transaction_status"),  # direct mapping
             "skyslopefileid": b.get("skyslopefileid")
         })
 
