@@ -351,3 +351,74 @@ def transaction_reviewer_mapping():
 
     finally:
         conn.close()
+
+@router.get("/compare/status")
+def status():
+    conn = get_conn()
+
+    try:
+        query = """
+            WITH base AS (
+                SELECT
+                    s.saleguid,
+                    be.transaction_identifier_transactionid AS transactionid,
+                    be.property_address AS propertyaddress,
+                    be.transaction_status AS be_status,
+                    s.status AS sale_status,
+
+                    CASE
+                        -- both null handling (optional safety)
+                        WHEN be.transaction_status IS NULL AND s.status IS NULL THEN 'match'
+
+                        -- normalize cancelled variations
+                        WHEN LOWER(be.transaction_status) IN ('cancelled', 'canceled')
+                             AND LOWER(s.status) IN ('canceled', 'cancelled', 'canceled/pend', 'canceled/app')
+                        THEN 'match'
+
+                        -- direct match
+                        WHEN LOWER(be.transaction_status) = LOWER(s.status)
+                        THEN 'match'
+
+                        ELSE 'mismatch'
+                    END AS match_result
+
+                FROM brokerage_engine be
+                LEFT JOIN sale s
+                    ON s.saleguid = be.skyslopefileid
+            )
+
+            SELECT
+                saleguid,
+                transactionid,
+                propertyaddress,
+                be_status,
+                sale_status,
+                match_result
+            FROM base
+            ORDER BY saleguid;
+        """
+
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query)
+            rows = cur.fetchall()
+
+            cur.execute("""
+                SELECT COUNT(*) AS mismatch_count
+                FROM brokerage_engine be
+                LEFT JOIN sale s
+                    ON s.saleguid = be.skyslopefileid
+                WHERE NOT (
+                    (LOWER(be.transaction_status) IN ('cancelled', 'canceled')
+                     AND LOWER(s.status) IN ('canceled', 'cancelled', 'canceled/pend', 'canceled/app'))
+                    OR LOWER(be.transaction_status) = LOWER(s.status)
+                )
+            """)
+            mismatch_count = cur.fetchone()["mismatch_count"]
+
+        return {
+            "mismatch_count": mismatch_count,
+            "data": rows
+        }
+
+    finally:
+        conn.close()

@@ -18,31 +18,8 @@ def transaction_specialist_listing():
             be.listing_price AS listing_price,
             be.closed_date AS be_closed_date,
 
-            -- workflow status (ONLY complete, revoked, pending)
-            TRIM(
-                CONCAT_WS(', ',
-
-                    CASE
-                        WHEN LOWER(COALESCE(be.tags, '')) LIKE '%complete%'
-                        THEN 'Complete'
-                    END,
-
-                    CASE
-                        WHEN LOWER(COALESCE(be.tags, '')) LIKE '%revoked%'
-                        THEN 'Revoked'
-                    END,
-
-                    CASE
-                        WHEN NOT (
-                            LOWER(COALESCE(be.tags, '')) LIKE '%complete%' OR
-                            LOWER(COALESCE(be.tags, '')) LIKE '%revoked%'
-                        )
-                        THEN 'Pending'
-                    END
-
-                )
-            ) AS be_workflow_status,
-
+            be.transaction_status AS be_workflow_status,
+            
             be.transaction_specialist AS transaction_specialist,
             be.skyslopefileid AS skyslopefileid
 

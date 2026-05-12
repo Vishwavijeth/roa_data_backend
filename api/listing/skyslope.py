@@ -83,6 +83,7 @@ def skyslope_detail(saleguid: str):
             "contract_date": be_record.get("contract_date") if be_record else None,
             "closed_date": be_record.get("closed_date") if be_record else None,
             "tags": be_record.get("tags") if be_record else None,
+            "status": be_record.get("transaction_status") if be_record else None,
             "transaction_specialist": be_record.get("transaction_specialist") if be_record else None,
             "skyslopefileid": be_record.get("skyslopefileid") if be_record else None
         }
