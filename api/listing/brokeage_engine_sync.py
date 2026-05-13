@@ -79,19 +79,21 @@ async def sync_brokerage_engine():
                 errors.append(f"Final batch flush error: {flush_err}")
         
         now = datetime.now()
+
         cur.execute(
             """
-            UPDATE brokerage_sync
-            SET
-                sync_date = %s,
-                sync_timestamp = %s
-            WHERE id = 1
+            INSERT INTO brokerage_sync (
+                sync_date,
+                sync_timestamp
+            )
+            VALUES (%s, %s)
             """,
             (
                 now.date(),
                 now
             )
         )
+
         conn.commit()
 
     finally:
