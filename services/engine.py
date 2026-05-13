@@ -87,62 +87,6 @@ def run_field(field_name: str):
         transaction_id = b.get("transaction_identifier_transactionid")
         property_address = b.get("property_address")
 
-        # ---------------- STATUS ----------------
-        if field_name == "status":
-
-            skyslope_status = s.get("status") if s else None
-            be_tags = b.get("tags") or ""
-
-            tags_lower = be_tags.lower().replace(" ", "")
-
-            be_status_list = []
-
-            # Complete
-            if "complete" in tags_lower:
-                be_status_list.append("Complete")
-
-            # Revoked
-            if "revoked" in tags_lower:
-                be_status_list.append("Revoked")
-
-            # FellThrough (NO pending)
-            if "fellthrough" in tags_lower:
-                be_status_list.append("FellThrough")
-
-            # Open → adds Pending
-            if "open" in tags_lower:
-                be_status_list.append("Open")
-                be_status_list.append("Pending")
-
-            # fallback only if nothing matched
-            if not be_status_list:
-                be_status_list.append("Pending")
-
-            be_status_list = list(dict.fromkeys(be_status_list))
-            be_status = ", ".join(be_status_list)
-
-            # ---------------- MATCH LOGIC ----------------
-            if not s:
-                match_result = "no_skyslope_record"
-            else:
-                if "Complete" in be_status_list and skyslope_status == "Closed":
-                    match_result = "match"
-                elif skyslope_status and skyslope_status in be_status_list:
-                    match_result = "match"
-                else:
-                    match_result = "mismatch"
-
-            results.append({
-                "saleguid": skyslope_saleguid,
-                "transactionid": transaction_id,
-                "propertyaddress": property_address,
-                "skyslope_status": skyslope_status,
-                "be_status": be_status,
-                "match_result": match_result
-            })
-
-            continue
-
         # ---------------- GENERIC FIELDS ----------------
         config = FIELD_MAP[field_name]
 

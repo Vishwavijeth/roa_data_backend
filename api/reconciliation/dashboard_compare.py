@@ -367,15 +367,9 @@ def status():
                     s.status AS skyslope_status,
 
                     CASE
-                        -- both null handling (optional safety)
-                        WHEN be.transaction_status IS NULL AND s.status IS NULL THEN 'match'
+                        -- new requirement
+                        WHEN s.saleguid IS NULL THEN 'no_skyslope_record'
 
-                        -- normalize cancelled variations
-                        WHEN LOWER(be.transaction_status) IN ('cancelled', 'canceled')
-                             AND LOWER(s.status) IN ('canceled', 'cancelled', 'canceled/pend', 'canceled/app')
-                        THEN 'match'
-
-                        -- direct match
                         WHEN LOWER(be.transaction_status) = LOWER(s.status)
                         THEN 'match'
 
@@ -408,11 +402,17 @@ def status():
                 LEFT JOIN sale s
                     ON s.saleguid = be.skyslopefileid
                 WHERE NOT (
-                    (LOWER(be.transaction_status) IN ('cancelled', 'canceled')
-                     AND LOWER(s.status) IN ('canceled', 'cancelled', 'canceled/pend', 'canceled/app'))
+                    (be.transaction_status IS NULL AND s.status IS NULL)
+
+                    OR (
+                        LOWER(be.transaction_status) IN ('cancelled', 'canceled')
+                        AND LOWER(s.status) IN ('canceled', 'cancelled', 'canceled/pend', 'canceled/app')
+                    )
+
                     OR LOWER(be.transaction_status) = LOWER(s.status)
                 )
             """)
+
             mismatch_count = cur.fetchone()["mismatch_count"]
 
         return {
