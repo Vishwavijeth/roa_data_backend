@@ -34,36 +34,38 @@ from datetime import datetime
 
 def get_last_sync_date() -> str:
     """
-    Returns last sync date (YYYY-MM-DD).
+    Returns latest sync date (YYYY-MM-DD).
     If not present, returns DEFAULT_SYNC_DATE.
-    Ensures a single-row sync tracker exists (id = 1).
     """
 
     try:
         conn = get_conn()
         cur = conn.cursor()
 
-        # 1. Ensure table exists
+        # ensure table exists
         cur.execute("""
             CREATE TABLE IF NOT EXISTS skyslope_sync (
                 id serial PRIMARY KEY,
                 sync_date date,
-                sync_timestamp timestamp
+                sync_timestamp timestamp DEFAULT NOW()
             )
         """)
 
+        # get most recently inserted row
         cur.execute("""
             SELECT sync_date
             FROM skyslope_sync
-            WHERE id = 1
+            ORDER BY id DESC
+            LIMIT 1
         """)
+
         row = cur.fetchone()
 
         cur.close()
         conn.close()
 
         if row and row[0]:
-            sync_date = row[0]  # already a date object
+            sync_date = row[0]
 
             date_str = sync_date.strftime("%Y-%m-%d")
 
@@ -79,26 +81,29 @@ def get_last_sync_date() -> str:
 
 def update_sync_date():
     now = datetime.now()
+
     try:
         conn = get_conn()
         cur = conn.cursor()
 
+        # insert new row instead of update
         cur.execute("""
-            UPDATE skyslope_sync
-            SET
-                sync_date = %s,
-                sync_timestamp = NOW()
-            WHERE id = 1
-        """, (now.date(),))   # <-- FIX: single value tuple
+            INSERT INTO skyslope_sync (
+                sync_date,
+                sync_timestamp
+            )
+            VALUES (%s, NOW())
+        """, (now.date(),))
 
         conn.commit()
+
         cur.close()
         conn.close()
 
-        logger.info(f"Sync date updated in DB to: {now.date()}")
+        logger.info(f"Sync date inserted into DB: {now.date()}")
 
     except Exception as e:
-        logger.error(f"Failed to update sync date in DB: {e}")
+        logger.error(f"Failed to insert sync date into DB: {e}")
 
 
 def build_session():
