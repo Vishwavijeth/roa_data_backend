@@ -17,39 +17,38 @@ def transaction_specialist_dashboard(
         SELECT
             COALESCE(be.transaction_specialist, 'Unassigned') AS transaction_specialist,
 
-            -- outstanding
+            -- total outstanding (pending only)
             COUNT(*) FILTER (
-                WHERE NOT (
-                    LOWER(COALESCE(be.tags, '')) LIKE '%%complete%%' OR
-                    LOWER(COALESCE(be.tags, '')) LIKE '%%revoked%%'
-                )
+                WHERE LOWER(COALESCE(be.transaction_status, '')) = 'pending'
             ) AS transactions_outstanding,
 
             -- closed
             COUNT(*) FILTER (
-                WHERE
-                    LOWER(COALESCE(be.tags, '')) LIKE '%%complete%%' OR
-                    LOWER(COALESCE(be.tags, '')) LIKE '%%revoked%%'
+                WHERE LOWER(COALESCE(be.transaction_status, '')) = 'closed'
             ) AS transactions_closed,
 
-            -- open
+            -- open (only within pending)
             COUNT(*) FILTER (
-                WHERE LOWER(COALESCE(be.tags, '')) LIKE '%%open%%'
+                WHERE LOWER(COALESCE(be.transaction_status, '')) = 'pending'
+                AND LOWER(COALESCE(be.tags, '')) LIKE '%%open%%'
             ) AS open_count,
 
-            -- commission verified
+            -- commission verified (only pending)
             COUNT(*) FILTER (
-                WHERE LOWER(COALESCE(be.tags, '')) LIKE '%%commissionverified%%'
+                WHERE LOWER(COALESCE(be.transaction_status, '')) = 'pending'
+                AND LOWER(COALESCE(be.tags, '')) LIKE '%%commissionverified%%'
             ) AS commission_verified_count,
 
-            -- cda sent
+            -- cda sent (only pending)
             COUNT(*) FILTER (
-                WHERE LOWER(COALESCE(be.tags, '')) LIKE '%%cdasent%%'
+                WHERE LOWER(COALESCE(be.transaction_status, '')) = 'pending'
+                AND LOWER(COALESCE(be.tags, '')) LIKE '%%cdasent%%'
             ) AS cda_sent_count,
 
-            -- title payment received
+            -- title payment received (only pending)
             COUNT(*) FILTER (
-                WHERE LOWER(COALESCE(be.tags, '')) LIKE '%%titlepaymentreceived%%'
+                WHERE LOWER(COALESCE(be.transaction_status, '')) = 'pending'
+                AND LOWER(COALESCE(be.tags, '')) LIKE '%%titlepaymentreceived%%'
             ) AS title_payment_received_count
 
         FROM brokerage_engine be
@@ -58,7 +57,6 @@ def transaction_specialist_dashboard(
 
         params = []
 
-        # date filter
         if from_date:
             query += " AND be.closed_date::date >= %s"
             params.append(from_date)
@@ -67,7 +65,6 @@ def transaction_specialist_dashboard(
             query += " AND be.closed_date::date <= %s"
             params.append(to_date)
 
-        # state filter
         if state:
             query += " AND LOWER(COALESCE(be.state, '')) = LOWER(%s)"
             params.append(state)
