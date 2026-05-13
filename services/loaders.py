@@ -146,6 +146,8 @@ def get_be_sync():
         cur.execute("""
             SELECT sync_date, sync_timestamp
             FROM brokerage_sync
+            ORDER BY sync_timestamp DESC
+            LIMIT 1
         """)
 
         row = cur.fetchone()
@@ -159,9 +161,7 @@ def get_be_sync():
 
         if sync_ts:
             sync_ts = sync_ts.replace(tzinfo=timezone.utc)
-
             sync_ts = sync_ts.astimezone(IST)
-
             sync_ts_str = sync_ts.strftime("%H:%M:%S")
 
         return {
@@ -181,6 +181,8 @@ def get_skyslope_sync():
         cur.execute("""
             SELECT sync_date, sync_timestamp
             FROM skyslope_sync
+            ORDER BY sync_timestamp DESC
+            LIMIT 1
         """)
 
         row = cur.fetchone()
@@ -194,9 +196,7 @@ def get_skyslope_sync():
 
         if sync_ts:
             sync_ts = sync_ts.replace(tzinfo=timezone.utc)
-
             sync_ts = sync_ts.astimezone(IST)
-
             sync_ts_str = sync_ts.strftime("%H:%M:%S")
 
         return {
