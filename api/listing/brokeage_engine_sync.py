@@ -1,5 +1,7 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 import csv, io, httpx, os
+from datetime import timezone
+from zoneinfo import ZoneInfo
 from db import get_conn
 from datetime import datetime
 from services.sync_helpers import build_row_values, INSERT_SQL
@@ -103,3 +105,57 @@ async def sync_brokerage_engine():
         "total_upserted": total_upserted,
         "error_message": error_message
     }
+
+@router.get("/brokerage_sync_logs")
+def get_brokerage_sync_logs():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("""
+            SELECT 
+                sync_date,
+                sync_timestamp,
+                status
+            FROM brokerage_sync
+            ORDER BY sync_timestamp DESC
+        """)
+
+        rows = cur.fetchall()
+
+        result = []
+
+        ist_timezone = ZoneInfo("Asia/Kolkata")
+
+        for row in rows:
+            sync_date, sync_timestamp, status = row
+
+            sync_time = None
+
+            if sync_timestamp:
+                # UTC -> IST
+                utc_time = sync_timestamp.replace(tzinfo=timezone.utc)
+                ist_time = utc_time.astimezone(ist_timezone)
+
+                # only time
+                sync_time = ist_time.strftime("%H:%M:%S")
+
+            result.append({
+                "sync_date": str(sync_date),
+                "sync_time": sync_time,
+                "status": status
+            })
+
+        return {
+            "count": len(result),
+            "data": result
+        }
+
+    except Exception as e:
+        return {
+            "error": str(e)
+        }
+
+    finally:
+        cur.close()
+        conn.close()
