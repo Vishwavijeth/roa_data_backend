@@ -191,12 +191,22 @@ def get_cda_sent(filter: str = Query("all", enum=["all", "mismatch"])):
             """)
             summary = cur.fetchone()
 
+            cur.execute("""
+                SELECT COUNT(*) AS no_skyslope_record
+                FROM brokerage_engine be
+                LEFT JOIN sale s ON s.saleguid = be.skyslopefileid
+                WHERE be.tags LIKE '%CdaSent%'
+                AND be.skyslopefileid IS NULL
+            """)
+            no_skyslope = cur.fetchone()
+
         stale_count = sum(1 for row in reshaped_rows if row["is_stale"])
 
         return {
             "filter": filter,
             "total_cda_sent": summary["total_cda_sent"],
             "unmatched_count": stale_count,
+            "no_skyslope_record": no_skyslope["no_skyslope_record"],
             "data": reshaped_rows,
         }
 
