@@ -47,7 +47,9 @@ def get_last_sync_date() -> str:
             CREATE TABLE IF NOT EXISTS skyslope_sync (
                 id serial PRIMARY KEY,
                 sync_date date,
-                sync_timestamp timestamp DEFAULT NOW()
+                sync_timestamp timestamp,
+                status varchar,
+                error_message varchar
             )
         """)
 
@@ -90,10 +92,11 @@ def update_sync_date():
         cur.execute("""
             INSERT INTO skyslope_sync (
                 sync_date,
-                sync_timestamp
+                sync_timestamp,
+                status
             )
-            VALUES (%s, NOW())
-        """, (now.date(),))
+            VALUES (%s, NOW(), %s)
+        """, (now.date(), "success"))
 
         conn.commit()
 
