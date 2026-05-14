@@ -7,7 +7,6 @@ from .comparison import (
     compare_names, 
     compare_buying_agent, 
     normalize_value,
-    extract_be_status
     )
 
 

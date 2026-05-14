@@ -12,6 +12,7 @@ from api.listing.brokeage_engine_sync import router as brokerage_sync_router
 from api.listing.skyslope_sync import router as skyslope_sync_router
 from api.listing.skyslope_sync_logs import router as skyslope_sync_logs_router
 from api.dashboards.reviewer import router as review_dash_router
+from api.listing.cda_sent import router as cda_sent_router
 
 app = FastAPI()
 
@@ -34,6 +35,7 @@ app.include_router(comparison_router)
 app.include_router(brokerage_sync_router)
 app.include_router(skyslope_sync_router)
 app.include_router(skyslope_sync_logs_router)
+app.include_router(cda_sent_router)
 
 from mangum import Mangum
 
