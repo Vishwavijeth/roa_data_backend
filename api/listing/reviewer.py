@@ -4,16 +4,34 @@ from psycopg2.extras import RealDictCursor
 
 router = APIRouter()
 
+from fastapi import APIRouter, Query
+from psycopg2.extras import RealDictCursor
+
+router = APIRouter()
+
+ALLOWED_STAGE_FILTERS = [
+    "CDA Eligible - Full Compliance",
+    "CDA Eligible - Pending Docs",
+    "Missing Docs from Agent",
+]
+
+
 @router.get("/reviewer_listing")
-def reviewer_listing():
+def reviewer_listing(
+    stage_name: str = Query(
+        default="all",
+        description="Filter by stage name"
+    )
+):
     conn = get_conn()
 
     try:
+        params = []
+
         query = """
         SELECT
             s.saleguid AS saleguid,
 
-            -- build property address
             CONCAT_WS(', ',
                 CONCAT_WS(' ', sp.streetnumber, sp.streetaddress),
                 sp.city,
@@ -27,9 +45,8 @@ def reviewer_listing():
 
             s.status AS ss_status,
 
-            NULL AS be_workflow_status,
+            st.name AS stage_name,
 
-            -- reviewer name
             COALESCE(r.firstname || ' ' || r.lastname, '') AS reviewer_name
 
         FROM sale s
@@ -40,15 +57,31 @@ def reviewer_listing():
         LEFT JOIN users r
             ON s.reviewerguid = r.userguid
 
-        ORDER BY s.saleguid;
+        LEFT JOIN stage st
+            ON s.stageid = st.stageid
         """
 
+        # apply filter only if not "all"
+        if stage_name != "all":
+
+            # validation
+            if stage_name not in ALLOWED_STAGE_FILTERS:
+                return {
+                    "success": False,
+                    "message": "Invalid stage_name filter",
+                    "allowed_filters": ALLOWED_STAGE_FILTERS
+                }
+
+            query += " WHERE st.name = %s "
+            params.append(stage_name)
+
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(query)
+            cur.execute(query, params)
             rows = cur.fetchall()
 
         return {
-            "count": len(rows),
+            "success": True,
+            "selected_filter": stage_name,
             "data": rows
         }
 
