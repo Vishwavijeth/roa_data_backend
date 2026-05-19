@@ -1,20 +1,10 @@
 from fastapi import APIRouter
 from db import get_conn
 from psycopg2.extras import RealDictCursor
-from services.comparison import compare_names
+from services.comparison import compare_names, compare_listing_price
 from fastapi import Query
 
-
 router = APIRouter()
-
-def compare_listing_price(be_price, ss_price):
-    """
-    - If either side is None/null → return 'null' (indeterminate)
-    - Otherwise compare numerically → return 'match' or 'mismatch'
-    """
-    if be_price is None or ss_price is None:
-        return 'null'
-    return 'match' if float(be_price) == float(ss_price) else 'mismatch'
 
 @router.get("/cda-sent/listing")
 def get_cda_sent(filter: str = Query("all", enum=["all", "mismatch", "no_skyslope"])):
