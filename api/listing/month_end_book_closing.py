@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Query
-from typing import Optional
+from typing import Optional, List
 from services.comparison import compare_listing_price
 from db import get_conn
 
@@ -9,7 +9,7 @@ router = APIRouter()
 def get_transactions_with_stage(
     transaction_specialist: Optional[str] = Query(None),
     buying_agent_name: Optional[str] = Query(None),
-    stage_name: Optional[str] = Query(None),
+    stage_name: Optional[List[str]] = Query(None),
     cda_sent: Optional[bool] = Query(None)
 ):
     conn = get_conn()
@@ -111,8 +111,9 @@ def get_transactions_with_stage(
             params.append(buying_agent_name.strip())
 
         if stage_name:
-            conditions.append("LOWER(stage_name) = LOWER(%s)")
-            params.append(stage_name.strip())
+            placeholders = ", ".join(["LOWER(%s)"] * len(stage_name))
+            conditions.append(f"LOWER(stage_name) IN ({placeholders})")
+            params.extend([stage.strip() for stage in stage_name])
 
         if cda_sent is True:
             conditions.append("tags ILIKE %s")
