@@ -3,10 +3,10 @@ from db import get_conn
 from datetime import timezone
 from zoneinfo import ZoneInfo
 
-def load_data():
+def load_data(brokerhold: bool = False):
     conn = get_conn()
     try:
-        return get_sales(conn), get_be(conn)
+        return get_sales(conn), get_be(conn, brokerhold)
     finally:
         conn.close()
 
@@ -107,9 +107,10 @@ def get_sales(conn):
         return cur.fetchall()
 
 
-def get_be(conn):
+def get_be(conn, brokerhold: bool = False):
+
     query = """ 
-            SELECT
+        SELECT
             skyslopefileid,
             listingguid,
             listing_office,
@@ -129,11 +130,23 @@ def get_be(conn):
             da_title_company,
             transaction_status
         FROM brokerage_engine
-     """
+    """
 
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(query)
-        return cur.fetchall()
+    params = []
+
+    if brokerhold:
+        query += """
+            WHERE LOWER(tags) LIKE %s
+        """
+        params.append("%brokerhold%")
+
+    cursor = conn.cursor()
+    cursor.execute(query, params)
+
+    columns = [desc[0] for desc in cursor.description]
+    rows = cursor.fetchall()
+
+    return [dict(zip(columns, row)) for row in rows]
     
 
 IST = ZoneInfo("Asia/Kolkata")

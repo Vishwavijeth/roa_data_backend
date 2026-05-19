@@ -1,12 +1,17 @@
-from fastapi import HTTPException, APIRouter
+from fastapi import HTTPException, APIRouter, Query
 from services.engine import run_brokerage_engine, load_data
 from services.loaders import get_be_sync
 
 router = APIRouter()
 
 @router.get("/brokerage_engine")
-def brokerage_engine():
-    data =  run_brokerage_engine()
+def brokerage_engine(
+    brokerhold: bool = Query(
+        default=False,
+        description="Filter records having brokerhold in tags"
+    )
+):
+    data = run_brokerage_engine(brokerhold)
     sync_info = get_be_sync()
 
     return {
