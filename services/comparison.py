@@ -124,6 +124,15 @@ def compare_names(sale_name, be_name):
 
     return 'mismatch'
 
+def compare_listing_price(be_price, ss_price):
+    """
+    - If either side is None/null → return 'null' (indeterminate)
+    - Otherwise compare numerically → return 'match' or 'mismatch'
+    """
+    if be_price is None or ss_price is None:
+        return 'null'
+    return 'match' if float(be_price) == float(ss_price) else 'mismatch'
+
 
 def compare_transaction_specialist(be, ss):
     if be is None or ss is None:
