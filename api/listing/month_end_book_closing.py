@@ -5,12 +5,18 @@ from db import get_conn
 
 router = APIRouter()
 
+from typing import Optional, List
+from datetime import date
+from fastapi import Query
+
 @router.get("/book-closing/listing")
 def get_transactions_with_stage(
     transaction_specialist: Optional[str] = Query(None),
     buying_agent_name: Optional[str] = Query(None),
     stage_name: Optional[List[str]] = Query(None),
-    cda_sent: Optional[bool] = Query(None)
+    cda_sent: Optional[bool] = Query(None),
+    closed_date_from: Optional[date] = Query(None),
+    closed_date_to: Optional[date] = Query(None)
 ):
     conn = get_conn()
 
@@ -113,11 +119,19 @@ def get_transactions_with_stage(
         if stage_name:
             placeholders = ", ".join(["LOWER(%s)"] * len(stage_name))
             conditions.append(f"LOWER(stage_name) IN ({placeholders})")
-            params.extend([stage.strip() for stage in stage_name])
+            params.extend([stage.strip().lower() for stage in stage_name])
 
         if cda_sent is True:
             conditions.append("tags ILIKE %s")
             params.append("%CDASent%")
+
+        if closed_date_from:
+            conditions.append("closed_date::date >= %s")
+            params.append(closed_date_from)
+
+        if closed_date_to:
+            conditions.append("closed_date::date <= %s")
+            params.append(closed_date_to)
 
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
