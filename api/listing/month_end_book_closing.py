@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, HTTPException
 from typing import Optional, List
 from services.comparison import compare_listing_price
 from db import get_conn
@@ -21,6 +21,12 @@ def get_transactions_with_stage(
     conn = get_conn()
 
     try:
+        if closed_date_from and closed_date_to and closed_date_from > closed_date_to:
+            raise HTTPException(
+                status_code=400,
+                detail="closed_date_from cannot be greater than closed_date_to"
+            )
+
         cur = conn.cursor()
 
         query = """
@@ -32,6 +38,7 @@ def get_transactions_with_stage(
                     be.tags,
                     be.buying_agent_name,
                     be.closed_date,
+                    be.closed_date::date AS closed_date_only,
                     be.transaction_specialist,
                     be.transaction_status,
                     s.stageid AS stage_id,
@@ -114,10 +121,10 @@ def get_transactions_with_stage(
                     )
                 )
             """)
-            params.append(buying_agent_name.strip())
+            params.append(buying_agent_name.strip().lower())
 
         if stage_name:
-            placeholders = ", ".join(["LOWER(%s)"] * len(stage_name))
+            placeholders = ", ".join(["%s"] * len(stage_name))
             conditions.append(f"LOWER(stage_name) IN ({placeholders})")
             params.extend([stage.strip().lower() for stage in stage_name])
 
@@ -126,11 +133,11 @@ def get_transactions_with_stage(
             params.append("%CDASent%")
 
         if closed_date_from:
-            conditions.append("closed_date::date >= %s")
+            conditions.append("closed_date_only >= %s")
             params.append(closed_date_from)
 
         if closed_date_to:
-            conditions.append("closed_date::date <= %s")
+            conditions.append("closed_date_only <= %s")
             params.append(closed_date_to)
 
         if conditions:
@@ -148,6 +155,7 @@ def get_transactions_with_stage(
             "tags",
             "buying_agent_name",
             "closed_date",
+            "closed_date_only",
             "transaction_specialist",
             "transaction_status",
             "stage_id",
