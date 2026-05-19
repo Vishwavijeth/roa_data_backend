@@ -129,6 +129,7 @@ def get_transactions_with_stage(
         columns = [
             "transaction_id",
             "property_address",
+            "state",
             "tags",
             "buying_agent_name",
             "closed_date",
@@ -151,7 +152,20 @@ def get_transactions_with_stage(
             "gross_commission_mismatch"
         ]
 
-        result = [dict(zip(columns, row)) for row in rows]
+        result = []
+        for row in rows:
+            row_dict = dict(zip(columns, row))
+
+            is_stale = (
+                row_dict["sale_price_mismatch"] is True
+                or row_dict["closed_date_mismatch"] is True
+                or row_dict["contract_date_mismatch"] is True
+                or row_dict["transaction_status_mismatch"] is True
+                or row_dict["gross_commission_mismatch"] == "mismatch"
+            )
+
+            row_dict["is_stale"] = is_stale
+            result.append(row_dict)
 
         return {
             "count": len(result),
