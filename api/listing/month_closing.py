@@ -25,6 +25,7 @@ def get_month_closing(
                 SELECT
                     s.saleguid AS skyslopefileid,
                     s.saleprice AS ss_sale_price,
+                    s.status as ss_status,
                     s.escrowclosingdate AS ss_closed_date,
                     s.contractacceptancedate AS ss_contract_date,
                     s.listingprice AS ss_listing_price,
@@ -64,10 +65,13 @@ def get_month_closing(
                               AND LOWER(sc.role) = 'seller'
                         ),
                         ''
-                    ) AS ss_seller_name
+                    ) AS ss_seller_name,
+                    COALESCE(r.firstname || ' ' || r.lastname, '') as reviewer
                 FROM sale s
                 LEFT JOIN brokerage_engine be
                     ON be.skyslopefileid = s.saleguid
+                LEFT JOIN users r
+                    ON s.reviewerguid = r.userguid
                 LEFT JOIN sale_property sp
                     ON sp.saleguid = s.saleguid
                 WHERE be.skyslopefileid IS NULL
