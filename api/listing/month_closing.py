@@ -12,12 +12,16 @@ def get_month_closing(
     skyslope: bool = False,
     state: str = None,
     from_close_date: str = None,
-    to_close_date: str = None
+    to_close_date: str = None,
+    transaction_specialist: str = None
 ):
     conn = get_conn()
 
     try:
 
+        # =========================
+        # SKY SLOPE MODE
+        # =========================
         if skyslope:
 
             query = """
@@ -80,12 +84,10 @@ def get_month_closing(
 
             params = {}
 
-            # STATE FILTER (SKYSLOPE → sp.state)
             if state:
                 query += " AND LOWER(sp.state) = LOWER(%(state)s)"
                 params["state"] = state
 
-            # CLOSE DATE FILTER (SKYSLOPE → s.escrowclosingdate)
             if from_close_date:
                 query += " AND s.escrowclosingdate >= %(from_close_date)s"
                 params["from_close_date"] = from_close_date
@@ -106,6 +108,9 @@ def get_month_closing(
                 "data": rows
             }
 
+        # =========================
+        # NORMAL MODE
+        # =========================
         query = """
             WITH base AS (
                 SELECT
@@ -114,6 +119,7 @@ def get_month_closing(
                     be.property_address,
                     be.tags,
                     be.state,
+                    be.transaction_specialist,
 
                     be.sale_price AS be_sale_price,
                     s.saleprice AS ss_sale_price,
@@ -146,57 +152,7 @@ def get_month_closing(
                         ''
                     ) AS ss_buyer_name,
 
-                    COALESCE(
-                        (
-                            SELECT STRING_AGG(
-                                TRIM(COALESCE(sc.firstname, '') || ' ' || COALESCE(sc.lastname, '')),
-                                ', '
-                            )
-                            FROM sale_contact sc
-                            WHERE sc.saleguid = s.saleguid
-                              AND LOWER(sc.role) = 'seller'
-                        ),
-                        ''
-                    ) AS ss_seller_name,
-
-                    be.buyer_name AS be_buyer_name,
-                    be.seller_name AS be_seller_name,
-
-                    CASE
-                        WHEN be.sale_price IS DISTINCT FROM s.saleprice
-                        THEN true ELSE false
-                    END AS sale_price_mismatch,
-
-                    CASE
-                        WHEN be.closed_date IS DISTINCT FROM s.escrowclosingdate
-                        THEN true ELSE false
-                    END AS closed_date_mismatch,
-
-                    CASE
-                        WHEN be.contract_date IS DISTINCT FROM s.contractacceptancedate
-                        THEN true ELSE false
-                    END AS contract_date_mismatch,
-
-                    CASE
-                        WHEN LOWER(s.status) = 'expired' THEN NULL
-                        WHEN be.transaction_status IS NULL OR s.status IS NULL THEN NULL
-                        WHEN LOWER(be.transaction_status) = LOWER(s.status) THEN false
-                        WHEN LOWER(be.transaction_status) = 'cancelled'
-                             AND LOWER(s.status) IN ('canceled/app', 'canceled/pend')
-                        THEN false
-                        ELSE true
-                    END AS transaction_status_mismatch,
-
-                    CASE
-                        WHEN scn.officegrosscommissiononsale IS NULL
-                          OR be.total_gross_commission IS NULL
-                          OR scn.officegrosscommissiononsale = 0
-                          OR be.total_gross_commission = 0
-                        THEN NULL
-                        WHEN scn.officegrosscommissiononsale <> be.total_gross_commission
-                        THEN 'mismatch'
-                        ELSE 'match'
-                    END AS gross_commission_mismatch
+                    be.buyer_name AS be_buyer_name
 
                 FROM brokerage_engine be
                 LEFT JOIN sale s ON s.saleguid = be.skyslopefileid
@@ -209,7 +165,7 @@ def get_month_closing(
 
         params = {}
 
-        # STATUS FILTER
+        # status filter
         if status != "all":
             query += """
                 AND (
@@ -226,12 +182,17 @@ def get_month_closing(
             """
             params["status"] = status.lower()
 
-        # STATE FILTER (NORMAL → be.state)
+        # state filter
         if state:
             query += " AND LOWER(state) = LOWER(%(state)s)"
             params["state"] = state
 
-        # CLOSE DATE FILTER (NORMAL → be.closed_date)
+        # specialist filter (NEW)
+        if transaction_specialist:
+            query += " AND LOWER(transaction_specialist) = LOWER(%(transaction_specialist)s)"
+            params["transaction_specialist"] = transaction_specialist
+
+        # date filters
         if from_close_date:
             query += " AND b.be_closed_date >= %(from_close_date)s"
             params["from_close_date"] = from_close_date
@@ -266,18 +227,16 @@ def get_month_closing(
                     "property_address": row["property_address"],
                     "tags": row["tags"],
                     "state": row["state"],
+                    "transaction_specialist": row.get("transaction_specialist"),
 
                     "be_sale_price": row["be_sale_price"],
                     "ss_sale_price": row["ss_sale_price"],
-                    "sale_price_mismatch": row["sale_price_mismatch"],
 
                     "be_closed_date": row["be_closed_date"],
                     "ss_closed_date": row["ss_closed_date"],
-                    "closed_date_mismatch": row["closed_date_mismatch"],
 
                     "be_contract_date": row["be_contract_date"],
                     "ss_contract_date": row["ss_contract_date"],
-                    "contract_date_mismatch": row["contract_date_mismatch"],
 
                     "be_listing_price": row["be_listing_price"],
                     "ss_listing_price": row["ss_listing_price"],
@@ -285,21 +244,17 @@ def get_month_closing(
 
                     "be_gross_commission": row["be_gross_commission"],
                     "ss_gross_commission": row["ss_gross_commission"],
-                    "gross_commission_mismatch": row["gross_commission_mismatch"],
 
                     "be_transaction_status": row["be_transaction_status"],
                     "ss_transaction_status": row["ss_transaction_status"],
-                    "transaction_status_mismatch": row["transaction_status_mismatch"],
 
-                    "be_buyer_name": row["be_buyer_name"],
-                    "ss_buyer_name": row["ss_buyer_name"],
                     "buyer_name_comparison": buyer_result,
                 })
 
         return {
-            "mode": "full_comparison" if not skyslope else "skyslope_only",
-            "count": len(rows),
-            "data": reshaped_rows if not skyslope else rows
+            "mode": "full_comparison",
+            "count": len(reshaped_rows),
+            "data": reshaped_rows
         }
 
     finally:
