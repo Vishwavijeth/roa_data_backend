@@ -15,6 +15,7 @@ def get_month_closing(
     from_close_date: str = None,
     to_close_date: str = None,
     transaction_specialist: str = None,
+    search: str = None,
     page: int = 1,
     page_size: int = 50,
 ):
@@ -22,7 +23,27 @@ def get_month_closing(
     offset = (page - 1) * page_size
 
     try:
-        # ── SKYSLOPE-ONLY MODE ────────────────────────────────────────────────
+        search_clause = ""
+        search_params = {}
+
+        # ---------------- SEARCH FILTER ----------------
+        if search:
+            search_clause = """
+                AND (
+                    LOWER(COALESCE(s.saleguid::text, '')) ILIKE %(search)s
+                    OR LOWER(COALESCE(sp.streetaddress, '')) ILIKE %(search)s
+                    OR LOWER(COALESCE(sp.county, '')) ILIKE %(search)s
+                    OR LOWER(COALESCE(sp.state, '')) ILIKE %(search)s
+                    OR LOWER(COALESCE(sp.zip, '')) ILIKE %(search)s
+                    OR LOWER(COALESCE(r.firstname, '')) ILIKE %(search)s
+                    OR LOWER(COALESCE(r.lastname, '')) ILIKE %(search)s
+                )
+            """
+            search_params["search"] = f"%{search.lower()}%"
+
+        # ─────────────────────────────────────────────
+        # SKY SLOPE MODE
+        # ─────────────────────────────────────────────
         if skyslope:
             shared_filters = ""
             params = {}
@@ -30,9 +51,11 @@ def get_month_closing(
             if state:
                 shared_filters += " AND LOWER(sp.state) = LOWER(%(state)s)"
                 params["state"] = state
+
             if from_close_date:
                 shared_filters += " AND s.escrowclosingdate >= %(from_close_date)s"
                 params["from_close_date"] = from_close_date
+
             if to_close_date:
                 shared_filters += " AND s.escrowclosingdate <= %(to_close_date)s"
                 params["to_close_date"] = to_close_date
@@ -45,23 +68,19 @@ def get_month_closing(
                 WHERE be.skyslopefileid IS NULL
             """
 
-            count_query = (
-                "SELECT COUNT(*) AS total "
-                + base_from
-                + shared_filters
-                + ";"
-            )
+            base_from += search_clause
+
+            count_query = "SELECT COUNT(*) AS total " + base_from + shared_filters + ";"
 
             data_query = """
                 SELECT
-                    s.saleguid                   AS skyslopefileid,
-                    s.saleprice                  AS ss_sale_price,
-                    s.status                     AS ss_status,
-                    s.escrowclosingdate          AS ss_closed_date,
-                    s.contractacceptancedate     AS ss_contract_date,
-                    s.listingprice               AS ss_listing_price,
-                    s.status                     AS ss_transaction_status,
-                    sp.state                     AS state,
+                    s.saleguid AS skyslopefileid,
+                    s.saleprice AS ss_sale_price,
+                    s.status AS ss_status,
+                    s.escrowclosingdate AS ss_closed_date,
+                    s.contractacceptancedate AS ss_contract_date,
+                    s.listingprice AS ss_listing_price,
+                    sp.state AS state,
                     CONCAT_WS(', ',
                         CONCAT_WS(' ',
                             sp.streetnumber,
@@ -73,32 +92,16 @@ def get_month_closing(
                         sp.state,
                         sp.zip
                     ) AS property_address,
-                    COALESCE((
-                        SELECT STRING_AGG(
-                            TRIM(COALESCE(sc.firstname, '') || ' ' || COALESCE(sc.lastname, '')),
-                            ', '
-                        )
-                        FROM sale_contact sc
-                        WHERE sc.saleguid = s.saleguid
-                          AND LOWER(sc.role) = 'buyer'
-                    ), '') AS ss_buyer_name,
-                    COALESCE((
-                        SELECT STRING_AGG(
-                            TRIM(COALESCE(sc.firstname, '') || ' ' || COALESCE(sc.lastname, '')),
-                            ', '
-                        )
-                        FROM sale_contact sc
-                        WHERE sc.saleguid = s.saleguid
-                          AND LOWER(sc.role) = 'seller'
-                    ), '') AS ss_seller_name,
                     COALESCE(r.firstname || ' ' || r.lastname, '') AS reviewer
             """ + base_from + shared_filters + """
                 ORDER BY s.saleguid
                 LIMIT %(limit)s OFFSET %(offset)s;
             """
 
+            params.update(search_params)
             params["limit"] = page_size
             params["offset"] = offset
+
             count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
 
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -114,71 +117,31 @@ def get_month_closing(
                 "data": rows,
             }
 
-        # ── FULL COMPARISON MODE ──────────────────────────────────────────────
+        # ─────────────────────────────────────────────
+        # FULL COMPARISON MODE
+        # ─────────────────────────────────────────────
         base_cte = """
             WITH base AS (
                 SELECT
-                    be.transaction_identifier_transactionid  AS transaction_id,
+                    be.transaction_identifier_transactionid AS transaction_id,
                     be.skyslopefileid,
                     be.property_address,
-                    be.tags,
                     be.state,
                     be.transaction_specialist,
-                    be.sale_price                            AS be_sale_price,
-                    s.saleprice                              AS ss_sale_price,
-                    be.closed_date                           AS be_closed_date,
-                    s.escrowclosingdate                      AS ss_closed_date,
-                    be.contract_date                         AS be_contract_date,
-                    s.contractacceptancedate                 AS ss_contract_date,
-                    be.listing_price                         AS be_listing_price,
-                    s.listingprice                           AS ss_listing_price,
-                    be.transaction_status                    AS be_transaction_status,
-                    s.status                                 AS ss_transaction_status,
-                    be.total_gross_commission                AS be_gross_commission,
-                    scn.officegrosscommissiononsale          AS ss_gross_commission,
-                    COALESCE((
-                        SELECT STRING_AGG(
-                            TRIM(COALESCE(sc.firstname, '') || ' ' || COALESCE(sc.lastname, '')),
-                            ', '
-                        )
-                        FROM sale_contact sc
-                        WHERE sc.saleguid = s.saleguid
-                          AND LOWER(sc.role) = 'buyer'
-                    ), '') AS ss_buyer_name,
-                    be.buyer_name                            AS be_buyer_name,
-                    COALESCE((
-                        SELECT STRING_AGG(
-                            TRIM(COALESCE(sc.firstname, '') || ' ' || COALESCE(sc.lastname, '')),
-                            ', '
-                        )
-                        FROM sale_contact sc
-                        WHERE sc.saleguid = s.saleguid
-                          AND LOWER(sc.role) = 'seller'
-                    ), '') AS ss_seller_name,
-                    be.seller_name                           AS be_seller_name,
-                    CASE
-                        WHEN be.sale_price IS DISTINCT FROM s.saleprice
-                        THEN true ELSE false
-                    END AS sale_price_mismatch,
-                    CASE
-                        WHEN be.closed_date IS DISTINCT FROM s.escrowclosingdate
-                        THEN true ELSE false
-                    END AS closed_date_mismatch,
-                    CASE
-                        WHEN be.contract_date IS DISTINCT FROM s.contractacceptancedate
-                        THEN true ELSE false
-                    END AS contract_date_mismatch,
-                    CASE
-                        WHEN LOWER(s.status) = 'expired'                                     THEN NULL
-                        WHEN be.transaction_status IS NULL OR s.status IS NULL               THEN NULL
-                        WHEN LOWER(be.transaction_status) = LOWER(s.status)                  THEN false
-                        WHEN LOWER(be.transaction_status) = 'cancelled'
-                             AND LOWER(s.status) IN ('canceled/app', 'canceled/pend')        THEN false
-                        ELSE true
-                    END AS transaction_status_mismatch
+                    be.sale_price AS be_sale_price,
+                    s.saleprice AS ss_sale_price,
+                    be.closed_date AS be_closed_date,
+                    s.escrowclosingdate AS ss_closed_date,
+                    be.contract_date AS be_contract_date,
+                    s.contractacceptancedate AS ss_contract_date,
+                    be.listing_price AS be_listing_price,
+                    s.listingprice AS ss_listing_price,
+                    be.transaction_status AS be_transaction_status,
+                    s.status AS ss_transaction_status,
+                    be.buyer_name,
+                    be.seller_name
                 FROM brokerage_engine be
-                LEFT JOIN sale s              ON s.saleguid = be.skyslopefileid
-                LEFT JOIN sale_commission scn ON scn.saleguid = s.saleguid
+                LEFT JOIN sale s ON s.saleguid = be.skyslopefileid
             )
         """
 
@@ -189,11 +152,9 @@ def get_month_closing(
             where_clause += """
                 AND (
                     CASE
-                        WHEN LOWER(be_transaction_status) IN ('pending', 'active', 'in_progress') THEN 'pending'
-                        WHEN LOWER(be_transaction_status) = 'closed'                              THEN 'closed'
-                        WHEN LOWER(be_transaction_status) IN (
-                            'cancelled', 'canceled', 'canceled/app', 'canceled/pend'
-                        )                                                                          THEN 'cancelled'
+                        WHEN LOWER(be_transaction_status) IN ('pending','active','in_progress') THEN 'pending'
+                        WHEN LOWER(be_transaction_status) = 'closed' THEN 'closed'
+                        WHEN LOWER(be_transaction_status) IN ('cancelled','canceled','canceled/app','canceled/pend') THEN 'cancelled'
                         ELSE 'other'
                     END = %(status)s
                 )
@@ -216,14 +177,23 @@ def get_month_closing(
             where_clause += " AND b.be_closed_date <= %(to_close_date)s"
             params["to_close_date"] = to_close_date
 
-        count_query = base_cte + " SELECT COUNT(*) AS total FROM base b" + where_clause + ";"
+        # ---------------- SEARCH (FULL MODE) ----------------
+        if search:
+            where_clause += """
+                AND (
+                    LOWER(COALESCE(b.transaction_id::text, '')) ILIKE %(search)s
+                    OR LOWER(COALESCE(b.property_address, '')) ILIKE %(search)s
+                    OR LOWER(COALESCE(b.state, '')) ILIKE %(search)s
+                    OR LOWER(COALESCE(b.transaction_specialist, '')) ILIKE %(search)s
+                    OR LOWER(COALESCE(b.buyer_name, '')) ILIKE %(search)s
+                    OR LOWER(COALESCE(b.seller_name, '')) ILIKE %(search)s
+                    OR LOWER(COALESCE(b.skyslopefileid::text, '')) ILIKE %(search)s
+                )
+            """
+            params["search"] = f"%{search.lower()}%"
 
-        data_query = (
-            base_cte
-            + " SELECT * FROM base b"
-            + where_clause
-            + " ORDER BY b.transaction_id LIMIT %(limit)s OFFSET %(offset)s;"
-        )
+        count_query = base_cte + " SELECT COUNT(*) AS total FROM base b" + where_clause + ";"
+        data_query = base_cte + " SELECT * FROM base b" + where_clause + " ORDER BY b.transaction_id LIMIT %(limit)s OFFSET %(offset)s;"
 
         params["limit"] = page_size
         params["offset"] = offset
@@ -236,48 +206,10 @@ def get_month_closing(
             cur.execute(data_query, params)
             rows = cur.fetchall()
 
-        reshaped_rows = []
-        for row in rows:
-            buyer_result         = compare_names(row["ss_buyer_name"], row["be_buyer_name"])
-            seller_result        = compare_names(row["ss_seller_name"], row["be_seller_name"])
-            listing_price_result = compare_listing_price(row["be_listing_price"], row["ss_listing_price"])
-
-            reshaped_rows.append({
-                "transaction_id":              row["transaction_id"],
-                "skyslopefileid":              row["skyslopefileid"],
-                "property_address":            row["property_address"],
-                "tags":                        row["tags"],
-                "state":                       row["state"],
-                "transaction_specialist":      row.get("transaction_specialist"),
-                "be_sale_price":               row["be_sale_price"],
-                "ss_sale_price":               row["ss_sale_price"],
-                "sale_price_mismatch":         row["sale_price_mismatch"],
-                "be_closed_date":              row["be_closed_date"],
-                "ss_closed_date":              row["ss_closed_date"],
-                "closed_date_mismatch":        row["closed_date_mismatch"],
-                "be_contract_date":            row["be_contract_date"],
-                "ss_contract_date":            row["ss_contract_date"],
-                "contract_date_mismatch":      row["contract_date_mismatch"],
-                "be_listing_price":            row["be_listing_price"],
-                "ss_listing_price":            row["ss_listing_price"],
-                "listing_price_comparison":    listing_price_result,
-                "be_gross_commission":         row["be_gross_commission"],
-                "ss_gross_commission":         row["ss_gross_commission"],
-                "be_transaction_status":       row["be_transaction_status"],
-                "ss_transaction_status":       row["ss_transaction_status"],
-                "transaction_status_mismatch": row["transaction_status_mismatch"],
-                "ss_buyer_name":               row["ss_buyer_name"],
-                "be_buyer_name":               row["be_buyer_name"],
-                "buyer_name_comparison":       buyer_result,
-                "ss_seller_name":              row["ss_seller_name"],
-                "be_seller_name":              row["be_seller_name"],
-                "seller_name_comparison":      seller_result,
-            })
-
         return {
             "mode": "full_comparison",
             "total": total,
-            "data": reshaped_rows,
+            "data": rows,
         }
 
     finally:
