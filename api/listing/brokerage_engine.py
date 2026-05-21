@@ -1,21 +1,100 @@
 from fastapi import HTTPException, APIRouter, Query
 from services.engine import run_brokerage_engine, load_data
+from db import get_conn
 from services.loaders import get_be_sync
 
 router = APIRouter()
 
+@router.get("/brokerage_engine/sync_info")
+def brokerage_engine_sync_info():
+    return get_be_sync()
+
 @router.get("/brokerage_engine")
 def brokerage_engine(
-    brokerhold: bool = Query(
-        default=False,
-        description="Filter records having brokerhold in tags"
-    )
+    brokerhold: bool = Query(default=False),
+    page: int = Query(default=1, ge=1),
+
+    from_close_date: str = Query(default=None),
+    to_close_date: str = Query(default=None),
+
+    from_contract_date: str = Query(default=None),
+    to_contract_date: str = Query(default=None),
+
+    status: str = Query(default=None)
 ):
-    data = run_brokerage_engine(brokerhold)
-    sync_info = get_be_sync()
+    conn = get_conn()
+    cursor = conn.cursor()
+
+    limit = 50
+    offset = (page - 1) * limit
+
+    base_query = """
+        FROM brokerage_engine
+        WHERE 1=1
+    """
+
+    params = []
+
+    if brokerhold:
+        base_query += " AND LOWER(tags) LIKE %s"
+        params.append("%brokerhold%")
+
+    if status:
+        base_query += " AND LOWER(transaction_status) = %s"
+        params.append(status.lower())
+
+    if from_close_date:
+        base_query += " AND closed_date >= %s"
+        params.append(from_close_date)
+
+    if to_close_date:
+        base_query += " AND closed_date <= %s"
+        params.append(to_close_date)
+
+    if from_contract_date:
+        base_query += " AND contract_date >= %s"
+        params.append(from_contract_date)
+
+    if to_contract_date:
+        base_query += " AND contract_date <= %s"
+        params.append(to_contract_date)
+
+    # ------------------------
+    # COUNT QUERY
+    # ------------------------
+    count_query = "SELECT COUNT(*) " + base_query
+    cursor.execute(count_query, params)
+    total_count = cursor.fetchone()[0]
+
+    # ------------------------
+    # DATA QUERY
+    # ------------------------
+    data_query = """
+        SELECT
+            transaction_identifier_transactionid as transactionid,
+            property_address,
+            buying_agent_name,
+            sale_price,
+            contract_date,
+            closed_date as close_date,
+            transaction_specialist,
+            transaction_status as status,
+            skyslopefileid
+    """ + base_query
+
+    data_query += " ORDER BY closed_date DESC NULLS LAST"
+    data_query += " LIMIT %s OFFSET %s"
+    data_params = params + [limit, offset]
+
+    cursor.execute(data_query, data_params)
+
+    columns = [desc[0] for desc in cursor.description]
+    rows = cursor.fetchall()
+
+    data = [dict(zip(columns, row)) for row in rows]
 
     return {
-        "sync_info": sync_info,
+        "total_count": total_count,
         "data": data
     }
 
@@ -24,66 +103,119 @@ def norm(x):
 
 @router.get("/brokerage_engine/detail")
 def brokerage_detail(transactionid: str):
-    sales, be_data = load_data()
+    conn = get_conn()
+    cursor = conn.cursor()
 
-    txn = norm(transactionid)
+    query = """
+        SELECT
+            be.skyslopefileid,
+            be.listingguid,
+            be.listing_office,
+            be.transaction_identifier_transactionid,
+            be.sale_price,
+            be.closed_date,
+            be.listing_price,
+            be.contract_date,
+            be.tags,
+            be.buyer_name,
+            be.seller_name,
+            be.buying_agent_name,
+            be.total_gross_commission,
+            be.transaction_specialist,
+            be.property_address,
+            be.da_title_company,
+            be.transaction_status,
 
-    # find BE record
-    be_record = next(
-        (b for b in be_data
-         if norm(b.get("transaction_identifier_transactionid")) == txn),
-        None
-    )
+            s.saleguid,
+            s.listingprice,
+            s.saleprice,
+            s.mlsnumber,
+            s.status,
+            s.contractacceptancedate,
+            s.escrowclosingdate,
+            s.reviewerguid,
+            s.agentguid,
 
-    if not be_record:
+            COALESCE(r.firstname || ' ' || r.lastname, '') AS reviewer_full_name,
+
+            COALESCE(
+                (
+                    SELECT TRIM(COALESCE(uu.firstname, '') || ' ' || COALESCE(uu.lastname, ''))
+                    FROM users uu
+                    WHERE uu.userguid = s.agentguid
+                ),
+                ''
+            ) AS skyslope_buying_agent_name,
+
+            CONCAT_WS(', ',
+                CONCAT_WS(' ', sp.streetnumber, sp.streetaddress),
+                sp.city,
+                sp.state,
+                sp.zip
+            ) AS propertyaddress,
+
+            COALESCE(scn.officeGrossCommissionOnSale, 0) AS officegrosscommissiononsale
+
+        FROM brokerage_engine be
+
+        LEFT JOIN sale s
+            ON be.skyslopefileid = s.saleguid
+
+        LEFT JOIN users r
+            ON s.reviewerguid = r.userguid
+
+        LEFT JOIN sale_property sp
+            ON s.saleguid = sp.saleguid
+
+        LEFT JOIN sale_commission scn
+            ON scn.saleguid = s.saleguid
+
+        WHERE be.transaction_identifier_transactionid = %s
+    """
+
+    cursor.execute(query, (transactionid,))
+    row = cursor.fetchone()
+
+    if not row:
         raise HTTPException(status_code=404, detail="Transaction not found")
 
-    skyslopefileid = be_record.get("skyslopefileid")
+    columns = [desc[0] for desc in cursor.description]
+    data = dict(zip(columns, row))
 
-    # find sales record (FIXED KEY LOGIC)
-    sale_record = next(
-        (s for s in sales
-         if norm(s.get("saleguid")) == norm(skyslopefileid)),
-        None
-    )
-    match = True
-    if sale_record:
-        match = norm(skyslopefileid) == norm(sale_record.get("saleguid"))
-    else:
-        match = False
+    skyslope_match = data.get("saleguid") is not None
 
     return {
         "transactionid": transactionid,
         "brokerage_engine": {
-            "property_address": be_record.get("property_address"),
-            "sale_price": be_record.get("sale_price"),
-            "listing_price": be_record.get("listing_price"),
-            "office": be_record.get("listing_office"),
-            "buyer": be_record.get("buyer_name"),
-            "seller": be_record.get("seller_name"),
-            "buying_agent_name": be_record.get("buying_agent_name"),
-            "contract_date": be_record.get("contract_date"),
-            "closed_date": be_record.get("closed_date"),
-            "tags": be_record.get("tags"),
-            "status": be_record.get("transaction_status"),
-            "transaction_specialist": be_record.get("transaction_specialist"),
-            "skyslopefileid": skyslopefileid
+            "property_address": data.get("property_address"),
+            "sale_price": data.get("sale_price"),
+            "listing_price": data.get("listing_price"),
+            "office": data.get("listing_office"),
+            "buyer": data.get("buyer_name"),
+            "seller": data.get("seller_name"),
+            "buying_agent_name": data.get("buying_agent_name"),
+            "contract_date": data.get("contract_date"),
+            "closed_date": data.get("closed_date"),
+            "tags": data.get("tags"),
+            "status": data.get("transaction_status"),
+            "transaction_specialist": data.get("transaction_specialist"),
+            "skyslopefileid": data.get("skyslopefileid")
         },
         "skyslope": {
-            "match": match,
-            "saleguid": sale_record.get("saleguid") if sale_record else None,
-            "property_address": sale_record.get("propertyaddress") if sale_record else None,
-            "listingprice": sale_record.get("listingprice") if sale_record else None,
-            "saleprice": sale_record.get("saleprice") if sale_record else None,
-            "mlsnumber": sale_record.get("mlsnumber") if sale_record else None,
-            "seller": sale_record.get("seller_full_name") if sale_record else None,
-            "buyer": sale_record.get("buyer_full_name") if sale_record else None,
-            "buying_agent": sale_record.get("agent_full_name") if sale_record else None,
-            "buying_agent_email": sale_record.get("agent_mail_id") if sale_record else None,
-            "reviewer_full_name": sale_record.get("reviewer_full_name") if sale_record else None,
-            "status": sale_record.get("status") if sale_record else None,
-            "contractacceptancedate": sale_record.get("contractacceptancedate") if sale_record else None,
-            "escrowclosingdate": sale_record.get("escrowclosingdate") if sale_record else None,
-            "canceldate": sale_record.get("canceldate") if sale_record else None
+            "match": skyslope_match,
+            "saleguid": data.get("saleguid"),
+            "property_address": data.get("propertyaddress"),
+            "listingprice": data.get("listingprice"),
+            "saleprice": data.get("saleprice"),
+            "mlsnumber": data.get("mlsnumber"),
+            "seller": data.get("seller_name"),
+            "buyer": data.get("buyer_name"),
+            "buying_agent": data.get("skyslope_buying_agent_name"),
+            "reviewer_full_name": data.get("reviewer_full_name"),
+            "status": data.get("status"),
+            "contractacceptancedate": data.get("contractacceptancedate"),
+            "escrowclosingdate": data.get("escrowclosingdate"),
+            "canceldate": data.get("canceldate"),
+            "officegrosscommissiononsale": data.get("officegrosscommissiononsale")
         }
     }
