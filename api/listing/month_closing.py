@@ -141,9 +141,74 @@ def get_month_closing(
                     be.transaction_status AS be_transaction_status,
                     s.status AS ss_transaction_status,
                     be.buyer_name,
-                    be.seller_name
+                    be.seller_name,
+                    scn.officegrosscommissiononsale AS ss_gross_commission,
+                    be.total_gross_commission AS be_gross_commission,
+
+                    COALESCE(
+                        (
+                            SELECT STRING_AGG(
+                                TRIM(COALESCE(sc.firstname, '') || ' ' || COALESCE(sc.lastname, '')),
+                                ', '
+                            )
+                            FROM sale_contact sc
+                            WHERE sc.saleguid = s.saleguid
+                            AND LOWER(sc.role) = 'buyer'
+                        ),
+                        ''
+                    ) AS ss_buyer_name,
+
+                    COALESCE(
+                        (
+                            SELECT STRING_AGG(
+                                TRIM(COALESCE(sc.firstname, '') || ' ' || COALESCE(sc.lastname, '')),
+                                ', '
+                            )
+                            FROM sale_contact sc
+                            WHERE sc.saleguid = s.saleguid
+                            AND LOWER(sc.role) = 'seller'
+                        ),
+                        ''
+                    ) AS ss_seller_name,
+
+                    CASE
+                        WHEN be.sale_price IS DISTINCT FROM s.saleprice THEN 'mismatch'
+                        ELSE 'match'
+                    END AS sale_price_comparison,
+
+                    CASE
+                        WHEN be.closed_date IS DISTINCT FROM s.escrowclosingdate THEN 'mismatch'
+                        ELSE 'match'
+                    END AS closed_date_comparison,
+
+                    CASE
+                        WHEN be.contract_date IS DISTINCT FROM s.contractacceptancedate THEN 'mismatch'
+                        ELSE 'match'
+                    END AS contract_date_comparison,
+
+                    CASE
+                        WHEN LOWER(s.status) = 'expired' THEN NULL
+                        WHEN be.transaction_status IS NULL OR s.status IS NULL THEN NULL
+                        WHEN LOWER(be.transaction_status) = LOWER(s.status) THEN 'match'
+                        WHEN LOWER(be.transaction_status) = 'cancelled'
+                             AND LOWER(s.status) IN ('canceled/app', 'canceled/pend')
+                        THEN 'match'
+                        ELSE 'mismatch'
+                    END AS transaction_status_comparison,
+
+                    CASE
+                        WHEN scn.officegrosscommissiononsale IS NULL
+                            OR be.total_gross_commission IS NULL
+                            OR scn.officegrosscommissiononsale = 0
+                            OR be.total_gross_commission = 0
+                        THEN NULL
+                        WHEN scn.officegrosscommissiononsale <> be.total_gross_commission
+                        THEN 'mismatch'
+                        ELSE 'match'
+                    END AS gross_commission_comparison
                 FROM brokerage_engine be
                 LEFT JOIN sale s ON s.saleguid = be.skyslopefileid
+                LEFT JOIN sale_commission scn ON scn.saleguid = s.saleguid
             )
         """
 
@@ -159,16 +224,13 @@ def get_month_closing(
                              OR be_transaction_status ILIKE 'active'
                              OR be_transaction_status ILIKE 'in_progress'
                         THEN 'pending'
-
                         WHEN be_transaction_status ILIKE 'closed'
                         THEN 'closed'
-
                         WHEN be_transaction_status ILIKE 'cancelled'
                              OR be_transaction_status ILIKE 'canceled'
                              OR be_transaction_status ILIKE 'canceled/app'
                              OR be_transaction_status ILIKE 'canceled/pend'
                         THEN 'cancelled'
-
                         ELSE 'other'
                     END = %(status)s
                 )
@@ -180,7 +242,7 @@ def get_month_closing(
             where_clause += " AND b.state ILIKE %(state)s"
             params["state"] = state
 
-        # ---------------- TRANSACTION SPECIALIST FILTER ----------------
+        # ---------------- TRANSACTION SPECIALIST ----------------
         if transaction_specialist:
             if transaction_specialist.lower() == "unassigned":
                 where_clause += """
@@ -219,13 +281,7 @@ def get_month_closing(
             """
             params["search"] = f"%{search}%"
 
-        # ---------------- QUERIES ----------------
-        count_query = (
-            base_cte
-            + " SELECT COUNT(*) AS total FROM base b"
-            + where_clause
-            + ";"
-        )
+        count_query = base_cte + " SELECT COUNT(*) AS total FROM base b" + where_clause + ";"
 
         data_query = (
             base_cte
@@ -238,10 +294,7 @@ def get_month_closing(
         params["limit"] = page_size
         params["offset"] = offset
 
-        count_params = {
-            k: v for k, v in params.items()
-            if k not in ("limit", "offset")
-        }
+        count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
 
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(count_query, count_params)
@@ -249,6 +302,21 @@ def get_month_closing(
 
             cur.execute(data_query, params)
             rows = cur.fetchall()
+
+        # ---------------- NAME COMPARISON ADDITION ----------------
+        for row in rows:
+            row["buyer_name_comparison"] = compare_names(
+                row.get("buyer_name"),
+                row.get("ss_buyer_name")
+            )
+            row["seller_name_comparison"] = compare_names(
+                row.get("seller_name"),
+                row.get("ss_seller_name")
+            )
+            row["listing_price_comparison"] = compare_listing_price(
+                row.get("be_listing_price"),
+                row.get("ss_listing_price")
+            )
 
         return {
             "mode": "full_comparison",
