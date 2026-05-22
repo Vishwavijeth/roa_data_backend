@@ -189,6 +189,9 @@ def get_month_closing(
                     CASE
                         WHEN LOWER(s.status) = 'expired' THEN NULL
                         WHEN be.transaction_status IS NULL OR s.status IS NULL THEN NULL
+                        WHEN LOWER(be.transaction_status) = 'closed'
+                            AND LOWER(s.status) = 'archived'
+                        THEN 'match'
                         WHEN LOWER(be.transaction_status) = LOWER(s.status) THEN 'match'
                         WHEN LOWER(be.transaction_status) = 'cancelled'
                              AND LOWER(s.status) IN ('canceled/app', 'canceled/pend')
