@@ -3,7 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.listing.brokerage_engine import router as brokerage_router
 from api.listing.skyslope import router as skyslope_router
 from api.reconciliation.dashboard_compare import router as compare_router
-from api.reconciliation.dashboard_comparison import router as comparison_router
 from api.listing.transaction_specialist import router as specialist_router
 from api.listing.reviewer import router as reviewer_router
 from api.dashboards.transaction_specialist import router as trans_dash_router
@@ -31,7 +30,6 @@ app.include_router(specialist_router)
 app.include_router(reviewer_router)
 app.include_router(trans_dash_router)
 app.include_router(review_dash_router)
-app.include_router(comparison_router)
 app.include_router(brokerage_sync_router)
 app.include_router(skyslope_sync_router)
 app.include_router(skyslope_sync_logs_router)
