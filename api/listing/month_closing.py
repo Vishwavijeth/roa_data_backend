@@ -15,6 +15,7 @@ def get_month_closing(
     to_close_date: str = None,
     transaction_specialist: str = None,
     search: str = None,
+    mismatch: bool = False,   # ✅ NEW PARAM
     page: int = 1,
     page_size: int = 50,
 ):
@@ -130,18 +131,25 @@ def get_month_closing(
                     be.property_address,
                     be.state,
                     be.transaction_specialist,
+
                     be.sale_price AS be_sale_price,
                     s.saleprice AS ss_sale_price,
+
                     be.closed_date AS be_closed_date,
                     s.escrowclosingdate AS ss_closed_date,
+
                     be.contract_date AS be_contract_date,
                     s.contractacceptancedate AS ss_contract_date,
+
                     be.listing_price AS be_listing_price,
                     s.listingprice AS ss_listing_price,
+
                     be.transaction_status AS be_transaction_status,
                     s.status AS ss_transaction_status,
+
                     be.buyer_name,
                     be.seller_name,
+
                     scn.officegrosscommissiononsale AS ss_gross_commission,
                     be.total_gross_commission AS be_gross_commission,
 
@@ -153,7 +161,7 @@ def get_month_closing(
                             )
                             FROM sale_contact sc
                             WHERE sc.saleguid = s.saleguid
-                            AND LOWER(sc.role) = 'buyer'
+                              AND LOWER(sc.role) = 'buyer'
                         ),
                         ''
                     ) AS ss_buyer_name,
@@ -166,7 +174,7 @@ def get_month_closing(
                             )
                             FROM sale_contact sc
                             WHERE sc.saleguid = s.saleguid
-                            AND LOWER(sc.role) = 'seller'
+                              AND LOWER(sc.role) = 'seller'
                         ),
                         ''
                     ) AS ss_seller_name,
@@ -190,7 +198,7 @@ def get_month_closing(
                         WHEN LOWER(s.status) = 'expired' THEN NULL
                         WHEN be.transaction_status IS NULL OR s.status IS NULL THEN NULL
                         WHEN LOWER(be.transaction_status) = 'closed'
-                            AND LOWER(s.status) = 'archived'
+                             AND LOWER(s.status) = 'archived'
                         THEN 'match'
                         WHEN LOWER(be.transaction_status) = LOWER(s.status) THEN 'match'
                         WHEN LOWER(be.transaction_status) = 'cancelled'
@@ -201,14 +209,15 @@ def get_month_closing(
 
                     CASE
                         WHEN scn.officegrosscommissiononsale IS NULL
-                            OR be.total_gross_commission IS NULL
-                            OR scn.officegrosscommissiononsale = 0
-                            OR be.total_gross_commission = 0
+                          OR be.total_gross_commission IS NULL
+                          OR scn.officegrosscommissiononsale = 0
+                          OR be.total_gross_commission = 0
                         THEN NULL
                         WHEN scn.officegrosscommissiononsale <> be.total_gross_commission
                         THEN 'mismatch'
                         ELSE 'match'
                     END AS gross_commission_comparison
+
                 FROM brokerage_engine be
                 LEFT JOIN sale s ON s.saleguid = be.skyslopefileid
                 LEFT JOIN sale_commission scn ON scn.saleguid = s.saleguid
@@ -224,15 +233,15 @@ def get_month_closing(
                 AND (
                     CASE
                         WHEN be_transaction_status ILIKE 'pending'
-                             OR be_transaction_status ILIKE 'active'
-                             OR be_transaction_status ILIKE 'in_progress'
+                          OR be_transaction_status ILIKE 'active'
+                          OR be_transaction_status ILIKE 'in_progress'
                         THEN 'pending'
                         WHEN be_transaction_status ILIKE 'closed'
                         THEN 'closed'
                         WHEN be_transaction_status ILIKE 'cancelled'
-                             OR be_transaction_status ILIKE 'canceled'
-                             OR be_transaction_status ILIKE 'canceled/app'
-                             OR be_transaction_status ILIKE 'canceled/pend'
+                          OR be_transaction_status ILIKE 'canceled'
+                          OR be_transaction_status ILIKE 'canceled/app'
+                          OR be_transaction_status ILIKE 'canceled/pend'
                         THEN 'cancelled'
                         ELSE 'other'
                     END = %(status)s
@@ -306,7 +315,7 @@ def get_month_closing(
             cur.execute(data_query, params)
             rows = cur.fetchall()
 
-        # ---------------- NAME COMPARISON ADDITION ----------------
+        # ---------------- POST PROCESSING ----------------
         for row in rows:
             row["buyer_name_comparison"] = compare_names(
                 row.get("buyer_name"),
@@ -320,6 +329,23 @@ def get_month_closing(
                 row.get("be_listing_price"),
                 row.get("ss_listing_price")
             )
+
+        # ---------------- MISMATCH FILTER ----------------
+        if mismatch:
+            def has_mismatch(r):
+                return (
+                    r.get("sale_price_comparison") == "mismatch"
+                    or r.get("closed_date_comparison") == "mismatch"
+                    or r.get("contract_date_comparison") == "mismatch"
+                    or r.get("transaction_status_comparison") == "mismatch"
+                    or r.get("gross_commission_comparison") == "mismatch"
+                    or r.get("buyer_name_comparison") == "mismatch"
+                    or r.get("seller_name_comparison") == "mismatch"
+                    or r.get("listing_price_comparison") == "mismatch"
+                )
+
+            rows = [r for r in rows if has_mismatch(r)]
+            total = len(rows)
 
         return {
             "mode": "full_comparison",
