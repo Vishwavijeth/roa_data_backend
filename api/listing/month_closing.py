@@ -172,28 +172,28 @@ def get_month_closing(
                     ) AS ss_seller_name,
 
                     CASE
-                        WHEN be.sale_price IS DISTINCT FROM s.saleprice THEN true
-                        ELSE false
-                    END AS sale_price_mismatch,
+                        WHEN be.sale_price IS DISTINCT FROM s.saleprice THEN 'mismatch'
+                        ELSE 'match'
+                    END AS sale_price_comparison,
 
                     CASE
-                        WHEN be.closed_date IS DISTINCT FROM s.escrowclosingdate THEN true
-                        ELSE false
-                    END AS closed_date_mismatch,
+                        WHEN be.closed_date IS DISTINCT FROM s.escrowclosingdate THEN 'mismatch'
+                        ELSE 'match'
+                    END AS closed_date_comparison,
 
                     CASE
-                        WHEN be.contract_date IS DISTINCT FROM s.contractacceptancedate THEN true
-                        ELSE false
-                    END AS contract_date_mismatch,
+                        WHEN be.contract_date IS DISTINCT FROM s.contractacceptancedate THEN 'mismatch'
+                        ELSE 'match'
+                    END AS contract_date_comparison,
 
                     CASE
                         WHEN LOWER(s.status) = 'expired' THEN NULL
                         WHEN be.transaction_status IS NULL OR s.status IS NULL THEN NULL
-                        WHEN LOWER(be.transaction_status) = LOWER(s.status) THEN false
+                        WHEN LOWER(be.transaction_status) = LOWER(s.status) THEN 'match'
                         WHEN LOWER(be.transaction_status) = 'cancelled'
                              AND LOWER(s.status) IN ('canceled/app', 'canceled/pend')
-                        THEN false
-                        ELSE true
+                        THEN 'match'
+                        ELSE 'mismatch'
                     END AS transaction_status_mismatch,
 
                     CASE
