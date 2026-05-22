@@ -6,7 +6,6 @@ from fastapi import Query
 
 router = APIRouter()
 
-
 @router.get("/month-closing/listing")
 def get_month_closing(
     status: str = "all",
@@ -30,16 +29,16 @@ def get_month_closing(
         if search:
             search_clause = """
                 AND (
-                    LOWER(COALESCE(s.saleguid::text, '')) ILIKE %(search)s
-                    OR LOWER(COALESCE(sp.streetaddress, '')) ILIKE %(search)s
-                    OR LOWER(COALESCE(sp.county, '')) ILIKE %(search)s
-                    OR LOWER(COALESCE(sp.state, '')) ILIKE %(search)s
-                    OR LOWER(COALESCE(sp.zip, '')) ILIKE %(search)s
-                    OR LOWER(COALESCE(r.firstname, '')) ILIKE %(search)s
-                    OR LOWER(COALESCE(r.lastname, '')) ILIKE %(search)s
+                    COALESCE(s.saleguid::text, '') ILIKE %(search)s
+                    OR COALESCE(sp.streetaddress, '') ILIKE %(search)s
+                    OR COALESCE(sp.county, '') ILIKE %(search)s
+                    OR COALESCE(sp.state, '') ILIKE %(search)s
+                    OR COALESCE(sp.zip, '') ILIKE %(search)s
+                    OR COALESCE(r.firstname, '') ILIKE %(search)s
+                    OR COALESCE(r.lastname, '') ILIKE %(search)s
                 )
             """
-            search_params["search"] = f"%{search.lower()}%"
+            search_params["search"] = f"%{search}%"
 
         # ─────────────────────────────────────────────
         # SKY SLOPE MODE
@@ -49,7 +48,7 @@ def get_month_closing(
             params = {}
 
             if state:
-                shared_filters += " AND LOWER(sp.state) = LOWER(%(state)s)"
+                shared_filters += " AND sp.state ILIKE %(state)s"
                 params["state"] = state
 
             if from_close_date:
@@ -102,7 +101,10 @@ def get_month_closing(
             params["limit"] = page_size
             params["offset"] = offset
 
-            count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+            count_params = {
+                k: v for k, v in params.items()
+                if k not in ("limit", "offset")
+            }
 
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(count_query, count_params)
@@ -148,27 +150,52 @@ def get_month_closing(
         where_clause = " WHERE 1=1"
         params = {}
 
+        # ---------------- STATUS FILTER ----------------
         if status != "all":
             where_clause += """
                 AND (
                     CASE
-                        WHEN LOWER(be_transaction_status) IN ('pending','active','in_progress') THEN 'pending'
-                        WHEN LOWER(be_transaction_status) = 'closed' THEN 'closed'
-                        WHEN LOWER(be_transaction_status) IN ('cancelled','canceled','canceled/app','canceled/pend') THEN 'cancelled'
+                        WHEN be_transaction_status ILIKE 'pending'
+                             OR be_transaction_status ILIKE 'active'
+                             OR be_transaction_status ILIKE 'in_progress'
+                        THEN 'pending'
+
+                        WHEN be_transaction_status ILIKE 'closed'
+                        THEN 'closed'
+
+                        WHEN be_transaction_status ILIKE 'cancelled'
+                             OR be_transaction_status ILIKE 'canceled'
+                             OR be_transaction_status ILIKE 'canceled/app'
+                             OR be_transaction_status ILIKE 'canceled/pend'
+                        THEN 'cancelled'
+
                         ELSE 'other'
                     END = %(status)s
                 )
             """
-            params["status"] = status.lower()
+            params["status"] = status
 
+        # ---------------- STATE FILTER ----------------
         if state:
-            where_clause += " AND LOWER(b.state) = LOWER(%(state)s)"
+            where_clause += " AND b.state ILIKE %(state)s"
             params["state"] = state
 
+        # ---------------- TRANSACTION SPECIALIST FILTER ----------------
         if transaction_specialist:
-            where_clause += " AND LOWER(b.transaction_specialist) = LOWER(%(transaction_specialist)s)"
-            params["transaction_specialist"] = transaction_specialist
+            if transaction_specialist.lower() == "unassigned":
+                where_clause += """
+                    AND (
+                        b.transaction_specialist IS NULL
+                        OR b.transaction_specialist = ''
+                    )
+                """
+            else:
+                where_clause += """
+                    AND b.transaction_specialist = %(transaction_specialist)s
+                """
+                params["transaction_specialist"] = transaction_specialist
 
+        # ---------------- DATE FILTER ----------------
         if from_close_date:
             where_clause += " AND b.be_closed_date >= %(from_close_date)s"
             params["from_close_date"] = from_close_date
@@ -177,27 +204,44 @@ def get_month_closing(
             where_clause += " AND b.be_closed_date <= %(to_close_date)s"
             params["to_close_date"] = to_close_date
 
-        # ---------------- SEARCH (FULL MODE) ----------------
+        # ---------------- SEARCH FILTER ----------------
         if search:
             where_clause += """
                 AND (
-                    LOWER(COALESCE(b.transaction_id::text, '')) ILIKE %(search)s
-                    OR LOWER(COALESCE(b.property_address, '')) ILIKE %(search)s
-                    OR LOWER(COALESCE(b.state, '')) ILIKE %(search)s
-                    OR LOWER(COALESCE(b.transaction_specialist, '')) ILIKE %(search)s
-                    OR LOWER(COALESCE(b.buyer_name, '')) ILIKE %(search)s
-                    OR LOWER(COALESCE(b.seller_name, '')) ILIKE %(search)s
-                    OR LOWER(COALESCE(b.skyslopefileid::text, '')) ILIKE %(search)s
+                    COALESCE(b.transaction_id::text, '') ILIKE %(search)s
+                    OR COALESCE(b.property_address, '') ILIKE %(search)s
+                    OR COALESCE(b.state, '') ILIKE %(search)s
+                    OR COALESCE(b.transaction_specialist, '') ILIKE %(search)s
+                    OR COALESCE(b.buyer_name, '') ILIKE %(search)s
+                    OR COALESCE(b.seller_name, '') ILIKE %(search)s
+                    OR COALESCE(b.skyslopefileid::text, '') ILIKE %(search)s
                 )
             """
-            params["search"] = f"%{search.lower()}%"
+            params["search"] = f"%{search}%"
 
-        count_query = base_cte + " SELECT COUNT(*) AS total FROM base b" + where_clause + ";"
-        data_query = base_cte + " SELECT * FROM base b" + where_clause + " ORDER BY b.transaction_id LIMIT %(limit)s OFFSET %(offset)s;"
+        # ---------------- QUERIES ----------------
+        count_query = (
+            base_cte
+            + " SELECT COUNT(*) AS total FROM base b"
+            + where_clause
+            + ";"
+        )
+
+        data_query = (
+            base_cte
+            + " SELECT * FROM base b"
+            + where_clause
+            + " ORDER BY b.transaction_id"
+            + " LIMIT %(limit)s OFFSET %(offset)s;"
+        )
 
         params["limit"] = page_size
         params["offset"] = offset
-        count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+
+        count_params = {
+            k: v for k, v in params.items()
+            if k not in ("limit", "offset")
+        }
 
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(count_query, count_params)
