@@ -194,7 +194,7 @@ def get_month_closing(
                              AND LOWER(s.status) IN ('canceled/app', 'canceled/pend')
                         THEN 'match'
                         ELSE 'mismatch'
-                    END AS transaction_status_mismatch,
+                    END AS transaction_status_comparison,
 
                     CASE
                         WHEN scn.officegrosscommissiononsale IS NULL
@@ -205,7 +205,7 @@ def get_month_closing(
                         WHEN scn.officegrosscommissiononsale <> be.total_gross_commission
                         THEN 'mismatch'
                         ELSE 'match'
-                    END AS gross_commission_mismatch
+                    END AS gross_commission_comparison
                 FROM brokerage_engine be
                 LEFT JOIN sale s ON s.saleguid = be.skyslopefileid
                 LEFT JOIN sale_commission scn ON scn.saleguid = s.saleguid
@@ -305,15 +305,15 @@ def get_month_closing(
 
         # ---------------- NAME COMPARISON ADDITION ----------------
         for row in rows:
-            row["buyer_name_match"] = compare_names(
+            row["buyer_name_comparison"] = compare_names(
                 row.get("buyer_name"),
                 row.get("ss_buyer_name")
             )
-            row["seller_name_match"] = compare_names(
+            row["seller_name_comparison"] = compare_names(
                 row.get("seller_name"),
                 row.get("ss_seller_name")
             )
-            row["listing_price_match"] = compare_listing_price(
+            row["listing_price_comparison"] = compare_listing_price(
                 row.get("be_listing_price"),
                 row.get("ss_listing_price")
             )
