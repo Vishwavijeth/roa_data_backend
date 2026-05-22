@@ -16,12 +16,27 @@ def sale_price():
                     s.saleguid,
                     be.transaction_identifier_transactionid AS transactionid,
                     be.property_address AS propertyaddress,
+
+                    be.transaction_status,
+                    s.status,
+
                     s.saleprice AS skyslope_sale_price,
                     be.sale_price AS be_sale_price,
 
-                    CASE 
-                        WHEN s.saleguid IS NULL THEN 'no_skyslope_record'
-                        WHEN s.saleprice IS DISTINCT FROM be.sale_price THEN 'mismatch'
+                    CASE
+                        WHEN LOWER(be.transaction_status) = 'cancelled'
+                             AND LOWER(s.status) IN ('canceled/app', 'canceled/pend')
+                        THEN NULL
+
+                        WHEN LOWER(be.transaction_status) = 'cancelled'
+                        THEN NULL
+
+                        WHEN s.saleguid IS NULL
+                        THEN 'no_skyslope_record'
+
+                        WHEN s.saleprice IS DISTINCT FROM be.sale_price
+                        THEN 'mismatch'
+
                         ELSE 'match'
                     END AS match_result
 
@@ -50,7 +65,8 @@ def sale_price():
                 FROM sale s
                 JOIN brokerage_engine be
                     ON s.saleguid = be.skyslopefileid
-                WHERE s.saleprice IS DISTINCT FROM be.sale_price
+                WHERE LOWER(be.transaction_status) <> 'cancelled'
+                  AND s.saleprice IS DISTINCT FROM be.sale_price
             """)
             mismatch_count = cur.fetchone()["mismatch_count"]
 
@@ -74,12 +90,26 @@ def close_date():
                     be.transaction_identifier_transactionid AS transactionid,
                     be.property_address AS propertyaddress,
 
+                    be.transaction_status,
+                    s.status,
+
                     s.escrowclosingdate AS skyslope_close_date,
                     be.closed_date AS be_close_date,
 
                     CASE
-                        WHEN s.saleguid IS NULL THEN 'no_skyslope_record'
-                        WHEN s.escrowclosingdate IS DISTINCT FROM be.closed_date THEN 'mismatch'
+                        WHEN LOWER(be.transaction_status) = 'cancelled'
+                             AND LOWER(s.status) IN ('canceled/app', 'canceled/pend')
+                        THEN NULL
+
+                        WHEN LOWER(be.transaction_status) = 'cancelled'
+                        THEN NULL
+
+                        WHEN s.saleguid IS NULL
+                        THEN 'no_skyslope_record'
+
+                        WHEN s.escrowclosingdate IS DISTINCT FROM be.closed_date
+                        THEN 'mismatch'
+
                         ELSE 'match'
                     END AS match_result
 
@@ -92,6 +122,8 @@ def close_date():
                 saleguid,
                 transactionid,
                 propertyaddress,
+                transaction_status,
+                status,
                 skyslope_close_date,
                 be_close_date,
                 match_result
@@ -108,7 +140,8 @@ def close_date():
                 FROM sale s
                 JOIN brokerage_engine be
                     ON s.saleguid = be.skyslopefileid
-                WHERE s.escrowclosingdate IS DISTINCT FROM be.closed_date
+                WHERE LOWER(be.transaction_status) <> 'cancelled'
+                  AND s.escrowclosingdate IS DISTINCT FROM be.closed_date
             """)
             mismatch_count = cur.fetchone()["mismatch_count"]
 
@@ -132,12 +165,26 @@ def contract_date():
                     be.transaction_identifier_transactionid AS transactionid,
                     be.property_address AS propertyaddress,
 
+                    be.transaction_status,
+                    s.status,
+
                     s.contractacceptancedate AS skyslope_contract_date,
                     be.contract_date AS be_contract_date,
 
                     CASE
-                        WHEN s.saleguid IS NULL THEN 'no_skyslope_record'
-                        WHEN s.contractacceptancedate IS DISTINCT FROM be.contract_date THEN 'mismatch'
+                        WHEN LOWER(be.transaction_status) = 'cancelled'
+                             AND LOWER(s.status) IN ('canceled/app', 'canceled/pend')
+                        THEN NULL
+
+                        WHEN LOWER(be.transaction_status) = 'cancelled'
+                        THEN NULL
+
+                        WHEN s.saleguid IS NULL
+                        THEN 'no_skyslope_record'
+
+                        WHEN s.contractacceptancedate IS DISTINCT FROM be.contract_date
+                        THEN 'mismatch'
+
                         ELSE 'match'
                     END AS match_result
 
@@ -166,7 +213,8 @@ def contract_date():
                 FROM sale s
                 JOIN brokerage_engine be
                     ON s.saleguid = be.skyslopefileid
-                WHERE s.contractacceptancedate IS DISTINCT FROM be.contract_date
+                WHERE LOWER(be.transaction_status) <> 'cancelled'
+                  AND s.contractacceptancedate IS DISTINCT FROM be.contract_date
             """)
             mismatch_count = cur.fetchone()["mismatch_count"]
 
@@ -190,18 +238,32 @@ def listing_price():
                     be.transaction_identifier_transactionid AS transactionid,
                     be.property_address AS propertyaddress,
 
+                    be.transaction_status,
+                    s.status,
+
                     s.listingprice AS skyslope_listing_price,
                     be.listing_price AS be_listing_price,
 
                     CASE
-                        WHEN s.saleguid IS NULL THEN 'no_skyslope_record'
+                        WHEN LOWER(be.transaction_status) = 'cancelled'
+                             AND LOWER(s.status) IN ('canceled/app', 'canceled/pend')
+                        THEN NULL
+
+                        WHEN LOWER(be.transaction_status) = 'cancelled'
+                        THEN NULL
+
+                        WHEN s.saleguid IS NULL
+                        THEN 'no_skyslope_record'
+
                         WHEN s.listingprice IS NULL
-                            OR be.listing_price IS NULL
-                            OR s.listingprice = 0
-                            OR be.listing_price = 0
-                            THEN NULL
+                             OR be.listing_price IS NULL
+                             OR s.listingprice = 0
+                             OR be.listing_price = 0
+                        THEN NULL
+
                         WHEN s.listingprice IS DISTINCT FROM be.listing_price
-                            THEN 'mismatch'
+                        THEN 'mismatch'
+
                         ELSE 'match'
                     END AS match_result
 
@@ -231,7 +293,8 @@ def listing_price():
                 JOIN brokerage_engine be
                     ON s.saleguid = be.skyslopefileid
                 WHERE
-                    s.listingprice IS NOT NULL
+                    LOWER(be.transaction_status) <> 'cancelled'
+                    AND s.listingprice IS NOT NULL
                     AND be.listing_price IS NOT NULL
                     AND s.listingprice <> 0
                     AND be.listing_price <> 0
@@ -259,18 +322,32 @@ def compare_gross_commission():
                     be.transaction_identifier_transactionid AS transactionid,
                     be.property_address AS propertyaddress,
 
+                    be.transaction_status,
+                    s.status,
+
                     scn.officeGrossCommissionOnSale AS skyslope_gross_commission,
                     be.total_gross_commission AS be_gross_commission,
 
                     CASE
-                        WHEN s.saleguid IS NULL THEN 'no_skyslope_record'
+                        WHEN LOWER(be.transaction_status) = 'cancelled'
+                             AND LOWER(s.status) IN ('canceled/app', 'canceled/pend')
+                        THEN NULL
+
+                        WHEN LOWER(be.transaction_status) = 'cancelled'
+                        THEN NULL
+
+                        WHEN s.saleguid IS NULL
+                        THEN 'no_skyslope_record'
+
                         WHEN scn.officeGrossCommissionOnSale IS NULL
-                            OR be.total_gross_commission IS NULL
-                            OR scn.officeGrossCommissionOnSale = 0
-                            OR be.total_gross_commission = 0
-                            THEN NULL
-                        WHEN scn.officeGrossCommissionOnSale <> be.total_gross_commission
-                            THEN 'mismatch'
+                             OR be.total_gross_commission IS NULL
+                             OR scn.officeGrossCommissionOnSale = 0
+                             OR be.total_gross_commission = 0
+                        THEN NULL
+
+                        WHEN scn.officeGrossCommissionOnSale IS DISTINCT FROM be.total_gross_commission
+                        THEN 'mismatch'
+
                         ELSE 'match'
                     END AS match_result
 
@@ -299,11 +376,12 @@ def compare_gross_commission():
                 JOIN brokerage_engine be
                     ON s.saleguid = be.skyslopefileid
                 WHERE
-                    scn.officeGrossCommissionOnSale IS NOT NULL
+                    LOWER(be.transaction_status) <> 'cancelled'
+                    AND scn.officeGrossCommissionOnSale IS NOT NULL
                     AND be.total_gross_commission IS NOT NULL
                     AND scn.officeGrossCommissionOnSale <> 0
                     AND be.total_gross_commission <> 0
-                    AND scn.officeGrossCommissionOnSale <> be.total_gross_commission
+                    AND scn.officeGrossCommissionOnSale IS DISTINCT FROM be.total_gross_commission
             """)
 
             mismatch_count = cur.fetchone()["mismatch_count"]
@@ -368,8 +446,11 @@ def status():
                     s.status AS skyslope_status,
 
                     CASE
-                        -- new requirement
                         WHEN s.saleguid IS NULL THEN 'no_skyslope_record'
+
+                        WHEN LOWER(be.transaction_status) = 'closed'
+                             AND LOWER(s.status) = 'archived'
+                        THEN NULL
 
                         WHEN LOWER(be.transaction_status) = LOWER(s.status)
                         THEN 'match'
@@ -410,6 +491,11 @@ def status():
                         AND LOWER(s.status) IN ('canceled', 'cancelled', 'canceled/pend', 'canceled/app')
                     )
 
+                    OR (
+                        LOWER(be.transaction_status) = 'closed'
+                        AND LOWER(s.status) = 'archived'
+                    )
+
                     OR LOWER(be.transaction_status) = LOWER(s.status)
                 )
             """)
@@ -435,18 +521,22 @@ def compare_buyer_name():
                 be.transaction_identifier_transactionid AS transactionid,
                 be.property_address AS propertyaddress,
 
+                be.transaction_status,
+                s.status,
+
                 COALESCE(
-                        (
-                            SELECT STRING_AGG(
-                                TRIM(COALESCE(sc.firstname, '') || ' ' || COALESCE(sc.lastname, '')),
-                                ', '
-                            )
-                            FROM sale_contact sc
-                            WHERE sc.saleguid = s.saleguid
-                            AND LOWER(sc.role) = 'buyer'
-                        ),
-                        ''
-                    ) AS skyslope_buyer_name,
+                    (
+                        SELECT STRING_AGG(
+                            TRIM(COALESCE(sc.firstname, '') || ' ' || COALESCE(sc.lastname, '')),
+                            ', '
+                        )
+                        FROM sale_contact sc
+                        WHERE sc.saleguid = s.saleguid
+                        AND LOWER(sc.role) = 'buyer'
+                    ),
+                    ''
+                ) AS skyslope_buyer_name,
+
                 be.buyer_name AS be_buyer_name
 
             FROM brokerage_engine be
@@ -461,16 +551,21 @@ def compare_buyer_name():
             rows = cur.fetchall()
 
         results = []
-
         mismatch_count = 0
 
         for row in rows:
-
             skyslope_buyer_name = row.get("skyslope_buyer_name")
             be_buyer_name = row.get("be_buyer_name")
 
+            be_status = row.get("transaction_status")
+            s_status = row.get("status")
+
             if row.get("saleguid") is None:
                 match_result = "no_skyslope_record"
+
+            elif be_status and be_status.lower() == "cancelled":
+                match_result = None
+
             else:
                 match_result = compare_names(
                     be_buyer_name,
@@ -484,6 +579,8 @@ def compare_buyer_name():
                 "saleguid": row.get("saleguid"),
                 "transactionid": row.get("transactionid"),
                 "propertyaddress": row.get("propertyaddress"),
+                "transaction_status": be_status,
+                "status": s_status,
                 "skyslope_buyer_name": skyslope_buyer_name,
                 "be_buyer_name": be_buyer_name,
                 "match_result": match_result
@@ -508,18 +605,22 @@ def compare_seller_name():
                 be.transaction_identifier_transactionid AS transactionid,
                 be.property_address AS propertyaddress,
 
+                be.transaction_status,
+                s.status,
+
                 COALESCE(
-                        (
-                            SELECT STRING_AGG(
-                                TRIM(COALESCE(sc.firstname, '') || ' ' || COALESCE(sc.lastname, '')),
-                                ', '
-                            )
-                            FROM sale_contact sc
-                            WHERE sc.saleguid = s.saleguid
-                            AND LOWER(sc.role) = 'seller'
-                        ),
-                        ''
-                    ) AS skyslope_seller_name,
+                    (
+                        SELECT STRING_AGG(
+                            TRIM(COALESCE(sc.firstname, '') || ' ' || COALESCE(sc.lastname, '')),
+                            ', '
+                        )
+                        FROM sale_contact sc
+                        WHERE sc.saleguid = s.saleguid
+                        AND LOWER(sc.role) = 'seller'
+                    ),
+                    ''
+                ) AS skyslope_seller_name,
+
                 be.seller_name AS be_seller_name
 
             FROM brokerage_engine be
@@ -534,16 +635,20 @@ def compare_seller_name():
             rows = cur.fetchall()
 
         results = []
-
         mismatch_count = 0
 
         for row in rows:
-
             skyslope_seller_name = row.get("skyslope_seller_name")
             be_seller_name = row.get("be_seller_name")
 
+            be_status = row.get("transaction_status")
+
             if row.get("saleguid") is None:
                 match_result = "no_skyslope_record"
+
+            elif be_status and be_status.lower() == "cancelled":
+                match_result = None
+
             else:
                 match_result = compare_names(
                     be_seller_name,
@@ -557,8 +662,10 @@ def compare_seller_name():
                 "saleguid": row.get("saleguid"),
                 "transactionid": row.get("transactionid"),
                 "propertyaddress": row.get("propertyaddress"),
-                "skyslope_buyer_name": skyslope_seller_name,
-                "be_buyer_name": be_seller_name,
+                "transaction_status": be_status,
+                "status": row.get("status"),
+                "skyslope_seller_name": skyslope_seller_name,
+                "be_seller_name": be_seller_name,
                 "match_result": match_result
             })
 
@@ -581,14 +688,18 @@ def compare_buying_agent_name():
                 be.transaction_identifier_transactionid AS transactionid,
                 be.property_address AS propertyaddress,
 
+                be.transaction_status,
+                s.status,
+
                 COALESCE(
-                        (
-                            SELECT TRIM(COALESCE(uu.firstname, '') || ' ' || COALESCE(uu.lastname, ''))
-                            FROM users uu
-                            WHERE uu.userguid = s.agentguid
-                        ),
-                        ''
-                    ) AS skyslope_buying_agent_name,
+                    (
+                        SELECT TRIM(COALESCE(uu.firstname, '') || ' ' || COALESCE(uu.lastname, ''))
+                        FROM users uu
+                        WHERE uu.userguid = s.agentguid
+                    ),
+                    ''
+                ) AS skyslope_buying_agent_name,
+
                 be.buying_agent_name AS be_buying_agent_name
 
             FROM brokerage_engine be
@@ -603,16 +714,20 @@ def compare_buying_agent_name():
             rows = cur.fetchall()
 
         results = []
-
         mismatch_count = 0
 
         for row in rows:
-
             skyslope_buying_agent_name = row.get("skyslope_buying_agent_name")
             be_buying_agent_name = row.get("be_buying_agent_name")
 
+            be_status = row.get("transaction_status")
+
             if row.get("saleguid") is None:
                 match_result = "no_skyslope_record"
+
+            elif be_status and be_status.lower() == "cancelled":
+                match_result = None
+
             else:
                 match_result = compare_buying_agent(
                     be_buying_agent_name,
@@ -626,8 +741,10 @@ def compare_buying_agent_name():
                 "saleguid": row.get("saleguid"),
                 "transactionid": row.get("transactionid"),
                 "propertyaddress": row.get("propertyaddress"),
-                "skyslope_buyer_name": skyslope_buying_agent_name,
-                "be_buyer_name": be_buying_agent_name,
+                "transaction_status": be_status,
+                "status": row.get("status"),
+                "skyslope_buying_agent_name": skyslope_buying_agent_name,
+                "be_buying_agent_name": be_buying_agent_name,
                 "match_result": match_result
             })
 
@@ -650,16 +767,20 @@ def compare_title_company():
                 be.transaction_identifier_transactionid AS transactionid,
                 be.property_address AS propertyaddress,
 
+                be.transaction_status,
+                s.status,
+
                 COALESCE(
-                        (
-                            SELECT sc.company
-                            FROM sale_contact sc
-                            WHERE sc.saleguid = s.saleguid
-                            AND LOWER(sc.role) = 'titlecompany'
-                            LIMIT 1
-                        ),
-                        ''
-                    ) AS skyslope_title_company,
+                    (
+                        SELECT sc.company
+                        FROM sale_contact sc
+                        WHERE sc.saleguid = s.saleguid
+                        AND LOWER(sc.role) = 'titlecompany'
+                        LIMIT 1
+                    ),
+                    ''
+                ) AS skyslope_title_company,
+
                 be.da_title_company AS be_title_company
 
             FROM brokerage_engine be
@@ -674,16 +795,20 @@ def compare_title_company():
             rows = cur.fetchall()
 
         results = []
-
         mismatch_count = 0
 
         for row in rows:
-
             skyslope_title_company = row.get("skyslope_title_company")
             be_title_company = row.get("be_title_company")
 
+            be_status = row.get("transaction_status")
+
             if row.get("saleguid") is None:
                 match_result = "no_skyslope_record"
+
+            elif be_status and be_status.lower() == "cancelled":
+                match_result = None
+
             else:
                 match_result = compare_names(
                     be_title_company,
@@ -697,8 +822,10 @@ def compare_title_company():
                 "saleguid": row.get("saleguid"),
                 "transactionid": row.get("transactionid"),
                 "propertyaddress": row.get("propertyaddress"),
-                "skyslope_buyer_name": skyslope_title_company,
-                "be_buyer_name": be_title_company,
+                "transaction_status": be_status,
+                "status": row.get("status"),
+                "skyslope_title_company": skyslope_title_company,
+                "be_title_company": be_title_company,
                 "match_result": match_result
             })
 
