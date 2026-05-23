@@ -7,12 +7,35 @@ router = APIRouter()
 def norm(x):
     return str(x or "").replace("\u00A0", "").strip().lower()
 
+def get_skyslope_statuses(conn):
+    cursor = conn.cursor()
+
+    query = """
+        SELECT DISTINCT status AS status
+        FROM sale
+        WHERE status IS NOT NULL
+        ORDER BY status
+    """
+
+    cursor.execute(query)
+    return [row[0] for row in cursor.fetchall()]
+
+@router.get("/skyslope/status-filter")
+def skyslope_status_filter():
+    conn = get_conn()
+
+    status_list = get_skyslope_statuses(conn)
+
+    return {
+        "status_list": status_list
+    }
+
 @router.get("/skyslope/sync_info")
 def skyslope_sync_info():
     sync_info = get_skyslope_sync()
 
     return {
-        "sync_info": sync_info
+        "sync_info": sync_info,
     }
 
 @router.get("/skyslope_api")
