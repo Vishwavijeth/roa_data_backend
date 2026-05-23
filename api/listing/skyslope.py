@@ -116,7 +116,7 @@ def skyslope_api(
 
             CASE
                 WHEN be.transaction_identifier_transactionid IS NULL
-                THEN 'No related broker BE data'
+                THEN 'No related BE data'
                 ELSE be.transaction_identifier_transactionid::text
             END AS transaction_id,
 
