@@ -4,6 +4,29 @@ from services.loaders import get_be_sync
 
 router = APIRouter()
 
+def get_brokerage_engine_statuses(conn):
+    cursor = conn.cursor()
+
+    query = """
+        SELECT DISTINCT transaction_status AS status
+        FROM brokerage_engine
+        WHERE transaction_status IS NOT NULL
+        ORDER BY transaction_status
+    """
+
+    cursor.execute(query)
+    return [row[0] for row in cursor.fetchall()]
+
+@router.get("/brokerage_engine/status-filter")
+def brokerage_engine_status_list():
+    conn = get_conn()
+
+    status_list = get_brokerage_engine_statuses(conn)
+
+    return {
+        "status_list": status_list
+    }
+
 @router.get("/brokerage_engine/sync_info")
 def brokerage_engine_sync_info():
     return get_be_sync()
