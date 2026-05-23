@@ -114,14 +114,6 @@ def skyslope_api(
         SELECT
             s.saleguid,
 
-            CASE
-                WHEN be.transaction_identifier_transactionid IS NULL
-                THEN 'No related BE data'
-                ELSE be.transaction_identifier_transactionid::text
-            END AS transaction_id,
-
-            s.contractacceptancedate AS contract_date,
-
             CONCAT_WS(', ',
                 CONCAT_WS(' ', sp.streetnumber, sp.streetaddress),
                 sp.city,
@@ -130,6 +122,14 @@ def skyslope_api(
             ) AS propertyaddress,
 
             s.escrowclosingdate AS close_date,
+
+            s.status,
+
+            CASE
+                WHEN be.transaction_identifier_transactionid IS NULL
+                THEN 'No related BE data'
+                ELSE be.transaction_identifier_transactionid::text
+            END AS transaction_id,
 
             NULLIF(
                 COALESCE(
@@ -159,7 +159,7 @@ def skyslope_api(
                 ''
             ) AS buyer_agent_name,
 
-            s.status,
+            s.contractacceptancedate AS contract_date,
 
             NULLIF(
                 TRIM(COALESCE(r.firstname, '') || ' ' || COALESCE(r.lastname, '')),
