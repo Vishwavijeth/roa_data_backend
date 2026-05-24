@@ -120,8 +120,6 @@ def gross_commission(
                 saleguid,
                 transactionid,
                 propertyaddress,
-                transaction_status,
-                status,
                 skyslope_gross_commission,
                 be_gross_commission,
                 match_result

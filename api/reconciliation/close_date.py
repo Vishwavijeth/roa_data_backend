@@ -128,8 +128,6 @@ def close_date(
                 saleguid,
                 transactionid,
                 propertyaddress,
-                transaction_status,
-                status,
                 skyslope_close_date,
                 be_close_date,
                 match_result
