@@ -12,6 +12,7 @@ from api.listing.skyslope_sync_logs import router as skyslope_sync_logs_router
 from api.dashboards.reviewer import router as review_dash_router
 from api.listing.cda_sent import router as cda_sent_router
 from api.listing.month_closing import router as month_closing_router
+from api.reconciliation.sale_price import router as sale_price_router
 
 app = FastAPI()
 
@@ -35,6 +36,7 @@ app.include_router(skyslope_sync_router)
 app.include_router(skyslope_sync_logs_router)
 app.include_router(cda_sent_router)
 app.include_router(month_closing_router)
+app.include_router(sale_price_router)
 
 from mangum import Mangum
 
