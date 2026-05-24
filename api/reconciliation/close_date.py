@@ -4,19 +4,20 @@ from psycopg2.extras import RealDictCursor
 
 router = APIRouter()
 
-SALE_PRICE_BASE_QUERY = """
+CLOSE_DATE_BASE_QUERY = """
 WITH base AS (
     SELECT
         be.skyslopefileid AS skyslopefileid,
         s.saleguid,
+
         be.transaction_identifier_transactionid AS transactionid,
         be.property_address AS propertyaddress,
 
         be.transaction_status AS be_transaction_status,
         s.status AS skyslope_status,
 
-        s.saleprice AS skyslope_sale_price,
-        be.sale_price AS be_sale_price,
+        s.escrowclosingdate AS skyslope_close_date,
+        be.closed_date AS be_close_date,
 
         CASE
             WHEN s.saleguid IS NULL
@@ -29,7 +30,7 @@ WITH base AS (
             WHEN LOWER(be.transaction_status) = 'cancelled'
                 THEN NULL
 
-            WHEN s.saleprice IS DISTINCT FROM be.sale_price
+            WHEN s.escrowclosingdate IS DISTINCT FROM be.closed_date
                 THEN 'mismatch'
 
             ELSE 'match'
@@ -41,13 +42,13 @@ WITH base AS (
 )
 """
 
-@router.get("/compare/sale_price/summary")
-def sale_price_summary():
+@router.get("/compare/close_date/summary")
+def close_date_summary():
     conn = get_conn()
 
     try:
         query = f"""
-            {SALE_PRICE_BASE_QUERY}
+            {CLOSE_DATE_BASE_QUERY}
 
             SELECT
                 COUNT(*) AS total_count,
@@ -96,9 +97,8 @@ def sale_price_summary():
     finally:
         conn.close()
 
-
-@router.get("/compare/sale_price")
-def sale_price(
+@router.get("/compare/close_date")
+def close_date(
     page: int = Query(default=1, ge=1),
     mismatch: bool = Query(default=False),
     no_skyslope: bool = Query(default=False)
@@ -122,14 +122,16 @@ def sale_price(
             where_clause = "WHERE " + " AND ".join(conditions)
 
         query = f"""
-            {SALE_PRICE_BASE_QUERY}
+            {CLOSE_DATE_BASE_QUERY}
 
             SELECT
                 saleguid,
                 transactionid,
                 propertyaddress,
-                skyslope_sale_price,
-                be_sale_price,
+                transaction_status,
+                status,
+                skyslope_close_date,
+                be_close_date,
                 match_result
             FROM base
             {where_clause}
@@ -138,7 +140,7 @@ def sale_price(
         """
 
         count_query = f"""
-            {SALE_PRICE_BASE_QUERY}
+            {CLOSE_DATE_BASE_QUERY}
 
             SELECT COUNT(*) AS total_count
             FROM base
@@ -154,6 +156,7 @@ def sale_price(
 
         return {
             "page": page,
+            "page_size": limit,
             "total_count": total_count,
             "total_pages": (total_count + limit - 1) // limit,
             "data": rows
