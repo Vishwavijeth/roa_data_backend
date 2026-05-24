@@ -4,19 +4,20 @@ from psycopg2.extras import RealDictCursor
 
 router = APIRouter()
 
-SALE_PRICE_BASE_QUERY = """
+GROSS_COMMISSION_BASE_QUERY = """
 WITH base AS (
     SELECT
         be.skyslopefileid AS skyslopefileid,
         s.saleguid,
+
         be.transaction_identifier_transactionid AS transactionid,
         be.property_address AS propertyaddress,
 
         be.transaction_status AS be_transaction_status,
         s.status AS skyslope_status,
 
-        s.saleprice AS skyslope_sale_price,
-        be.sale_price AS be_sale_price,
+        scn.officeGrossCommissionOnSale AS skyslope_gross_commission,
+        be.total_gross_commission AS be_gross_commission,
 
         CASE
             WHEN s.saleguid IS NULL
@@ -29,7 +30,13 @@ WITH base AS (
             WHEN LOWER(be.transaction_status) = 'cancelled'
                 THEN NULL
 
-            WHEN s.saleprice IS DISTINCT FROM be.sale_price
+            WHEN scn.officeGrossCommissionOnSale IS NULL
+                 OR be.total_gross_commission IS NULL
+                 OR scn.officeGrossCommissionOnSale = 0
+                 OR be.total_gross_commission = 0
+                THEN NULL
+
+            WHEN scn.officeGrossCommissionOnSale IS DISTINCT FROM be.total_gross_commission
                 THEN 'mismatch'
 
             ELSE 'match'
@@ -38,31 +45,26 @@ WITH base AS (
     FROM brokerage_engine be
     LEFT JOIN sale s
         ON s.saleguid::text = be.skyslopefileid::text
+
+    LEFT JOIN sale_commission scn
+        ON scn.saleguid::text = be.skyslopefileid::text
 )
 """
 
-@router.get("/compare/sale_price/summary")
-def sale_price_summary():
+@router.get("/compare/gross_commission/summary")
+def gross_commission_summary():
     conn = get_conn()
 
     try:
         query = f"""
-            {SALE_PRICE_BASE_QUERY}
+            {GROSS_COMMISSION_BASE_QUERY}
 
             SELECT
                 COUNT(*) AS total_count,
 
-                COUNT(*) FILTER (
-                    WHERE match_result = 'match'
-                ) AS match_count,
-
-                COUNT(*) FILTER (
-                    WHERE match_result = 'mismatch'
-                ) AS mismatch_count,
-
-                COUNT(*) FILTER (
-                    WHERE match_result = 'no_skyslope_record'
-                ) AS no_skyslope_record_count
+                COUNT(*) FILTER (WHERE match_result = 'match') AS match_count,
+                COUNT(*) FILTER (WHERE match_result = 'mismatch') AS mismatch_count,
+                COUNT(*) FILTER (WHERE match_result = 'no_skyslope_record') AS no_skyslope_record_count
 
             FROM base;
         """
@@ -76,29 +78,19 @@ def sale_price_summary():
 
         comparison_total = match_count + mismatch_count
 
-        match_percentage = (
-            round((match_count / comparison_total) * 100, 2)
-            if comparison_total else 0
-        )
-
-        mismatch_percentage = (
-            round((mismatch_count / comparison_total) * 100, 2)
-            if comparison_total else 0
-        )
-
         return {
             "total_count": result["total_count"],
-            "match_percentage": match_percentage,
-            "mismatch_percentage": mismatch_percentage,
+            "match_percentage": round((match_count / comparison_total) * 100, 2) if comparison_total else 0,
+            "mismatch_percentage": round((mismatch_count / comparison_total) * 100, 2) if comparison_total else 0,
             "no_skyslope_record_count": result["no_skyslope_record_count"]
+
         }
 
     finally:
         conn.close()
 
-
-@router.get("/compare/sale_price")
-def sale_price(
+@router.get("/compare/gross_commission")
+def gross_commission(
     page: int = Query(default=1, ge=1),
     mismatch: bool = Query(default=False),
     no_skyslope: bool = Query(default=False)
@@ -122,14 +114,16 @@ def sale_price(
             where_clause = "WHERE " + " AND ".join(conditions)
 
         query = f"""
-            {SALE_PRICE_BASE_QUERY}
+            {GROSS_COMMISSION_BASE_QUERY}
 
             SELECT
                 saleguid,
                 transactionid,
                 propertyaddress,
-                skyslope_sale_price,
-                be_sale_price,
+                transaction_status,
+                status,
+                skyslope_gross_commission,
+                be_gross_commission,
                 match_result
             FROM base
             {where_clause}
@@ -138,7 +132,7 @@ def sale_price(
         """
 
         count_query = f"""
-            {SALE_PRICE_BASE_QUERY}
+            {GROSS_COMMISSION_BASE_QUERY}
 
             SELECT COUNT(*) AS total_count
             FROM base
@@ -154,6 +148,7 @@ def sale_price(
 
         return {
             "page": page,
+            "page_size": limit,
             "total_count": total_count,
             "total_pages": (total_count + limit - 1) // limit,
             "data": rows
