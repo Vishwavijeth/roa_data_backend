@@ -38,7 +38,7 @@ WITH base AS (
 
     FROM brokerage_engine be
     LEFT JOIN sale s
-        ON s.saleguid::text = be.skyslopefileid::text
+        ON s.saleguid = be.skyslopefileid
 )
 """
 

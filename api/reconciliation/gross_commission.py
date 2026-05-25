@@ -7,7 +7,7 @@ router = APIRouter()
 GROSS_COMMISSION_BASE_QUERY = """
 WITH base AS (
     SELECT
-        be.skyslopefileid AS skyslopefileid,
+        be.skyslopefileid,
         s.saleguid,
 
         be.transaction_identifier_transactionid AS transactionid,
@@ -23,11 +23,7 @@ WITH base AS (
             WHEN s.saleguid IS NULL
                 THEN 'no_skyslope_record'
 
-            WHEN LOWER(be.transaction_status) = 'cancelled'
-                 AND LOWER(COALESCE(s.status, '')) IN ('canceled/app', 'canceled/pend')
-                THEN NULL
-
-            WHEN LOWER(be.transaction_status) = 'cancelled'
+            WHEN be.transaction_status ILIKE 'cancelled'
                 THEN NULL
 
             WHEN scn.officeGrossCommissionOnSale IS NULL
@@ -43,11 +39,12 @@ WITH base AS (
         END AS match_result
 
     FROM brokerage_engine be
+
     LEFT JOIN sale s
-        ON s.saleguid::text = be.skyslopefileid::text
+        ON s.saleguid = be.skyslopefileid
 
     LEFT JOIN sale_commission scn
-        ON scn.saleguid::text = be.skyslopefileid::text
+        ON scn.saleguid = be.skyslopefileid
 )
 """
 
