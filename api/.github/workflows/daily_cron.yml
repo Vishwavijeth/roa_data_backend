@@ -1,0 +1,15 @@
+name: Daily Cron Test (15:30 IST)
+
+on:
+  schedule:
+    - cron: "0 10 * * *"   # 15:30 IST
+  workflow_dispatch:       # manual trigger
+
+jobs:
+  trigger-cron:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Call FastAPI Cron
+        run: |
+          curl -X GET "https://roa-data-backend.vercel.app/cron-data-sync"

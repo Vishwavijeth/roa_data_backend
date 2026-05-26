@@ -16,6 +16,7 @@ from api.reconciliation.sale_price import router as sale_price_router
 from api.reconciliation.close_date import router as close_date_router
 from api.reconciliation.gross_commission import router as gci_router
 from api.reconciliation.status import router as status_router
+from api.cron import router as cron_router
 
 app = FastAPI()
 
@@ -43,6 +44,7 @@ app.include_router(sale_price_router)
 app.include_router(close_date_router)
 app.include_router(gci_router)
 app.include_router(status_router)
+app.include_router(cron_router)
 
 from mangum import Mangum
 
