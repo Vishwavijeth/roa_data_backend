@@ -28,8 +28,12 @@ def contract_date():
                              AND LOWER(s.status) IN ('canceled/app', 'canceled/pend')
                         THEN NULL
 
-                        WHEN LOWER(be.transaction_status) = 'cancelled'
-                        THEN NULL
+                        WHEN be.transaction_status ILIKE 'cancelled'
+                            AND (
+                                s.status ILIKE 'canceled/pend'
+                                OR s.status ILIKE 'canceled/app'
+                            )
+                            THEN NULL
 
                         WHEN s.saleguid IS NULL
                         THEN 'no_skyslope_record'
@@ -101,8 +105,12 @@ def listing_price():
                              AND LOWER(s.status) IN ('canceled/app', 'canceled/pend')
                         THEN NULL
 
-                        WHEN LOWER(be.transaction_status) = 'cancelled'
-                        THEN NULL
+                        WHEN be.transaction_status ILIKE 'cancelled'
+                            AND (
+                                s.status ILIKE 'canceled/pend'
+                                OR s.status ILIKE 'canceled/app'
+                            )
+                            THEN NULL
 
                         WHEN s.saleguid IS NULL
                         THEN 'no_skyslope_record'
@@ -252,7 +260,12 @@ def compare_buyer_name():
             if row.get("saleguid") is None:
                 match_result = "no_skyslope_record"
 
-            elif be_status and be_status.lower() == "cancelled":
+            elif (
+                    be_status
+                    and be_status.lower() == "cancelled"
+                    and s_status
+                    and s_status.lower() in ["canceled/pend", "canceled/app"]
+                ):
                 match_result = None
 
             else:
@@ -331,11 +344,17 @@ def compare_seller_name():
             be_seller_name = row.get("be_seller_name")
 
             be_status = row.get("transaction_status")
+            s_status = row.get("status")
 
             if row.get("saleguid") is None:
                 match_result = "no_skyslope_record"
 
-            elif be_status and be_status.lower() == "cancelled":
+            elif (
+                    be_status
+                    and be_status.lower() == "cancelled"
+                    and s_status
+                    and s_status.lower() in ["canceled/pend", "canceled/app"]
+                ):
                 match_result = None
 
             else:
@@ -410,11 +429,17 @@ def compare_buying_agent_name():
             be_buying_agent_name = row.get("be_buying_agent_name")
 
             be_status = row.get("transaction_status")
+            s_status = row.get("status")
 
             if row.get("saleguid") is None:
                 match_result = "no_skyslope_record"
 
-            elif be_status and be_status.lower() == "cancelled":
+            elif (
+                    be_status
+                    and be_status.lower() == "cancelled"
+                    and s_status
+                    and s_status.lower() in ["canceled/pend", "canceled/app"]
+                ):
                 match_result = None
 
             else:
@@ -491,11 +516,17 @@ def compare_title_company():
             be_title_company = row.get("be_title_company")
 
             be_status = row.get("transaction_status")
+            s_status = row.get("status")
 
             if row.get("saleguid") is None:
                 match_result = "no_skyslope_record"
 
-            elif be_status and be_status.lower() == "cancelled":
+            elif (
+                    be_status
+                    and be_status.lower() == "cancelled"
+                    and s_status
+                    and s_status.lower() in ["canceled/pend", "canceled/app"]
+                ):
                 match_result = None
 
             else:
