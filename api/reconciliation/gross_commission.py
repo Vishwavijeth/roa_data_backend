@@ -52,6 +52,7 @@ WITH base AS (
 )
 """
 
+
 @router.get("/compare/gross_commission/summary")
 def gross_commission_summary():
     conn = get_conn()
