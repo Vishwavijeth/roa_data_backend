@@ -27,7 +27,11 @@ WITH base AS (
                  AND LOWER(COALESCE(s.status, '')) IN ('canceled/app', 'canceled/pend')
                 THEN NULL
 
-            WHEN LOWER(be.transaction_status) = 'cancelled'
+            WHEN be.transaction_status ILIKE 'cancelled'
+                AND (
+                    s.status ILIKE 'canceled/pend'
+                    OR s.status ILIKE 'canceled/app'
+                )
                 THEN NULL
 
             WHEN s.escrowclosingdate IS DISTINCT FROM be.closed_date
@@ -101,7 +105,8 @@ def close_date_summary():
 def close_date(
     page: int = Query(default=1, ge=1),
     mismatch: bool = Query(default=False),
-    no_skyslope: bool = Query(default=False)
+    no_skyslope: bool = Query(default=False),
+    search: str = Query(default=None)
 ):
     conn = get_conn()
 
@@ -110,12 +115,24 @@ def close_date(
         offset = (page - 1) * limit
 
         conditions = []
+        params = []
 
         if mismatch:
             conditions.append("match_result = 'mismatch'")
 
         if no_skyslope:
             conditions.append("match_result = 'no_skyslope_record'")
+
+        if search:
+            conditions.append("""
+                (
+                    CAST(saleguid AS TEXT) ILIKE %s
+                    OR CAST(transactionid AS TEXT) ILIKE %s
+                    OR propertyaddress ILIKE %s
+                )
+            """)
+            search_term = f"%{search}%"
+            params.extend([search_term, search_term, search_term])
 
         where_clause = ""
         if conditions:
@@ -146,10 +163,10 @@ def close_date(
         """
 
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(count_query)
+            cur.execute(count_query, params)
             total_count = cur.fetchone()["total_count"]
 
-            cur.execute(query, (limit, offset))
+            cur.execute(query, params + [limit, offset])
             rows = cur.fetchall()
 
         return {
