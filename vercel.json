@@ -14,7 +14,7 @@
   "crons": [
     {
       "path": "/cron-data-sync",
-      "schedule": "44 10 * * *"
+      "schedule": "0 8 * * *"
     }
   ]
 }
