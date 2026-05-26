@@ -2,7 +2,7 @@ name: Daily Cron Test (15:30 IST)
 
 on:
   schedule:
-    - cron: "5 10 * * *"   # 15:30 IST
+    - cron: "25 10 * * *"   # 15:30 IST
   workflow_dispatch:       # manual trigger
 
 jobs:
