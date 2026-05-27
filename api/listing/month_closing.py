@@ -6,17 +6,20 @@ from fastapi import Query
 
 router = APIRouter()
 
+from typing import List
+from fastapi import Query
+
 @router.get("/month-closing/listing")
 def get_month_closing(
     status: str = "all",
     skyslope: bool = False,
-    state: str = None,
+    state: List[str] = Query(default=[]),
     from_close_date: str = None,
     to_close_date: str = None,
-    transaction_specialist: str = None,
+    transaction_specialist: List[str] = Query(default=[]),
     search: str = None,
     mismatch: bool = False,
-    pending_subfilter: str = None,
+    pending_subfilter: List[str] = Query(default=[]),
     page: int = 1,
     page_size: int = 50,
 ):
@@ -25,6 +28,13 @@ def get_month_closing(
     try:
         search_clause = ""
         search_params = {}
+
+        # ── parse multi-value params (supports both ?x=A,B and ?x=A&x=B) ──
+        state_list = [v.strip() for s in state             for v in s.split(",") if v.strip()]
+        ts_list    = [v.strip() for s in transaction_specialist for v in s.split(",") if v.strip()]
+        ps_list    = [v.strip() for s in pending_subfilter  for v in s.split(",") if v.strip()]
+        # ──────────────────────────────────────────────────────────────────
+
         # ---------------- SEARCH FILTER ----------------
         if search:
             search_clause = """
@@ -39,21 +49,27 @@ def get_month_closing(
                 )
             """
             search_params["search"] = f"%{search}%"
+
         # ─────────────────────────────────────────────
         # SKY SLOPE MODE
         # ─────────────────────────────────────────────
         if skyslope:
             shared_filters = ""
             params = {}
-            if state:
-                shared_filters += " AND sp.state ILIKE %(state)s"
-                params["state"] = state
+
+            if state_list:
+                placeholders = ", ".join(f"%(state_{i})s" for i in range(len(state_list)))
+                shared_filters += f" AND LOWER(sp.state) IN ({placeholders})"
+                for i, v in enumerate(state_list):
+                    params[f"state_{i}"] = v.lower()
+
             if from_close_date:
                 shared_filters += " AND s.escrowclosingdate >= %(from_close_date)s"
                 params["from_close_date"] = from_close_date
             if to_close_date:
                 shared_filters += " AND s.escrowclosingdate <= %(to_close_date)s"
                 params["to_close_date"] = to_close_date
+
             base_from = """
                 FROM sale s
                 LEFT JOIN brokerage_engine be ON be.skyslopefileid = s.saleguid
@@ -62,6 +78,7 @@ def get_month_closing(
                 WHERE be.skyslopefileid IS NULL
             """
             base_from += search_clause
+
             count_query = "SELECT COUNT(*) AS total " + base_from + shared_filters + ";"
             data_query = """
                 SELECT
@@ -91,20 +108,16 @@ def get_month_closing(
             params.update(search_params)
             params["limit"] = page_size
             params["offset"] = offset
-            count_params = {
-                k: v for k, v in params.items()
-                if k not in ("limit", "offset")
-            }
+            count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(count_query, count_params)
                 total = cur.fetchone()["total"]
                 cur.execute(data_query, params)
                 rows = cur.fetchall()
-            return {
-                "mode": "skyslope_only",
-                "total": total,
-                "data": rows,
-            }
+
+            return {"mode": "skyslope_only", "total": total, "data": rows}
+
         # ─────────────────────────────────────────────
         # FULL COMPARISON MODE
         # ─────────────────────────────────────────────
@@ -162,29 +175,21 @@ def get_month_closing(
                         ),
                         ''
                     ) AS ss_seller_name,
-
-                    -- sale_price: null if either side is null
                     CASE
                         WHEN be.sale_price IS NULL OR s.saleprice IS NULL THEN NULL
                         WHEN be.sale_price IS DISTINCT FROM s.saleprice   THEN 'mismatch'
                         ELSE 'match'
                     END AS sale_price_comparison,
-
-                    -- closed_date: null if either side is null
                     CASE
                         WHEN be.closed_date IS NULL OR s.escrowclosingdate IS NULL THEN NULL
                         WHEN be.closed_date IS DISTINCT FROM s.escrowclosingdate   THEN 'mismatch'
                         ELSE 'match'
                     END AS closed_date_comparison,
-
-                    -- contract_date: null if either side is null
                     CASE
                         WHEN be.contract_date IS NULL OR s.contractacceptancedate IS NULL THEN NULL
                         WHEN be.contract_date IS DISTINCT FROM s.contractacceptancedate   THEN 'mismatch'
                         ELSE 'match'
                     END AS contract_date_comparison,
-
-                    -- transaction_status: null if either side is null/blank
                     CASE
                         WHEN be.transaction_status IS NULL OR TRIM(be.transaction_status) = ''
                           OR s.status IS NULL            OR TRIM(s.status) = ''
@@ -199,8 +204,6 @@ def get_month_closing(
                         THEN 'match'
                         ELSE 'mismatch'
                     END AS transaction_status_comparison,
-
-                    -- gross_commission: null if either side is null/blank/zero
                     CASE
                         WHEN scn.officegrosscommissiononsale IS NULL
                           OR be.buying_side_gross_commission IS NULL
@@ -211,14 +214,15 @@ def get_month_closing(
                         THEN 'mismatch'
                         ELSE 'match'
                     END AS gross_commission_comparison
-
                 FROM brokerage_engine be
                 LEFT JOIN sale s ON s.saleguid = be.skyslopefileid
                 LEFT JOIN sale_commission scn ON scn.saleguid = s.saleguid
             )
         """
+
         where_clause = " WHERE 1=1"
         params = {}
+
         # ---------------- STATUS FILTER ----------------
         if status != "all":
             where_clause += """
@@ -240,18 +244,38 @@ def get_month_closing(
                 )
             """
             params["status"] = status
-        # ---------------- PENDING SUB-FILTER ----------------
-        VALID_PENDING_SUBFILTERS = {"open", "cdasent", "commissionverified", "titlepaymentreceived"}
-        if pending_subfilter:
-            where_clause += " AND b.be_stage = %(pending_subfilter)s"
-            params["pending_subfilter"] = pending_subfilter
-        # ---------------- STATE FILTER ----------------
-        if state:
-            where_clause += " AND b.state ILIKE %(state)s"
-            params["state"] = state
-        # ---------------- TRANSACTION SPECIALIST ----------------
-        if transaction_specialist:
-            if transaction_specialist.lower() == "unassigned":
+
+        # ---------------- PENDING SUB-FILTER (multi) ----------------
+        if ps_list:
+            placeholders = ", ".join(f"%(ps_{i})s" for i in range(len(ps_list)))
+            where_clause += f" AND b.be_stage IN ({placeholders})"
+            for i, v in enumerate(ps_list):
+                params[f"ps_{i}"] = v
+
+        # ---------------- STATE FILTER (multi) ----------------
+        if state_list:
+            placeholders = ", ".join(f"%(state_{i})s" for i in range(len(state_list)))
+            where_clause += f" AND LOWER(b.state) IN ({placeholders})"
+            for i, v in enumerate(state_list):
+                params[f"state_{i}"] = v.lower()
+
+        # ---------------- TRANSACTION SPECIALIST FILTER (multi) ----------------
+        if ts_list:
+            unassigned_requested = any(v.lower() == "unassigned" for v in ts_list)
+            named = [v for v in ts_list if v.lower() != "unassigned"]
+
+            if unassigned_requested and named:
+                placeholders = ", ".join(f"%(ts_{i})s" for i in range(len(named)))
+                where_clause += f"""
+                    AND (
+                        b.transaction_specialist IS NULL
+                        OR b.transaction_specialist = ''
+                        OR b.transaction_specialist IN ({placeholders})
+                    )
+                """
+                for i, v in enumerate(named):
+                    params[f"ts_{i}"] = v
+            elif unassigned_requested:
                 where_clause += """
                     AND (
                         b.transaction_specialist IS NULL
@@ -259,10 +283,11 @@ def get_month_closing(
                     )
                 """
             else:
-                where_clause += """
-                    AND b.transaction_specialist = %(transaction_specialist)s
-                """
-                params["transaction_specialist"] = transaction_specialist
+                placeholders = ", ".join(f"%(ts_{i})s" for i in range(len(named)))
+                where_clause += f" AND b.transaction_specialist IN ({placeholders})"
+                for i, v in enumerate(named):
+                    params[f"ts_{i}"] = v
+
         # ---------------- DATE FILTER ----------------
         if from_close_date:
             where_clause += " AND b.be_closed_date >= %(from_close_date)s"
@@ -270,6 +295,7 @@ def get_month_closing(
         if to_close_date:
             where_clause += " AND b.be_closed_date <= %(to_close_date)s"
             params["to_close_date"] = to_close_date
+
         # ---------------- SEARCH FILTER ----------------
         if search:
             where_clause += """
@@ -284,55 +310,46 @@ def get_month_closing(
                 )
             """
             params["search"] = f"%{search}%"
+
         count_query = base_cte + " SELECT COUNT(*) AS total FROM base b" + where_clause + ";"
-        data_query = (
+        data_query  = (
             base_cte
             + " SELECT * FROM base b"
             + where_clause
             + " ORDER BY b.transaction_id"
             + " LIMIT %(limit)s OFFSET %(offset)s;"
         )
-        params["limit"] = page_size
+        params["limit"]  = page_size
         params["offset"] = offset
         count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(count_query, count_params)
             total = cur.fetchone()["total"]
             cur.execute(data_query, params)
             rows = cur.fetchall()
+
         # ---------------- POST PROCESSING ----------------
         for row in rows:
-            row["buyer_name_comparison"] = compare_names(
-                row.get("buyer_name"),
-                row.get("ss_buyer_name")
-            )
-            row["seller_name_comparison"] = compare_names(
-                row.get("seller_name"),
-                row.get("ss_seller_name")
-            )
-            row["listing_price_comparison"] = compare_listing_price(
-                row.get("be_listing_price"),
-                row.get("ss_listing_price")
-            )
+            row["buyer_name_comparison"]    = compare_names(row.get("buyer_name"),       row.get("ss_buyer_name"))
+            row["seller_name_comparison"]   = compare_names(row.get("seller_name"),      row.get("ss_seller_name"))
+            row["listing_price_comparison"] = compare_listing_price(row.get("be_listing_price"), row.get("ss_listing_price"))
+
         # ---------------- MISMATCH FILTER ----------------
         if mismatch:
             def has_mismatch(r):
-                return (
-                    r.get("sale_price_comparison") == "mismatch"
-                    or r.get("closed_date_comparison") == "mismatch"
-                    or r.get("contract_date_comparison") == "mismatch"
-                    or r.get("transaction_status_comparison") == "mismatch"
-                    or r.get("gross_commission_comparison") == "mismatch"
-                    or r.get("buyer_name_comparison") == "mismatch"
-                    or r.get("seller_name_comparison") == "mismatch"
-                    or r.get("listing_price_comparison") == "mismatch"
+                return any(
+                    r.get(k) == "mismatch" for k in (
+                        "sale_price_comparison", "closed_date_comparison",
+                        "contract_date_comparison", "transaction_status_comparison",
+                        "gross_commission_comparison", "buyer_name_comparison",
+                        "seller_name_comparison", "listing_price_comparison",
+                    )
                 )
-            rows = [r for r in rows if has_mismatch(r)]
+            rows  = [r for r in rows if has_mismatch(r)]
             total = len(rows)
-        return {
-            "mode": "full_comparison",
-            "total": total,
-            "data": rows,
-        }
+
+        return {"mode": "full_comparison", "total": total, "data": rows}
+
     finally:
         conn.close()
