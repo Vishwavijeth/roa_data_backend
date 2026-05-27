@@ -151,7 +151,7 @@ def get_month_closing(
                     be.seller_name,
 
                     scn.officegrosscommissiononsale AS ss_gross_commission,
-                    be.total_gross_commission AS be_gross_commission,
+                    be.buying_side_gross_commission AS be_gross_commission,
 
                     COALESCE(
                         (
@@ -209,11 +209,11 @@ def get_month_closing(
 
                     CASE
                         WHEN scn.officegrosscommissiononsale IS NULL
-                          OR be.total_gross_commission IS NULL
+                          OR be.buying_side_gross_commission IS NULL
                           OR scn.officegrosscommissiononsale = 0
-                          OR be.total_gross_commission = 0
+                          OR be.buying_side_gross_commission = 0
                         THEN NULL
-                        WHEN scn.officegrosscommissiononsale <> be.total_gross_commission
+                        WHEN scn.officegrosscommissiononsale <> be.buying_side_gross_commission
                         THEN 'mismatch'
                         ELSE 'match'
                     END AS gross_commission_comparison
