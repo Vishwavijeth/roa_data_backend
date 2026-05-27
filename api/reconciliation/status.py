@@ -25,8 +25,8 @@ WITH base AS (
                 THEN 'match'
 
             WHEN LOWER(be.transaction_status) = 'closed'
-                 AND LOWER(COALESCE(s.status, '')) = 'archived'
-                THEN NULL
+                 AND LOWER(COALESCE(s.status, '')) IN ('archived', 'closed')
+                THEN 'match'
 
             WHEN LOWER(be.transaction_status) = LOWER(COALESCE(s.status, ''))
                 THEN 'match'
