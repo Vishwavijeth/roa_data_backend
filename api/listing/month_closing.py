@@ -162,21 +162,34 @@ def get_month_closing(
                         ),
                         ''
                     ) AS ss_seller_name,
+
+                    -- sale_price: null if either side is null
                     CASE
-                        WHEN be.sale_price IS DISTINCT FROM s.saleprice THEN 'mismatch'
+                        WHEN be.sale_price IS NULL OR s.saleprice IS NULL THEN NULL
+                        WHEN be.sale_price IS DISTINCT FROM s.saleprice   THEN 'mismatch'
                         ELSE 'match'
                     END AS sale_price_comparison,
+
+                    -- closed_date: null if either side is null
                     CASE
-                        WHEN be.closed_date IS DISTINCT FROM s.escrowclosingdate THEN 'mismatch'
+                        WHEN be.closed_date IS NULL OR s.escrowclosingdate IS NULL THEN NULL
+                        WHEN be.closed_date IS DISTINCT FROM s.escrowclosingdate   THEN 'mismatch'
                         ELSE 'match'
                     END AS closed_date_comparison,
+
+                    -- contract_date: null if either side is null
                     CASE
-                        WHEN be.contract_date IS DISTINCT FROM s.contractacceptancedate THEN 'mismatch'
+                        WHEN be.contract_date IS NULL OR s.contractacceptancedate IS NULL THEN NULL
+                        WHEN be.contract_date IS DISTINCT FROM s.contractacceptancedate   THEN 'mismatch'
                         ELSE 'match'
                     END AS contract_date_comparison,
+
+                    -- transaction_status: null if either side is null/blank
                     CASE
+                        WHEN be.transaction_status IS NULL OR TRIM(be.transaction_status) = ''
+                          OR s.status IS NULL            OR TRIM(s.status) = ''
+                        THEN NULL
                         WHEN LOWER(s.status) = 'expired' THEN NULL
-                        WHEN be.transaction_status IS NULL OR s.status IS NULL THEN NULL
                         WHEN LOWER(be.transaction_status) = 'closed'
                              AND LOWER(s.status) = 'archived'
                         THEN 'match'
@@ -186,6 +199,8 @@ def get_month_closing(
                         THEN 'match'
                         ELSE 'mismatch'
                     END AS transaction_status_comparison,
+
+                    -- gross_commission: null if either side is null/blank/zero
                     CASE
                         WHEN scn.officegrosscommissiononsale IS NULL
                           OR be.buying_side_gross_commission IS NULL
@@ -196,6 +211,7 @@ def get_month_closing(
                         THEN 'mismatch'
                         ELSE 'match'
                     END AS gross_commission_comparison
+
                 FROM brokerage_engine be
                 LEFT JOIN sale s ON s.saleguid = be.skyslopefileid
                 LEFT JOIN sale_commission scn ON scn.saleguid = s.saleguid
