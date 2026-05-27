@@ -70,7 +70,7 @@ def get_cda_sent(filter: str = Query("all", enum=["all", "mismatch", "no_skyslop
                     s.listingprice AS ss_listing_price,
                     be.transaction_status AS be_transaction_status,
                     s.status AS ss_transaction_status,
-                    be.total_gross_commission AS be_gross_commission,
+                    be.buying_side_gross_commission AS be_gross_commission,
                     scn.officegrosscommissiononsale AS ss_gross_commission,
                     COALESCE(
                         (
@@ -124,11 +124,11 @@ def get_cda_sent(filter: str = Query("all", enum=["all", "mismatch", "no_skyslop
                     END AS transaction_status_mismatch,
                     CASE
                         WHEN scn.officegrosscommissiononsale IS NULL
-                            OR be.total_gross_commission IS NULL
+                            OR be.buying_side_gross_commission IS NULL
                             OR scn.officegrosscommissiononsale = 0
-                            OR be.total_gross_commission = 0
+                            OR be.buying_side_gross_commission = 0
                             THEN NULL
-                        WHEN scn.officegrosscommissiononsale <> be.total_gross_commission
+                        WHEN scn.officegrosscommissiononsale <> be.buying_side_gross_commission
                             THEN 'mismatch'
                         ELSE 'match'
                     END AS gross_commission_mismatch

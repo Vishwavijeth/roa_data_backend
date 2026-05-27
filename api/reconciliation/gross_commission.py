@@ -17,7 +17,7 @@ WITH base AS (
         s.status AS skyslope_status,
 
         scn.officeGrossCommissionOnSale AS skyslope_gross_commission,
-        be.total_gross_commission AS be_gross_commission,
+        be.buying_side_gross_commission AS be_gross_commission,
 
         CASE
             WHEN s.saleguid IS NULL
@@ -31,12 +31,12 @@ WITH base AS (
                 THEN NULL
 
             WHEN scn.officeGrossCommissionOnSale IS NULL
-                 OR be.total_gross_commission IS NULL
+                 OR be.buying_side_gross_commission IS NULL
                  OR scn.officeGrossCommissionOnSale = 0
-                 OR be.total_gross_commission = 0
+                 OR be.buying_side_gross_commission = 0
                 THEN NULL
 
-            WHEN scn.officeGrossCommissionOnSale IS DISTINCT FROM be.total_gross_commission
+            WHEN scn.officeGrossCommissionOnSale IS DISTINCT FROM be.buying_side_gross_commission
                 THEN 'mismatch'
 
             ELSE 'match'
