@@ -5,53 +5,59 @@ from psycopg2.extras import RealDictCursor
 router = APIRouter()
 
 GROSS_COMMISSION_BASE_QUERY = """
-WITH base AS (
+WITH commission_resolved AS (
+    SELECT
+        be.skyslopefileid,
+        be.transaction_identifier_transactionid,
+        be.property_address,
+        be.transaction_status,
+        be.tags,
+        CASE
+            WHEN be.tags ILIKE '%%listingside%%' AND be.tags ILIKE '%%sellingside%%'
+                THEN be.total_gross_commission
+            WHEN be.tags ILIKE '%%listingside%%'
+                THEN be.listing_side_gross_commission
+            WHEN be.tags ILIKE '%%sellingside%%'
+                THEN be.buying_side_gross_commission
+            ELSE be.buying_side_gross_commission
+        END AS be_gross_commission
+    FROM brokerage_engine be
+),
+base AS (
     SELECT
         be.skyslopefileid,
         s.saleguid,
-
         be.transaction_identifier_transactionid AS transactionid,
         be.property_address AS propertyaddress,
-
         be.transaction_status AS be_transaction_status,
         s.status AS skyslope_status,
-
         scn.officeGrossCommissionOnSale AS skyslope_gross_commission,
-        be.buying_side_gross_commission AS be_gross_commission,
-
+        be.be_gross_commission,
         CASE
             WHEN s.saleguid IS NULL
                 THEN 'no_skyslope_record'
-
             WHEN be.transaction_status ILIKE 'cancelled'
                 AND (
                     s.status ILIKE 'canceled/pend'
                     OR s.status ILIKE 'canceled/app'
                 )
                 THEN NULL
-
             WHEN scn.officeGrossCommissionOnSale IS NULL
-                 OR be.buying_side_gross_commission IS NULL
+                 OR be.be_gross_commission IS NULL
                  OR scn.officeGrossCommissionOnSale = 0
-                 OR be.buying_side_gross_commission = 0
+                 OR be.be_gross_commission = 0
                 THEN NULL
-
-            WHEN scn.officeGrossCommissionOnSale IS DISTINCT FROM be.buying_side_gross_commission
+            WHEN scn.officeGrossCommissionOnSale IS DISTINCT FROM be.be_gross_commission
                 THEN 'mismatch'
-
             ELSE 'match'
         END AS match_result
-
-    FROM brokerage_engine be
-
+    FROM commission_resolved be
     LEFT JOIN sale s
         ON s.saleguid = be.skyslopefileid
-
     LEFT JOIN sale_commission scn
         ON scn.saleguid = be.skyslopefileid
 )
 """
-
 
 @router.get("/compare/gross_commission/summary")
 def gross_commission_summary():
