@@ -7,3 +7,5 @@ mangum
 httpx
 requests
 urllib3
+openpyxl
+pandas
