@@ -1,29 +1,31 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Response
 from typing import List
 from db import get_conn
 from psycopg2.extras import RealDictCursor
 from services.comparison import compare_names, compare_listing_price
-from fastapi import Query
+import io
+import pandas as pd
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+from decimal import Decimal
+import datetime
 
 router = APIRouter()
 
-
-@router.get("/month-closing/listing")
-def get_month_closing(
+def fetch_month_closing_data(
     status: str = "all",
     skyslope: bool = False,
-    state: List[str] = Query(default=[]),
+    state: List[str] = [],
     from_close_date: str = None,
     to_close_date: str = None,
-    transaction_specialist: List[str] = Query(default=[]),
+    transaction_specialist: List[str] = [],
     search: str = None,
     mismatch: bool = False,
-    pending_subfilter: List[str] = Query(default=[]),
-    page: int = 1,
-    page_size: int = 50,
+    pending_subfilter: List[str] = [],
+    page: int = None,
+    page_size: int = None,
 ):
     conn = get_conn()
-    offset = (page - 1) * page_size
     try:
         search_clause = ""
         search_params = {}
@@ -100,13 +102,21 @@ def get_month_closing(
                         sp.zip
                     ) AS property_address,
                     COALESCE(r.firstname || ' ' || r.lastname, '') AS reviewer
-            """ + base_from + shared_filters + """
-                ORDER BY s.saleguid
-                LIMIT %(limit)s OFFSET %(offset)s;
-            """
+            """ + base_from + shared_filters
+
             params.update(search_params)
-            params["limit"] = page_size
-            params["offset"] = offset
+
+            if page is not None and page_size is not None:
+                offset = (page - 1) * page_size
+                data_query += """
+                    ORDER BY s.saleguid
+                    LIMIT %(limit)s OFFSET %(offset)s;
+                """
+                params["limit"] = page_size
+                params["offset"] = offset
+            else:
+                data_query += " ORDER BY s.saleguid;"
+
             count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
 
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -115,7 +125,7 @@ def get_month_closing(
                 cur.execute(data_query, params)
                 rows = cur.fetchall()
 
-            return {"mode": "skyslope_only", "total": total, "data": rows}
+            return {"mode": "skyslope_only", "total": total, "data": [dict(r) for r in rows]}
 
         # ─────────────────────────────────────────────
         # FULL COMPARISON MODE
@@ -356,10 +366,16 @@ def get_month_closing(
             + " SELECT * FROM base b"
             + where_clause
             + " ORDER BY b.transaction_id"
-            + " LIMIT %(limit)s OFFSET %(offset)s;"
         )
-        params["limit"]  = page_size
-        params["offset"] = offset
+        
+        if page is not None and page_size is not None:
+            offset = (page - 1) * page_size
+            data_query += " LIMIT %(limit)s OFFSET %(offset)s;"
+            params["limit"]  = page_size
+            params["offset"] = offset
+        else:
+            data_query += ";"
+            
         count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
 
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -381,14 +397,248 @@ def get_month_closing(
                     r.get(k) == "mismatch" for k in (
                         "sale_price_comparison", "closed_date_comparison",
                         "contract_date_comparison", "transaction_status_comparison",
-                        "gross_commission_comparison", "buyer_name_comparison",
-                        "seller_name_comparison", "listing_price_comparison",
+                        "gross_commission_mismatch", "gross_commission_comparison",
+                        "buyer_name_comparison", "seller_name_comparison", "listing_price_comparison",
                     )
                 )
             rows  = [r for r in rows if has_mismatch(r)]
             total = len(rows)
 
-        return {"mode": "full_comparison", "total": total, "data": rows}
+        return {"mode": "full_comparison", "total": total, "data": [dict(r) for r in rows]}
 
     finally:
         conn.close()
+
+@router.get("/month-closing/listing")
+def get_month_closing(
+    status: str = "all",
+    skyslope: bool = False,
+    state: List[str] = Query(default=[]),
+    from_close_date: str = None,
+    to_close_date: str = None,
+    transaction_specialist: List[str] = Query(default=[]),
+    search: str = None,
+    mismatch: bool = False,
+    pending_subfilter: List[str] = Query(default=[]),
+    page: int = 1,
+    page_size: int = 50,
+):
+    return fetch_month_closing_data(
+        status=status,
+        skyslope=skyslope,
+        state=state,
+        from_close_date=from_close_date,
+        to_close_date=to_close_date,
+        transaction_specialist=transaction_specialist,
+        search=search,
+        mismatch=mismatch,
+        pending_subfilter=pending_subfilter,
+        page=page,
+        page_size=page_size,
+    )
+
+@router.get("/month-closing/download")
+def download_month_closing(
+    status: str = "all",
+    skyslope: bool = False,
+    state: List[str] = Query(default=[]),
+    from_close_date: str = None,
+    to_close_date: str = None,
+    transaction_specialist: List[str] = Query(default=[]),
+    search: str = None,
+    mismatch: bool = False,
+    pending_subfilter: List[str] = Query(default=[]),
+):
+    result = fetch_month_closing_data(
+        status=status,
+        skyslope=skyslope,
+        state=state,
+        from_close_date=from_close_date,
+        to_close_date=to_close_date,
+        transaction_specialist=transaction_specialist,
+        search=search,
+        mismatch=mismatch,
+        pending_subfilter=pending_subfilter,
+        page=None,
+        page_size=None,
+    )
+    
+    data = result["data"]
+    
+    if skyslope:
+        columns_map = {
+            "skyslopefileid": "SkySlope File ID",
+            "ss_sale_price": "SS Sale Price",
+            "ss_status": "SS Status",
+            "ss_closed_date": "SS Closed Date",
+            "ss_contract_date": "SS Contract Date",
+            "ss_listing_price": "SS Listing Price",
+            "state": "State",
+            "property_address": "Property Address",
+            "reviewer": "Reviewer"
+        }
+    else:
+        columns_map = {
+            "transaction_id": "Transaction ID",
+            "skyslopefileid": "SkySlope File ID",
+            "property_address": "Property Address",
+            "state": "State",
+            "transaction_specialist": "Transaction Specialist",
+            "be_stage": "BE Stage",
+            "be_sale_price": "BE Sale Price",
+            "ss_sale_price": "SS Sale Price",
+            "sale_price_comparison": "Sale Price Comparison",
+            "be_closed_date": "BE Closed Date",
+            "ss_closed_date": "SS Closed Date",
+            "closed_date_comparison": "Closed Date Comparison",
+            "be_contract_date": "BE Contract Date",
+            "ss_contract_date": "SS Contract Date",
+            "contract_date_comparison": "Contract Date Comparison",
+            "be_listing_price": "BE Listing Price",
+            "ss_listing_price": "SS Listing Price",
+            "listing_price_comparison": "Listing Price Comparison",
+            "be_transaction_status": "BE Transaction Status",
+            "ss_transaction_status": "SS Transaction Status",
+            "transaction_status_comparison": "Transaction Status Comparison",
+            "be_gross_commission": "BE Gross Commission",
+            "ss_gross_commission": "SS Gross Commission",
+            "gross_commission_mismatch": "Gross Commission Mismatch",
+            "buyer_name": "BE Buyer Name",
+            "ss_buyer_name": "SS Buyer Name",
+            "buyer_name_comparison": "Buyer Name Comparison",
+            "seller_name": "BE Seller Name",
+            "ss_seller_name": "SS Seller Name",
+            "seller_name_comparison": "Seller Name Comparison"
+        }
+
+    rows_to_export = []
+    for r in data:
+        row_dict = {}
+        for key, header in columns_map.items():
+            val = r.get(key)
+            if isinstance(val, Decimal):
+                val = float(val)
+            elif isinstance(val, (datetime.date, datetime.datetime)):
+                val = val.strftime("%Y-%m-%d")
+            elif isinstance(val, bool):
+                val = "Yes" if val else "No"
+            elif val is None:
+                val = ""
+            row_dict[header] = val
+        rows_to_export.append(row_dict)
+
+    df = pd.DataFrame(rows_to_export)
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, sheet_name="Month Closing Report", index=False)
+        
+        workbook = writer.book
+        worksheet = writer.sheets["Month Closing Report"]
+        
+        worksheet.views.sheetView[0].showGridLines = True
+        
+        font_header = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
+        fill_header = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+        align_header = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        
+        font_body = Font(name="Segoe UI", size=10)
+        fill_even = PatternFill(start_color="F9FAFB", end_color="F9FAFB", fill_type="solid")
+        fill_mismatch = PatternFill(start_color="FCE8E6", end_color="FCE8E6", fill_type="solid")
+        font_mismatch = Font(name="Segoe UI", size=10, bold=True, color="C53929")
+        
+        thin_border = Border(
+            left=Side(style='thin', color='D0D5DD'),
+            right=Side(style='thin', color='D0D5DD'),
+            top=Side(style='thin', color='D0D5DD'),
+            bottom=Side(style='thin', color='D0D5DD')
+        )
+        
+        worksheet.row_dimensions[1].height = 28
+        for col_num in range(1, len(df.columns) + 1):
+            cell = worksheet.cell(row=1, column=col_num)
+            cell.font = font_header
+            cell.fill = fill_header
+            cell.alignment = align_header
+            cell.border = thin_border
+            
+        currency_cols = []
+        date_cols = []
+        center_cols = []
+        
+        currency_keywords = ["gross commission", "sale price", "listing price"]
+        date_keywords = ["closed date", "contract date"]
+        center_keywords = ["id", "comparison", "mismatch", "state", "status", "stage"]
+        
+        for idx, col_name in enumerate(df.columns):
+            col_name_lower = col_name.lower()
+            if any(kw in col_name_lower for kw in currency_keywords):
+                currency_cols.append(idx + 1)
+            elif any(kw in col_name_lower for kw in date_keywords):
+                date_cols.append(idx + 1)
+            elif any(kw in col_name_lower for kw in center_keywords):
+                center_cols.append(idx + 1)
+                
+        for row_num in range(2, len(df) + 2):
+            worksheet.row_dimensions[row_num].height = 20
+            is_even_row = (row_num % 2 == 0)
+            
+            for col_num in range(1, len(df.columns) + 1):
+                cell = worksheet.cell(row=row_num, column=col_num)
+                cell.font = font_body
+                cell.border = thin_border
+                
+                if is_even_row:
+                    cell.fill = fill_even
+                
+                val = cell.value
+                val_str = str(val).strip().lower() if val is not None else ""
+                col_name = df.columns[col_num - 1]
+                col_name_lower = col_name.lower()
+                
+                # Mismatch coloring
+                is_cell_mismatch = False
+                if any(kw in col_name_lower for kw in ["comparison", "mismatch"]):
+                    if val_str in ["yes", "mismatch"]:
+                        is_cell_mismatch = True
+                        
+                if is_cell_mismatch:
+                    cell.fill = fill_mismatch
+                    cell.font = font_mismatch
+                
+                if col_num in currency_cols:
+                    cell.alignment = Alignment(horizontal="right", vertical="center")
+                    if isinstance(val, (int, float)):
+                        cell.number_format = '$#,##0.00'
+                elif col_num in date_cols:
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                elif col_num in center_cols:
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                else:
+                    cell.alignment = Alignment(horizontal="left", vertical="center")
+                    
+        for col in worksheet.columns:
+            max_len = 0
+            col_letter = get_column_letter(col[0].column)
+            for cell in col:
+                val = cell.value
+                if val is not None:
+                    if cell.column in currency_cols and isinstance(val, (int, float)):
+                        val_len = len(f"${val:,.2f}")
+                    else:
+                        val_len = len(str(val))
+                    if val_len > max_len:
+                        max_len = val_len
+            worksheet.column_dimensions[col_letter].width = max(max_len + 3, 12)
+
+    output.seek(0)
+    
+    filename = f"month_closing_report_{status}.xlsx"
+    headers = {
+        'Content-Disposition': f'attachment; filename="{filename}"'
+    }
+    return Response(
+        content=output.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers=headers
+    )
