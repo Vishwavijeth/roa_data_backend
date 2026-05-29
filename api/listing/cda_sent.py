@@ -70,7 +70,15 @@ def get_cda_sent(filter: str = Query("all", enum=["all", "mismatch", "no_skyslop
                     s.listingprice AS ss_listing_price,
                     be.transaction_status AS be_transaction_status,
                     s.status AS ss_transaction_status,
-                    be.buying_side_gross_commission AS be_gross_commission,
+                    CASE
+                        WHEN be.tags ILIKE '%%listingside%%' AND be.tags ILIKE '%%sellingside%%'
+                            THEN be.total_gross_commission
+                        WHEN be.tags ILIKE '%%listingside%%'
+                            THEN be.listing_side_gross_commission
+                        WHEN be.tags ILIKE '%%sellingside%%'
+                            THEN be.buying_side_gross_commission
+                        ELSE be.buying_side_gross_commission
+                    END AS be_gross_commission,
                     scn.officegrosscommissiononsale AS ss_gross_commission,
                     COALESCE(
                         (
@@ -124,12 +132,44 @@ def get_cda_sent(filter: str = Query("all", enum=["all", "mismatch", "no_skyslop
                     END AS transaction_status_mismatch,
                     CASE
                         WHEN scn.officegrosscommissiononsale IS NULL
-                            OR be.buying_side_gross_commission IS NULL
+                            OR (
+                                CASE
+                                    WHEN be.tags ILIKE '%%listingside%%' AND be.tags ILIKE '%%sellingside%%'
+                                        THEN be.total_gross_commission
+                                    WHEN be.tags ILIKE '%%listingside%%'
+                                        THEN be.listing_side_gross_commission
+                                    WHEN be.tags ILIKE '%%sellingside%%'
+                                        THEN be.buying_side_gross_commission
+                                    ELSE be.buying_side_gross_commission
+                                END
+                            ) IS NULL
                             OR scn.officegrosscommissiononsale = 0
-                            OR be.buying_side_gross_commission = 0
-                            THEN NULL
-                        WHEN scn.officegrosscommissiononsale <> be.buying_side_gross_commission
-                            THEN 'mismatch'
+                            OR (
+                                CASE
+                                    WHEN be.tags ILIKE '%%listingside%%' AND be.tags ILIKE '%%sellingside%%'
+                                        THEN be.total_gross_commission
+                                    WHEN be.tags ILIKE '%%listingside%%'
+                                        THEN be.listing_side_gross_commission
+                                    WHEN be.tags ILIKE '%%sellingside%%'
+                                        THEN be.buying_side_gross_commission
+                                    ELSE be.buying_side_gross_commission
+                                END
+                            ) = 0
+                        THEN NULL
+
+                        WHEN scn.officegrosscommissiononsale <> (
+                            CASE
+                                WHEN be.tags ILIKE '%%listingside%%' AND be.tags ILIKE '%%sellingside%%'
+                                    THEN be.total_gross_commission
+                                WHEN be.tags ILIKE '%%listingside%%'
+                                    THEN be.listing_side_gross_commission
+                                WHEN be.tags ILIKE '%%sellingside%%'
+                                    THEN be.buying_side_gross_commission
+                                ELSE be.buying_side_gross_commission
+                            END
+                        )
+                        THEN 'mismatch'
+
                         ELSE 'match'
                     END AS gross_commission_mismatch
                 FROM brokerage_engine be

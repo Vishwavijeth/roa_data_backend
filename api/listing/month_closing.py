@@ -1,4 +1,5 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
+from typing import List
 from db import get_conn
 from psycopg2.extras import RealDictCursor
 from services.comparison import compare_names, compare_listing_price
@@ -6,8 +7,6 @@ from fastapi import Query
 
 router = APIRouter()
 
-from typing import List
-from fastapi import Query
 
 @router.get("/month-closing/listing")
 def get_month_closing(
@@ -142,7 +141,15 @@ def get_month_closing(
                     be.buyer_name,
                     be.seller_name,
                     scn.officegrosscommissiononsale AS ss_gross_commission,
-                    be.buying_side_gross_commission AS be_gross_commission,
+                    CASE
+                        WHEN be.tags ILIKE '%%listingside%%' AND be.tags ILIKE '%%sellingside%%'
+                            THEN be.total_gross_commission
+                        WHEN be.tags ILIKE '%%listingside%%'
+                            THEN be.listing_side_gross_commission
+                        WHEN be.tags ILIKE '%%sellingside%%'
+                            THEN be.buying_side_gross_commission
+                        ELSE be.buying_side_gross_commission
+                    END AS be_gross_commission,
                     CASE
                         WHEN be.tags ILIKE '%%titlepaymentreceived%%' THEN 'titlepaymentreceived'
                         WHEN be.tags ILIKE '%%commissionverified%%'   THEN 'commissionverified'
@@ -206,14 +213,46 @@ def get_month_closing(
                     END AS transaction_status_comparison,
                     CASE
                         WHEN scn.officegrosscommissiononsale IS NULL
-                          OR be.buying_side_gross_commission IS NULL
-                          OR scn.officegrosscommissiononsale = 0
-                          OR be.buying_side_gross_commission = 0
+                            OR (
+                                CASE
+                                    WHEN be.tags ILIKE '%%listingside%%' AND be.tags ILIKE '%%sellingside%%'
+                                        THEN be.total_gross_commission
+                                    WHEN be.tags ILIKE '%%listingside%%'
+                                        THEN be.listing_side_gross_commission
+                                    WHEN be.tags ILIKE '%%sellingside%%'
+                                        THEN be.buying_side_gross_commission
+                                    ELSE be.buying_side_gross_commission
+                                END
+                            ) IS NULL
+                            OR scn.officegrosscommissiononsale = 0
+                            OR (
+                                CASE
+                                    WHEN be.tags ILIKE '%%listingside%%' AND be.tags ILIKE '%%sellingside%%'
+                                        THEN be.total_gross_commission
+                                    WHEN be.tags ILIKE '%%listingside%%'
+                                        THEN be.listing_side_gross_commission
+                                    WHEN be.tags ILIKE '%%sellingside%%'
+                                        THEN be.buying_side_gross_commission
+                                    ELSE be.buying_side_gross_commission
+                                END
+                            ) = 0
                         THEN NULL
-                        WHEN scn.officegrosscommissiononsale <> be.buying_side_gross_commission
+
+                        WHEN scn.officegrosscommissiononsale <> (
+                            CASE
+                                WHEN be.tags ILIKE '%%listingside%%' AND be.tags ILIKE '%%sellingside%%'
+                                    THEN be.total_gross_commission
+                                WHEN be.tags ILIKE '%%listingside%%'
+                                    THEN be.listing_side_gross_commission
+                                WHEN be.tags ILIKE '%%sellingside%%'
+                                    THEN be.buying_side_gross_commission
+                                ELSE be.buying_side_gross_commission
+                            END
+                        )
                         THEN 'mismatch'
+
                         ELSE 'match'
-                    END AS gross_commission_comparison
+                    END AS gross_commission_mismatch
                 FROM brokerage_engine be
                 LEFT JOIN sale s ON s.saleguid = be.skyslopefileid
                 LEFT JOIN sale_commission scn ON scn.saleguid = s.saleguid
