@@ -166,7 +166,7 @@ def close_date(
 
             LEFT JOIN reconciliation_tracking t
                 ON t.transaction_id = b.transactionid
-                AND t.parameter = 'close date'
+                AND t.parameter = 'close_date'
 
             {where_clause}
 
@@ -182,7 +182,7 @@ def close_date(
 
             LEFT JOIN reconciliation_tracking t
                 ON t.transaction_id = b.transactionid
-                AND t.parameter = 'close date'
+                AND t.parameter = 'close_date'
 
             {where_clause};
         """
