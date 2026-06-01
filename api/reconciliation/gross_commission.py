@@ -101,7 +101,8 @@ def gross_commission_summary():
 def gross_commission(
     page: int = Query(default=1, ge=1),
     mismatch: bool = Query(default=False),
-    no_skyslope: bool = Query(default=False),
+    no_skyslope_file: bool = Query(default=False),
+    track_status: str = Query(default=None),
     search: str = Query(default=None)
 ):
     conn = get_conn()
@@ -113,22 +114,33 @@ def gross_commission(
         conditions = []
         params = []
 
+        # mismatch filter
         if mismatch:
-            conditions.append("match_result = 'mismatch'")
+            conditions.append("b.match_result = 'mismatch'")
 
-        if no_skyslope:
-            conditions.append("match_result = 'no_skyslope_record'")
+        # no skyslope file filter
+        if no_skyslope_file:
+            conditions.append("b.match_result = 'no_skyslope_record'")
 
+        # search filter
         if search:
             conditions.append("""
                 (
-                    CAST(saleguid AS TEXT) ILIKE %s
-                    OR CAST(transactionid AS TEXT) ILIKE %s
-                    OR propertyaddress ILIKE %s
+                    CAST(b.saleguid AS TEXT) ILIKE %s
+                    OR CAST(b.transactionid AS TEXT) ILIKE %s
+                    OR b.propertyaddress ILIKE %s
                 )
             """)
             search_term = f"%{search}%"
             params.extend([search_term, search_term, search_term])
+
+        # track_status filter
+        if track_status:
+            if track_status == "open":
+                conditions.append("(t.track_status IS NULL OR t.track_status = 'open')")
+            else:
+                conditions.append("t.track_status = %s")
+                params.append(track_status)
 
         where_clause = ""
         if conditions:
@@ -138,15 +150,26 @@ def gross_commission(
             {GROSS_COMMISSION_BASE_QUERY}
 
             SELECT
-                saleguid,
-                transactionid,
-                propertyaddress,
-                skyslope_gross_commission,
-                be_gross_commission,
-                match_result
-            FROM base
+                b.saleguid,
+                b.transactionid,
+                b.propertyaddress,
+                b.skyslope_gross_commission,
+                b.be_gross_commission,
+                b.match_result,
+                t.track_status AS status,
+                t.assigned_to,
+                t.notes,
+                t.updated_at,
+                t.updated_by
+            FROM base b
+
+            LEFT JOIN reconciliation_tracking t
+                ON t.transaction_id = b.transactionid
+                AND t.parameter = 'gross_commission'
+
             {where_clause}
-            ORDER BY saleguid
+
+            ORDER BY b.saleguid
             LIMIT %s OFFSET %s;
         """
 
@@ -154,7 +177,12 @@ def gross_commission(
             {GROSS_COMMISSION_BASE_QUERY}
 
             SELECT COUNT(*) AS total_count
-            FROM base
+            FROM base b
+
+            LEFT JOIN reconciliation_tracking t
+                ON t.transaction_id = b.transactionid
+                AND t.parameter = 'gross_commission'
+
             {where_clause};
         """
 
