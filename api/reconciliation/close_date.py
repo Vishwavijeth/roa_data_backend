@@ -107,6 +107,7 @@ def close_date_summary():
 def close_date(
     page: int = Query(default=1, ge=1),
     mismatch: bool = Query(default=False),
+    no_skyslope_file: bool = Query(default=False),
     track_status: str = Query(default=None),
     search: str = Query(default=None)
 ):
@@ -122,6 +123,10 @@ def close_date(
         # mismatch filter
         if mismatch:
             conditions.append("b.match_result = 'mismatch'")
+
+        # no skyslope file filter
+        if no_skyslope_file:
+            conditions.append("b.match_result = 'no_skyslope_record'")
 
         # search filter
         if search:
