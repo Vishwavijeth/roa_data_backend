@@ -30,6 +30,10 @@ WITH base AS (
 
             WHEN LOWER(be.transaction_status) = LOWER(COALESCE(s.status, ''))
                 THEN 'match'
+            
+            WHEN LOWER(be.transaction_status) = 'pending'
+                AND LOWER(COALESCE(s.status, '')) = 'expired'
+            THEN NULL
 
             ELSE 'mismatch'
         END AS match_result
