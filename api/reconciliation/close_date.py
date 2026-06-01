@@ -162,7 +162,7 @@ def close_date(
                 b.skyslope_close_date,
                 b.be_close_date,
                 b.match_result,
-                COALESCE(t.track_status, 'open') AS status,
+                t.track_status AS status,
                 t.assigned_to,
                 t.notes,
                 t.updated_at,
