@@ -31,59 +31,76 @@ base AS (
         be.property_address AS propertyaddress,
         be.transaction_status AS be_transaction_status,
         s.status AS skyslope_status,
-        scn.officeGrossCommissionOnSale AS skyslope_gross_commission,
+        CASE
+            WHEN be.tags ILIKE '%%listingside%%' AND be.tags ILIKE '%%sellingside%%'
+                THEN scn.officeGrossCommissionOnSale
+            WHEN be.tags ILIKE '%%listingside%%'
+                THEN COALESCE(scn.listingcommissionamount, scn.officeGrossCommissionOnSale)
+            WHEN be.tags ILIKE '%%sellingside%%'
+                THEN COALESCE(scn.salecommissionamount, scn.officeGrossCommissionOnSale)
+            ELSE COALESCE(scn.salecommissionamount, scn.officeGrossCommissionOnSale)
+        END AS skyslope_gross_commission,
+        scn.officeGrossCommissionOnSale,
         scn.listingcommissionamount,
         scn.salecommissionamount,
         be.be_gross_commission,
         CASE
             WHEN s.saleguid IS NULL
                 THEN 'no_skyslope_record'
-            WHEN be.transaction_status ILIKE 'cancelled'
-                AND (
-                    s.status ILIKE 'canceled/pend'
-                    OR s.status ILIKE 'canceled/app'
-                )
+
+            -- NULL case 1: cancelled transaction
+            WHEN LOWER(be.transaction_status) = 'cancelled'
+                AND LOWER(s.status) IN ('canceled/pend', 'canceled/app')
                 THEN NULL
+
+            -- Both sides: compare against officeGrossCommissionOnSale
             WHEN be.tags ILIKE '%%listingside%%' AND be.tags ILIKE '%%sellingside%%'
                 THEN CASE
                     WHEN scn.officeGrossCommissionOnSale IS NULL
-                         OR be.be_gross_commission IS NULL
-                         OR scn.officeGrossCommissionOnSale = 0
-                         OR be.be_gross_commission = 0
-                        THEN NULL
+                      OR be.be_gross_commission IS NULL
+                      OR scn.officeGrossCommissionOnSale = 0
+                      OR be.be_gross_commission = 0
+                    THEN NULL
                     WHEN scn.officeGrossCommissionOnSale IS DISTINCT FROM be.be_gross_commission
-                        THEN 'mismatch'
+                    THEN 'mismatch'
                     ELSE 'match'
                 END
+
+            -- Listing side only: listingcommissionamount, fallback to officeGrossCommissionOnSale
             WHEN be.tags ILIKE '%%listingside%%'
                 THEN CASE
-                    WHEN scn.listingcommissionamount IS NULL
-                         OR be.be_gross_commission IS NULL
-                         OR scn.listingcommissionamount = 0
-                         OR be.be_gross_commission = 0
-                        THEN NULL
-                    WHEN scn.listingcommissionamount IS DISTINCT FROM be.be_gross_commission
-                        THEN 'mismatch'
+                    WHEN COALESCE(scn.listingcommissionamount, scn.officeGrossCommissionOnSale) IS NULL
+                      OR be.be_gross_commission IS NULL
+                      OR COALESCE(scn.listingcommissionamount, scn.officeGrossCommissionOnSale) = 0
+                      OR be.be_gross_commission = 0
+                    THEN NULL
+                    WHEN COALESCE(scn.listingcommissionamount, scn.officeGrossCommissionOnSale)
+                         IS DISTINCT FROM be.be_gross_commission
+                    THEN 'mismatch'
                     ELSE 'match'
                 END
+
+            -- Selling side only: salecommissionamount, fallback to officeGrossCommissionOnSale
             WHEN be.tags ILIKE '%%sellingside%%'
                 THEN CASE
-                    WHEN scn.salecommissionamount IS NULL
-                         OR be.be_gross_commission IS NULL
-                         OR scn.salecommissionamount = 0
-                         OR be.be_gross_commission = 0
-                        THEN NULL
-                    WHEN scn.salecommissionamount IS DISTINCT FROM be.be_gross_commission
-                        THEN 'mismatch'
+                    WHEN COALESCE(scn.salecommissionamount, scn.officeGrossCommissionOnSale) IS NULL
+                      OR be.be_gross_commission IS NULL
+                      OR COALESCE(scn.salecommissionamount, scn.officeGrossCommissionOnSale) = 0
+                      OR be.be_gross_commission = 0
+                    THEN NULL
+                    WHEN COALESCE(scn.salecommissionamount, scn.officeGrossCommissionOnSale)
+                         IS DISTINCT FROM be.be_gross_commission
+                    THEN 'mismatch'
                     ELSE 'match'
                 END
+
             ELSE NULL
         END AS match_result
     FROM commission_resolved be
     LEFT JOIN sale s
         ON s.saleguid = be.skyslopefileid
     LEFT JOIN sale_commission scn
-        ON scn.saleguid = be.skyslopefileid
+        ON scn.saleguid = s.saleguid
 )
 """
 
