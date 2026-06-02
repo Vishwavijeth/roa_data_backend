@@ -32,6 +32,8 @@ base AS (
         be.transaction_status AS be_transaction_status,
         s.status AS skyslope_status,
         scn.officeGrossCommissionOnSale AS skyslope_gross_commission,
+        scn.listingcommissionamount,
+        scn.salecommissionamount,
         be.be_gross_commission,
         CASE
             WHEN s.saleguid IS NULL
@@ -42,14 +44,40 @@ base AS (
                     OR s.status ILIKE 'canceled/app'
                 )
                 THEN NULL
-            WHEN scn.officeGrossCommissionOnSale IS NULL
-                 OR be.be_gross_commission IS NULL
-                 OR scn.officeGrossCommissionOnSale = 0
-                 OR be.be_gross_commission = 0
-                THEN NULL
-            WHEN scn.officeGrossCommissionOnSale IS DISTINCT FROM be.be_gross_commission
-                THEN 'mismatch'
-            ELSE 'match'
+            WHEN be.tags ILIKE '%%listingside%%' AND be.tags ILIKE '%%sellingside%%'
+                THEN CASE
+                    WHEN scn.officeGrossCommissionOnSale IS NULL
+                         OR be.be_gross_commission IS NULL
+                         OR scn.officeGrossCommissionOnSale = 0
+                         OR be.be_gross_commission = 0
+                        THEN NULL
+                    WHEN scn.officeGrossCommissionOnSale IS DISTINCT FROM be.be_gross_commission
+                        THEN 'mismatch'
+                    ELSE 'match'
+                END
+            WHEN be.tags ILIKE '%%listingside%%'
+                THEN CASE
+                    WHEN scn.listingcommissionamount IS NULL
+                         OR be.be_gross_commission IS NULL
+                         OR scn.listingcommissionamount = 0
+                         OR be.be_gross_commission = 0
+                        THEN NULL
+                    WHEN scn.listingcommissionamount IS DISTINCT FROM be.be_gross_commission
+                        THEN 'mismatch'
+                    ELSE 'match'
+                END
+            WHEN be.tags ILIKE '%%sellingside%%'
+                THEN CASE
+                    WHEN scn.salecommissionamount IS NULL
+                         OR be.be_gross_commission IS NULL
+                         OR scn.salecommissionamount = 0
+                         OR be.be_gross_commission = 0
+                        THEN NULL
+                    WHEN scn.salecommissionamount IS DISTINCT FROM be.be_gross_commission
+                        THEN 'mismatch'
+                    ELSE 'match'
+                END
+            ELSE NULL
         END AS match_result
     FROM commission_resolved be
     LEFT JOIN sale s
