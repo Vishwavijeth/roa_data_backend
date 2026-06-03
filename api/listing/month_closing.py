@@ -77,6 +77,7 @@ def fetch_month_closing_data(
                 LEFT JOIN users r             ON s.reviewerguid = r.userguid
                 LEFT JOIN sale_property sp    ON sp.saleguid = s.saleguid
                 WHERE be.skyslopefileid IS NULL
+                AND LOWER(TRIM(COALESCE(s.status, ''))) NOT IN ('canceled/app', 'canceled/pend')
             """
             base_from += search_clause
 
