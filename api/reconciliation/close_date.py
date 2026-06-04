@@ -158,6 +158,9 @@ def close_date(
                 "mismatch_percentage": mismatch_percentage,
                 "no_skyslope_record_count": summary["no_skyslope_record_count"]
             },
+            "page": page,
+            "page_size": limit,
+            "total_pages": (count + limit - 1) // limit,
             "data": rows
         }
 
