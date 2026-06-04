@@ -48,12 +48,10 @@ base AS (
             WHEN s.saleguid IS NULL
                 THEN 'no_skyslope_record'
 
-            -- NULL case 1: cancelled transaction
             WHEN LOWER(be.transaction_status) = 'cancelled'
                 AND LOWER(s.status) IN ('canceled/pend', 'canceled/app')
                 THEN NULL
 
-            -- Both sides: compare against officeGrossCommissionOnSale
             WHEN be.tags ILIKE '%%listingside%%' AND be.tags ILIKE '%%sellingside%%'
                 THEN CASE
                     WHEN scn.officeGrossCommissionOnSale IS NULL
@@ -61,12 +59,12 @@ base AS (
                       OR scn.officeGrossCommissionOnSale = 0
                       OR be.be_gross_commission = 0
                     THEN NULL
-                    WHEN scn.officeGrossCommissionOnSale IS DISTINCT FROM be.be_gross_commission
+                    WHEN ROUND(scn.officeGrossCommissionOnSale::numeric, 2)
+                         IS DISTINCT FROM ROUND(be.be_gross_commission::numeric, 2)
                     THEN 'mismatch'
                     ELSE 'match'
                 END
 
-            -- Listing side only: listingcommissionamount, fallback to officeGrossCommissionOnSale
             WHEN be.tags ILIKE '%%listingside%%'
                 THEN CASE
                     WHEN COALESCE(scn.listingcommissionamount, scn.officeGrossCommissionOnSale) IS NULL
@@ -74,13 +72,12 @@ base AS (
                       OR COALESCE(scn.listingcommissionamount, scn.officeGrossCommissionOnSale) = 0
                       OR be.be_gross_commission = 0
                     THEN NULL
-                    WHEN COALESCE(scn.listingcommissionamount, scn.officeGrossCommissionOnSale)
-                         IS DISTINCT FROM be.be_gross_commission
+                    WHEN ROUND(COALESCE(scn.listingcommissionamount, scn.officeGrossCommissionOnSale)::numeric, 2)
+                         IS DISTINCT FROM ROUND(be.be_gross_commission::numeric, 2)
                     THEN 'mismatch'
                     ELSE 'match'
                 END
 
-            -- Selling side only: salecommissionamount, fallback to officeGrossCommissionOnSale
             WHEN be.tags ILIKE '%%sellingside%%'
                 THEN CASE
                     WHEN COALESCE(scn.salecommissionamount, scn.officeGrossCommissionOnSale) IS NULL
@@ -88,8 +85,8 @@ base AS (
                       OR COALESCE(scn.salecommissionamount, scn.officeGrossCommissionOnSale) = 0
                       OR be.be_gross_commission = 0
                     THEN NULL
-                    WHEN COALESCE(scn.salecommissionamount, scn.officeGrossCommissionOnSale)
-                         IS DISTINCT FROM be.be_gross_commission
+                    WHEN ROUND(COALESCE(scn.salecommissionamount, scn.officeGrossCommissionOnSale)::numeric, 2)
+                         IS DISTINCT FROM ROUND(be.be_gross_commission::numeric, 2)
                     THEN 'mismatch'
                     ELSE 'match'
                 END
@@ -104,49 +101,11 @@ base AS (
 )
 """
 
-@router.get("/compare/gross_commission/summary")
-def gross_commission_summary():
-    conn = get_conn()
-
-    try:
-        query = f"""
-            {GROSS_COMMISSION_BASE_QUERY}
-
-            SELECT
-                COUNT(*) AS total_count,
-
-                COUNT(*) FILTER (WHERE match_result = 'match') AS match_count,
-                COUNT(*) FILTER (WHERE match_result = 'mismatch') AS mismatch_count,
-                COUNT(*) FILTER (WHERE match_result = 'no_skyslope_record') AS no_skyslope_record_count
-
-            FROM base;
-        """
-
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(query)
-            result = cur.fetchone()
-
-        match_count = result["match_count"] or 0
-        mismatch_count = result["mismatch_count"] or 0
-
-        comparison_total = match_count + mismatch_count
-
-        return {
-            "total_count": result["total_count"],
-            "match_percentage": round((match_count / comparison_total) * 100, 2) if comparison_total else 0,
-            "mismatch_percentage": round((mismatch_count / comparison_total) * 100, 2) if comparison_total else 0,
-            "no_skyslope_record_count": result["no_skyslope_record_count"]
-
-        }
-
-    finally:
-        conn.close()
-
 @router.get("/compare/gross_commission")
 def gross_commission(
     page: int = Query(default=1, ge=1),
     mismatch: bool = Query(default=False),
-    no_skyslope_file: bool = Query(default=False),
+    no_skyslope: bool = Query(default=False),
     track_status: str = Query(default=None),
     search: str = Query(default=None)
 ):
@@ -159,15 +118,12 @@ def gross_commission(
         conditions = []
         params = []
 
-        # mismatch filter
         if mismatch:
             conditions.append("b.match_result = 'mismatch'")
 
-        # no skyslope file filter
-        if no_skyslope_file:
+        if no_skyslope:
             conditions.append("b.match_result = 'no_skyslope_record'")
 
-        # search filter
         if search:
             conditions.append("""
                 (
@@ -179,7 +135,6 @@ def gross_commission(
             search_term = f"%{search}%"
             params.extend([search_term, search_term, search_term])
 
-        # track_status filter
         if track_status:
             if track_status == "open":
                 conditions.append("(t.track_status IS NULL OR t.track_status = 'open')")
@@ -191,9 +146,27 @@ def gross_commission(
         if conditions:
             where_clause = "WHERE " + " AND ".join(conditions)
 
-        query = f"""
+        summary_query = f"""
             {GROSS_COMMISSION_BASE_QUERY}
+            SELECT
+                COUNT(*) FILTER (WHERE match_result = 'match') AS match_count,
+                COUNT(*) FILTER (WHERE match_result = 'mismatch') AS mismatch_count,
+                COUNT(*) FILTER (WHERE match_result = 'no_skyslope_record') AS no_skyslope_record_count
+            FROM base;
+        """
 
+        count_query = f"""
+            {GROSS_COMMISSION_BASE_QUERY}
+            SELECT COUNT(*) AS count
+            FROM base b
+            LEFT JOIN reconciliation_tracking t
+                ON t.transaction_id = b.transactionid
+                AND t.parameter = 'gross_commission'
+            {where_clause};
+        """
+
+        data_query = f"""
+            {GROSS_COMMISSION_BASE_QUERY}
             SELECT
                 b.saleguid,
                 b.transactionid,
@@ -207,42 +180,38 @@ def gross_commission(
                 t.updated_at,
                 t.updated_by
             FROM base b
-
             LEFT JOIN reconciliation_tracking t
                 ON t.transaction_id = b.transactionid
                 AND t.parameter = 'gross_commission'
-
             {where_clause}
-
             ORDER BY b.saleguid
             LIMIT %s OFFSET %s;
         """
 
-        count_query = f"""
-            {GROSS_COMMISSION_BASE_QUERY}
-
-            SELECT COUNT(*) AS total_count
-            FROM base b
-
-            LEFT JOIN reconciliation_tracking t
-                ON t.transaction_id = b.transactionid
-                AND t.parameter = 'gross_commission'
-
-            {where_clause};
-        """
-
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(count_query, params)
-            total_count = cur.fetchone()["total_count"]
+            cur.execute(summary_query)
+            summary = cur.fetchone()
 
-            cur.execute(query, params + [limit, offset])
+            cur.execute(count_query, params)
+            count = cur.fetchone()["count"]
+
+            cur.execute(data_query, params + [limit, offset])
             rows = cur.fetchall()
 
+        match_count = summary["match_count"] or 0
+        mismatch_count = summary["mismatch_count"] or 0
+        comparison_total = match_count + mismatch_count
+
+        match_percentage = round((match_count / comparison_total) * 100, 2) if comparison_total else 0
+        mismatch_percentage = round((mismatch_count / comparison_total) * 100, 2) if comparison_total else 0
+
         return {
-            "page": page,
-            "page_size": limit,
-            "total_count": total_count,
-            "total_pages": (total_count + limit - 1) // limit,
+            "summary": {
+                "count": count,
+                "match_percentage": match_percentage,
+                "mismatch_percentage": mismatch_percentage,
+                "no_skyslope_record_count": summary["no_skyslope_record_count"]
+            },
             "data": rows
         }
 

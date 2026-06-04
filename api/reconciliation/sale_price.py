@@ -45,62 +45,6 @@ WITH base AS (
 )
 """
 
-@router.get("/compare/sale_price/summary")
-def sale_price_summary():
-    conn = get_conn()
-
-    try:
-        query = f"""
-            {SALE_PRICE_BASE_QUERY}
-
-            SELECT
-                COUNT(*) AS total_count,
-
-                COUNT(*) FILTER (
-                    WHERE match_result = 'match'
-                ) AS match_count,
-
-                COUNT(*) FILTER (
-                    WHERE match_result = 'mismatch'
-                ) AS mismatch_count,
-
-                COUNT(*) FILTER (
-                    WHERE match_result = 'no_skyslope_record'
-                ) AS no_skyslope_record_count
-
-            FROM base;
-        """
-
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(query)
-            result = cur.fetchone()
-
-        match_count = result["match_count"] or 0
-        mismatch_count = result["mismatch_count"] or 0
-
-        comparison_total = match_count + mismatch_count
-
-        match_percentage = (
-            round((match_count / comparison_total) * 100, 2)
-            if comparison_total else 0
-        )
-
-        mismatch_percentage = (
-            round((mismatch_count / comparison_total) * 100, 2)
-            if comparison_total else 0
-        )
-
-        return {
-            "total_count": result["total_count"],
-            "match_percentage": match_percentage,
-            "mismatch_percentage": mismatch_percentage,
-            "no_skyslope_record_count": result["no_skyslope_record_count"]
-        }
-
-    finally:
-        conn.close()
-
-
 @router.get("/compare/sale_price")
 def sale_price(
     page: int = Query(default=1, ge=1),
@@ -138,9 +82,24 @@ def sale_price(
         if conditions:
             where_clause = "WHERE " + " AND ".join(conditions)
 
-        query = f"""
+        summary_query = f"""
             {SALE_PRICE_BASE_QUERY}
+            SELECT
+                COUNT(*) FILTER (WHERE match_result = 'match') AS match_count,
+                COUNT(*) FILTER (WHERE match_result = 'mismatch') AS mismatch_count,
+                COUNT(*) FILTER (WHERE match_result = 'no_skyslope_record') AS no_skyslope_record_count
+            FROM base;
+        """
 
+        count_query = f"""
+            {SALE_PRICE_BASE_QUERY}
+            SELECT COUNT(*) AS count
+            FROM base
+            {where_clause};
+        """
+
+        data_query = f"""
+            {SALE_PRICE_BASE_QUERY}
             SELECT
                 saleguid,
                 transactionid,
@@ -154,26 +113,30 @@ def sale_price(
             LIMIT %s OFFSET %s;
         """
 
-        count_query = f"""
-            {SALE_PRICE_BASE_QUERY}
-
-            SELECT COUNT(*) AS total_count
-            FROM base
-            {where_clause};
-        """
-
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(count_query, params)
-            total_count = cur.fetchone()["total_count"]
+            cur.execute(summary_query)
+            summary = cur.fetchone()
 
-            cur.execute(query, params + [limit, offset])
+            cur.execute(count_query, params)
+            count = cur.fetchone()["count"]
+
+            cur.execute(data_query, params + [limit, offset])
             rows = cur.fetchall()
 
+        match_count = summary["match_count"] or 0
+        mismatch_count = summary["mismatch_count"] or 0
+        comparison_total = match_count + mismatch_count
+
+        match_percentage = round((match_count / comparison_total) * 100, 2) if comparison_total else 0
+        mismatch_percentage = round((mismatch_count / comparison_total) * 100, 2) if comparison_total else 0
+
         return {
-            "page": page,
-            "page_size": limit,
-            "total_count": total_count,
-            "total_pages": (total_count + limit - 1) // limit,
+            "summary": {
+                "count": count,
+                "match_percentage": match_percentage,
+                "mismatch_percentage": mismatch_percentage,
+                "no_skyslope_record_count": summary["no_skyslope_record_count"]
+            },
             "data": rows
         }
 
