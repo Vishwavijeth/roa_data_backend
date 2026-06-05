@@ -4,8 +4,11 @@ from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
 
-def get_be_sync():
-    conn = get_conn()
+def get_be_sync(conn=None):
+    should_close = False
+    if conn is None:
+        conn = get_conn()
+        should_close = True
     cur = conn.cursor()
 
     try:
@@ -37,10 +40,14 @@ def get_be_sync():
 
     finally:
         cur.close()
-        conn.close()
+        if should_close:
+            conn.close()
 
-def get_skyslope_sync():
-    conn = get_conn()
+def get_skyslope_sync(conn=None):
+    should_close = False
+    if conn is None:
+        conn = get_conn()
+        should_close = True
     cur = conn.cursor()
 
     try:
@@ -72,4 +79,5 @@ def get_skyslope_sync():
 
     finally:
         cur.close()
-        conn.close()
+        if should_close:
+            conn.close()

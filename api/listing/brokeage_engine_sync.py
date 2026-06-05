@@ -1,8 +1,8 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 import csv, io, httpx, os
 from datetime import timezone
 from zoneinfo import ZoneInfo
-from db import get_conn
+from db import get_db
 from datetime import datetime
 from services.sync_helpers import build_row_values, INSERT_SQL
 
@@ -13,8 +13,7 @@ BE_CSV_URL = os.getenv("BE_CSV_URL")
 
 
 @router.post("/sync/brokerage-engine")
-async def sync_brokerage_engine():
-    conn = get_conn()
+async def sync_brokerage_engine(conn=Depends(get_db)):
     cur = conn.cursor()
 
     status = "failed"
@@ -98,7 +97,6 @@ async def sync_brokerage_engine():
             conn.rollback()
 
         cur.close()
-        conn.close()
 
     return {
         "status": status,
@@ -107,8 +105,7 @@ async def sync_brokerage_engine():
     }
 
 @router.get("/brokerage_sync_logs")
-def get_brokerage_sync_logs():
-    conn = get_conn()
+def get_brokerage_sync_logs(conn=Depends(get_db)):
     cur = conn.cursor()
 
     try:
@@ -158,4 +155,3 @@ def get_brokerage_sync_logs():
 
     finally:
         cur.close()
-        conn.close()

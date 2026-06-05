@@ -1,6 +1,6 @@
-from fastapi import APIRouter, Query, Response
+from fastapi import APIRouter, Query, Response, Depends
 from typing import List
-from db import get_conn
+from db import get_conn, get_db
 from psycopg2.extras import RealDictCursor
 from services.comparison import compare_names, compare_listing_price
 import io
@@ -24,8 +24,11 @@ def fetch_month_closing_data(
     pending_subfilter: List[str] = [],
     page: int = None,
     page_size: int = None,
+    conn = None
 ):
-    conn = get_conn()
+    passed_conn = conn is not None
+    if not passed_conn:
+        conn = get_conn()
     try:
         search_clause = ""
         search_params = {}
@@ -419,7 +422,8 @@ def fetch_month_closing_data(
         return {"mode": "full_comparison", "total": total, "data": [dict(r) for r in rows]}
 
     finally:
-        conn.close()
+        if not passed_conn:
+            conn.close()
 
 @router.get("/month-closing/listing")
 def get_month_closing(
@@ -434,6 +438,7 @@ def get_month_closing(
     pending_subfilter: List[str] = Query(default=[]),
     page: int = 1,
     page_size: int = 50,
+    conn=Depends(get_db)
 ):
     return fetch_month_closing_data(
         status=status,
@@ -447,6 +452,7 @@ def get_month_closing(
         pending_subfilter=pending_subfilter,
         page=page,
         page_size=page_size,
+        conn=conn
     )
 
 @router.get("/month-closing/download")
@@ -460,6 +466,7 @@ def download_month_closing(
     search: str = None,
     mismatch: bool = False,
     pending_subfilter: List[str] = Query(default=[]),
+    conn=Depends(get_db)
 ):
     result = fetch_month_closing_data(
         status=status,
@@ -473,6 +480,7 @@ def download_month_closing(
         pending_subfilter=pending_subfilter,
         page=None,
         page_size=None,
+        conn=conn
     )
     
     data = result["data"]

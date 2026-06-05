@@ -1,6 +1,6 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Depends
 from typing import Optional, List
-from db import get_conn
+from db import get_db
 from psycopg2.extras import RealDictCursor
 
 router = APIRouter()
@@ -9,10 +9,9 @@ router = APIRouter()
 def reviewer_dashboard(
     from_date: Optional[str] = Query(None),
     to_date: Optional[str] = Query(None),
-    state: Optional[List[str]] = Query(None)
+    state: Optional[List[str]] = Query(None),
+    conn=Depends(get_db)
 ):
-    conn = get_conn()
-
     try:
         query = """
         SELECT
@@ -79,4 +78,4 @@ def reviewer_dashboard(
         }
 
     finally:
-        conn.close()
+        pass

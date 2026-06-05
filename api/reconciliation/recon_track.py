@@ -1,5 +1,5 @@
-from fastapi import APIRouter, Query, Body
-from db import get_conn
+from fastapi import APIRouter, Query, Body, Depends
+from db import get_db
 from pydantic import BaseModel
 from typing import Optional
 from uuid import UUID
@@ -17,10 +17,9 @@ class ReconTrackBody(BaseModel):
 def track_reconciliation(
     transaction_id: UUID = Query(...),
     parameter: str = Query(...),
-    req: ReconTrackBody = Body(...)
+    req: ReconTrackBody = Body(...),
+    conn=Depends(get_db)
 ):
-    conn = get_conn()
-
     try:
         query = """
             INSERT INTO public.reconciliation_tracking (
@@ -67,6 +66,3 @@ def track_reconciliation(
             "status": "error",
             "message": str(e)
         }
-
-    finally:
-        conn.close()

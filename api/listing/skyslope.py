@@ -1,5 +1,5 @@
-from fastapi import APIRouter, HTTPException, Query
-from db import get_conn
+from fastapi import APIRouter, HTTPException, Query, Depends
+from db import get_db
 from services.loaders import get_skyslope_sync  
 
 router = APIRouter()
@@ -21,8 +21,7 @@ def get_skyslope_statuses(conn):
     return [row[0] for row in cursor.fetchall()]
 
 @router.get("/skyslope/status-filter")
-def skyslope_status_filter():
-    conn = get_conn()
+def skyslope_status_filter(conn=Depends(get_db)):
 
     status_list = get_skyslope_statuses(conn)
 
@@ -31,8 +30,8 @@ def skyslope_status_filter():
     }
 
 @router.get("/skyslope/sync_info")
-def skyslope_sync_info():
-    sync_info = get_skyslope_sync()
+def skyslope_sync_info(conn=Depends(get_db)):
+    sync_info = get_skyslope_sync(conn)
 
     return {
         "sync_info": sync_info,
@@ -50,9 +49,9 @@ def skyslope_api(
 
     status: str = Query(default=None),
 
-    search: str = Query(default=None)
+    search: str = Query(default=None),
+    conn=Depends(get_db)
 ):
-    conn = get_conn()
     cursor = conn.cursor()
 
     limit = 50
@@ -217,8 +216,7 @@ def skyslope_api(
     }
 
 @router.get("/skyslope/detail")
-def skyslope_detail(saleguid: str):
-    conn = get_conn()
+def skyslope_detail(saleguid: str, conn=Depends(get_db)):
     cursor = conn.cursor()
 
     query = """

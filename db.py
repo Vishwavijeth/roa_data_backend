@@ -13,6 +13,13 @@ def get_conn():
         port=os.getenv("DB_PORT"),
     )
 
+def get_db():
+    conn = get_conn()
+    try:
+        yield conn
+    finally:
+        conn.close()
+
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
     "port": os.getenv("DB_PORT"),

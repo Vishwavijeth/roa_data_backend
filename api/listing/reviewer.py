@@ -1,10 +1,5 @@
-from fastapi import APIRouter
-from db import get_conn
-from psycopg2.extras import RealDictCursor
-
-router = APIRouter()
-
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Depends
+from db import get_db
 from psycopg2.extras import RealDictCursor
 
 router = APIRouter()
@@ -14,10 +9,9 @@ def reviewer_listing(
     stage_name: str = Query(
         default="all",
         description="Filter by stage name"
-    )
+    ),
+    conn=Depends(get_db)
 ):
-    conn = get_conn()
-
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
 
@@ -83,4 +77,4 @@ def reviewer_listing(
         }
 
     finally:
-        conn.close()
+        pass

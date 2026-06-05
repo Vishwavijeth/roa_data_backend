@@ -1,5 +1,5 @@
-from fastapi import APIRouter, Query
-from db import get_conn
+from fastapi import APIRouter, Query, Depends
+from db import get_db
 from psycopg2.extras import RealDictCursor
 
 router = APIRouter()
@@ -7,9 +7,9 @@ router = APIRouter()
 @router.get("/broker-hold/listing")
 def broker_hold_listing(
     buying_agent_name: list[str] = Query(default=None),
-    page: int = Query(default=1, ge=1)
+    page: int = Query(default=1, ge=1),
+    conn=Depends(get_db)
 ):
-    conn = get_conn()
     page_size = 50
     offset = (page - 1) * page_size
 
@@ -136,4 +136,4 @@ def broker_hold_listing(
         }
 
     finally:
-        conn.close()
+        pass

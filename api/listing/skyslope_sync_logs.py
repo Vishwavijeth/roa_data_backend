@@ -1,13 +1,12 @@
-from fastapi import APIRouter
-from db import get_conn
+from fastapi import APIRouter, Depends
+from db import get_db
 from datetime import timezone
 from zoneinfo import ZoneInfo
 
 router = APIRouter()
 
 @router.get("/skyslope_sync_logs")
-def get_skyslope_sync_logs():
-    conn = get_conn()
+def get_skyslope_sync_logs(conn=Depends(get_db)):
     cur = conn.cursor()
 
     try:
@@ -57,4 +56,3 @@ def get_skyslope_sync_logs():
 
     finally:
         cur.close()
-        conn.close()
