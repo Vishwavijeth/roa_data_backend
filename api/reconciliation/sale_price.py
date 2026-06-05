@@ -135,6 +135,7 @@ def sale_price(
                 "count": count,
                 "match_percentage": match_percentage,
                 "mismatch_percentage": mismatch_percentage,
+                "mismatch_count": mismatch_count,
                 "no_skyslope_record_count": summary["no_skyslope_record_count"]
             },
             "page": page,
