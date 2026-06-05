@@ -1,5 +1,5 @@
-from fastapi import HTTPException, APIRouter, Query
-from db import get_conn
+from fastapi import HTTPException, APIRouter, Query, Depends
+from db import get_db
 from services.loaders import get_be_sync
 
 router = APIRouter()
@@ -18,8 +18,7 @@ def get_brokerage_engine_statuses(conn):
     return [row[0] for row in cursor.fetchall()]
 
 @router.get("/brokerage_engine/status-filter")
-def brokerage_engine_status_list():
-    conn = get_conn()
+def brokerage_engine_status_list(conn=Depends(get_db)):
 
     status_list = get_brokerage_engine_statuses(conn)
 
@@ -28,8 +27,8 @@ def brokerage_engine_status_list():
     }
 
 @router.get("/brokerage_engine/sync_info")
-def brokerage_engine_sync_info():
-    return get_be_sync()
+def brokerage_engine_sync_info(conn=Depends(get_db)):
+    return get_be_sync(conn)
 
 @router.get("/brokerage_engine")
 def brokerage_engine(
@@ -44,9 +43,9 @@ def brokerage_engine(
 
     status: str = Query(default=None),
 
-    search: str = Query(default=None)   
+    search: str = Query(default=None),
+    conn=Depends(get_db)
 ):
-    conn = get_conn()
     cursor = conn.cursor()
 
     limit = 50
@@ -141,8 +140,7 @@ def norm(x):
     return str(x or "").replace("\u00A0", "").strip().lower()
 
 @router.get("/brokerage_engine/detail")
-def brokerage_detail(transactionid: str):
-    conn = get_conn()
+def brokerage_detail(transactionid: str, conn=Depends(get_db)):
     cursor = conn.cursor()
 
     query = """

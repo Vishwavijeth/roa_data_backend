@@ -1,22 +1,18 @@
-from fastapi import APIRouter, Query
-from db import get_conn
+from fastapi import APIRouter, Query, Depends
+from typing import Optional, List
+from db import get_db
 from psycopg2.extras import RealDictCursor
 
 router = APIRouter()
-
-from typing import Optional, List
-from fastapi import Query
-from psycopg2.extras import RealDictCursor
 
 
 @router.get("/transaction_specialist_dashboard")
 def transaction_specialist_dashboard(
     from_date: Optional[str] = Query(None),
     to_date: Optional[str] = Query(None),
-    state: Optional[List[str]] = Query(None)
+    state: Optional[List[str]] = Query(None),
+    conn=Depends(get_db)
 ):
-    conn = get_conn()
-
     try:
         query = """
         SELECT
@@ -100,4 +96,4 @@ def transaction_specialist_dashboard(
         }
 
     finally:
-        conn.close()
+        pass

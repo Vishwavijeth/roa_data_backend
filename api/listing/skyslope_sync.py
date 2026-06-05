@@ -9,8 +9,8 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import psycopg2
 from psycopg2.extras import execute_values
-from fastapi import APIRouter
-from db import get_conn
+from fastapi import APIRouter, Depends
+from db import get_conn, get_db
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -32,14 +32,17 @@ BATCH_SIZE = 100
 
 from datetime import datetime
 
-def get_last_sync_date() -> str:
+def get_last_sync_date(conn=None) -> str:
     """
     Returns latest sync date (YYYY-MM-DD).
     If not present, returns DEFAULT_SYNC_DATE.
     """
 
+    passed_conn = conn is not None
+    cur = None
     try:
-        conn = get_conn()
+        if not passed_conn:
+            conn = get_conn()
         cur = conn.cursor()
 
         # ensure table exists
@@ -64,7 +67,9 @@ def get_last_sync_date() -> str:
         row = cur.fetchone()
 
         cur.close()
-        conn.close()
+        cur = None
+        if not passed_conn:
+            conn.close()
 
         if row and row[0]:
             sync_date = row[0]
@@ -76,16 +81,28 @@ def get_last_sync_date() -> str:
 
     except Exception as e:
         logger.warning(f"Could not read sync date from DB, using default: {e}")
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if not passed_conn and conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     logger.info(f"No sync date found in DB. Using default: {DEFAULT_SYNC_DATE}")
     return DEFAULT_SYNC_DATE
 
 
-def update_sync_date():
+def update_sync_date(conn=None):
     now = datetime.now()
-
+    passed_conn = conn is not None
+    cur = None
     try:
-        conn = get_conn()
+        if not passed_conn:
+            conn = get_conn()
         cur = conn.cursor()
 
         # insert new row instead of update
@@ -101,12 +118,24 @@ def update_sync_date():
         conn.commit()
 
         cur.close()
-        conn.close()
+        cur = None
+        if not passed_conn:
+            conn.close()
 
         logger.info(f"Sync date inserted into DB: {now.date()}")
 
     except Exception as e:
         logger.error(f"Failed to insert sync date into DB: {e}")
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if not passed_conn and conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def build_session():
@@ -252,11 +281,11 @@ def fetch_api(url):
         logger.error(f"JSON decode error: {e}")
         return None
 
-def fetch_sales():
+def fetch_sales(conn=None):
     sales = []
 
     # Build the filter URL dynamically using the stored sync date
-    sync_date = get_last_sync_date()
+    sync_date = get_last_sync_date(conn)
     modified_after = f"{sync_date}T00:00:00"
     url = f"{SALES_BASE_URL}?modifiedAfter={modified_after}&type={SALES_FILTER_TYPE}"
     logger.info(f"Fetching sales modified after: {modified_after}")
@@ -937,14 +966,14 @@ def process_sale_batch(sales_batch, worker_id):
 
 
 @router.post("/sync/skyslope-sales")
-def trigger_sales_sync():
+def trigger_sales_sync(conn=Depends(get_db)):
     global processed_count, saved_count_global, error_count_global
     processed_count = 0
     saved_count_global = 0
     error_count_global = 0
 
     logger.info("Starting sync job...")
-    sales = fetch_sales()
+    sales = fetch_sales(conn)
     if not sales:
         logger.info("No sales found to sync.")
         return {"message": "No sales found to sync.", "saved": 0, "errors": 0}
@@ -968,7 +997,7 @@ def trigger_sales_sync():
     logger.info(f"Sync completed! Saved: {saved_count_global}, Errors: {error_count_global}")
 
     # Update the sync date to today so the next run only fetches new/changed records
-    update_sync_date()
+    update_sync_date(conn)
 
     return {
         "message": "Sync completed successfully.",

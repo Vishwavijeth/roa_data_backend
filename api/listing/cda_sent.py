@@ -1,5 +1,5 @@
-from fastapi import APIRouter, Query, Response
-from db import get_conn
+from fastapi import APIRouter, Query, Response, Depends
+from db import get_conn, get_db
 from psycopg2.extras import RealDictCursor
 from services.comparison import compare_names, compare_listing_price
 import io
@@ -11,8 +11,10 @@ import datetime
 
 router = APIRouter()
 
-def fetch_cda_sent_data(filter: str):
-    conn = get_conn()
+def fetch_cda_sent_data(filter: str, conn=None):
+    passed_conn = conn is not None
+    if not passed_conn:
+        conn = get_conn()
     try:
         # For no_skyslope filter, run a simpler query and return early
         if filter == "no_skyslope":
@@ -283,15 +285,22 @@ def fetch_cda_sent_data(filter: str):
             "data": reshaped_rows,
         }
     finally:
-        conn.close()
+        if not passed_conn:
+            conn.close()
 
 @router.get("/cda-sent/listing")
-def get_cda_sent(filter: str = Query("all", enum=["all", "mismatch", "no_skyslope"])):
-    return fetch_cda_sent_data(filter)
+def get_cda_sent(
+    filter: str = Query("all", enum=["all", "mismatch", "no_skyslope"]),
+    conn=Depends(get_db)
+):
+    return fetch_cda_sent_data(filter, conn)
 
 @router.get("/cda-sent/download")
-def download_cda_sent(filter: str = Query("all", enum=["all", "mismatch", "no_skyslope"])):
-    result = fetch_cda_sent_data(filter)
+def download_cda_sent(
+    filter: str = Query("all", enum=["all", "mismatch", "no_skyslope"]),
+    conn=Depends(get_db)
+):
+    result = fetch_cda_sent_data(filter, conn)
     data = result["data"]
 
     if filter == "no_skyslope":
