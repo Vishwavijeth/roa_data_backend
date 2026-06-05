@@ -16,6 +16,7 @@ from api.reconciliation.sale_price import router as sale_price_router
 from api.reconciliation.close_date import router as close_date_router
 from api.reconciliation.gross_commission import router as gci_router
 from api.reconciliation.status import router as status_router
+from api.reconciliation.listing_price import router as listing_price_router
 from api.reconciliation.recon_track import router as recon_track_router
 from api.cron import router as cron_router
 from api.listing.brokerhold import router as broker_hold_router
@@ -46,6 +47,7 @@ app.include_router(sale_price_router)
 app.include_router(close_date_router)
 app.include_router(gci_router)
 app.include_router(status_router)
+app.include_router(listing_price_router)
 app.include_router(recon_track_router)
 app.include_router(cron_router)
 app.include_router(broker_hold_router)
