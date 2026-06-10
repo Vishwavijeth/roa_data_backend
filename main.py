@@ -22,6 +22,7 @@ from api.reconciliation.contract_date import router as contract_date_router
 from api.reconciliation.seller_name import router as seller_name_router
 from api.reconciliation.title_company import router as title_company_router
 from api.reconciliation.transaction_reviewer import router as transaction_reviewer_recon_router
+from api.reconciliation.other_income import router as other_income_router
 from api.reconciliation.recon_track import router as recon_track_router
 from api.cron import router as cron_router
 from api.listing.brokerhold import router as broker_hold_router
@@ -58,6 +59,7 @@ app.include_router(contract_date_router)
 app.include_router(seller_name_router)
 app.include_router(title_company_router)
 app.include_router(transaction_reviewer_recon_router)
+app.include_router(other_income_router)
 app.include_router(recon_track_router)
 app.include_router(cron_router)
 app.include_router(broker_hold_router)

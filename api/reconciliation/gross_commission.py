@@ -5,13 +5,14 @@ from psycopg2.extras import RealDictCursor
 router = APIRouter()
 
 GROSS_COMMISSION_BASE_QUERY = """
-WITH commission_resolved AS (
+WITH brokerage_base AS (
     SELECT
-        be.skyslopefileid,
-        be.transaction_identifier_transactionid,
-        be.property_address,
-        be.transaction_status,
-        be.tags,
+        'brokerage_engine'::text AS source_table,
+        be.skyslopefileid::text AS skyslopefileid,
+        be.transaction_identifier_transactionid AS transactionid,
+        be.property_address::text AS propertyaddress,
+        be.transaction_status::text AS transaction_status,
+        be.tags::text AS tags,
         CASE
             WHEN be.tags ILIKE '%%listingside%%' AND be.tags ILIKE '%%sellingside%%'
                 THEN be.total_gross_commission
@@ -20,92 +21,135 @@ WITH commission_resolved AS (
             WHEN be.tags ILIKE '%%sellingside%%'
                 THEN be.buying_side_gross_commission
             ELSE be.buying_side_gross_commission
-        END AS be_gross_commission
+        END AS source_gross_commission
     FROM brokerage_engine be
+),
+other_income_base AS (
+    SELECT
+        'otherincome_transactions'::text AS source_table,
+        COALESCE(oit.skyslopefileid::text, be.skyslopefileid::text) AS skyslopefileid,
+        oit.transaction_identifier_transactionid AS transactionid,
+        oit.property_address::text AS propertyaddress,
+        oit.transaction_status::text AS transaction_status,
+        oit.tags::text AS tags,
+        oit.gross_commission AS source_gross_commission
+    FROM otherincome_transactions oit
+    LEFT JOIN brokerage_engine be
+        ON lower(trim(oit.property_address::text)) = lower(trim(be.property_address::text))
+    WHERE
+        oit.skyslopefileid IS NOT NULL
+        OR be.skyslopefileid IS NOT NULL
+),
+combined_source AS (
+    SELECT
+        source_table,
+        skyslopefileid,
+        transactionid,
+        propertyaddress,
+        transaction_status,
+        tags,
+        source_gross_commission
+    FROM brokerage_base
+
+    UNION ALL
+
+    SELECT
+        source_table,
+        skyslopefileid,
+        transactionid,
+        propertyaddress,
+        transaction_status,
+        tags,
+        source_gross_commission
+    FROM other_income_base
 ),
 base AS (
     SELECT
-        be.skyslopefileid,
+        cs.source_table,
+        cs.skyslopefileid,
         s.saleguid,
-        be.transaction_identifier_transactionid AS transactionid,
-        be.property_address AS propertyaddress,
-        be.transaction_status AS be_transaction_status,
+        cs.transactionid,
+        cs.propertyaddress,
+        cs.transaction_status AS be_transaction_status,
         s.status AS skyslope_status,
+        cs.tags,
         CASE
-            WHEN be.tags ILIKE '%%listingside%%' AND be.tags ILIKE '%%sellingside%%'
+            WHEN cs.tags ILIKE '%%listingside%%' AND cs.tags ILIKE '%%sellingside%%'
                 THEN scn.officeGrossCommissionOnSale
-            WHEN be.tags ILIKE '%%listingside%%'
+            WHEN cs.tags ILIKE '%%listingside%%'
                 THEN COALESCE(scn.listingcommissionamount, scn.officeGrossCommissionOnSale)
-            WHEN be.tags ILIKE '%%sellingside%%'
+            WHEN cs.tags ILIKE '%%sellingside%%'
                 THEN COALESCE(scn.salecommissionamount, scn.officeGrossCommissionOnSale)
             ELSE COALESCE(scn.salecommissionamount, scn.officeGrossCommissionOnSale)
         END AS skyslope_gross_commission,
         scn.officeGrossCommissionOnSale,
         scn.listingcommissionamount,
         scn.salecommissionamount,
-        be.be_gross_commission,
+        cs.source_gross_commission AS be_gross_commission,
         CASE
             WHEN s.saleguid IS NULL
                 THEN 'no_skyslope_record'
 
-            WHEN LOWER(be.transaction_status) = 'cancelled'
+            WHEN LOWER(cs.transaction_status) = 'cancelled'
                 AND LOWER(s.status) IN ('canceled/pend', 'canceled/app')
                 THEN NULL
 
-            WHEN be.tags ILIKE '%%listingside%%' AND be.tags ILIKE '%%sellingside%%'
+            WHEN cs.tags ILIKE '%%listingside%%' AND cs.tags ILIKE '%%sellingside%%'
                 THEN CASE
                     WHEN scn.officeGrossCommissionOnSale IS NULL
-                      OR be.be_gross_commission IS NULL
+                      OR cs.source_gross_commission IS NULL
                       OR scn.officeGrossCommissionOnSale = 0
-                      OR be.be_gross_commission = 0
+                      OR cs.source_gross_commission = 0
                     THEN NULL
                     WHEN ROUND(scn.officeGrossCommissionOnSale::numeric, 2)
-                         IS DISTINCT FROM ROUND(be.be_gross_commission::numeric, 2)
+                         IS DISTINCT FROM ROUND(cs.source_gross_commission::numeric, 2)
                     THEN 'mismatch'
                     ELSE 'match'
                 END
 
-            WHEN be.tags ILIKE '%%listingside%%'
+            WHEN cs.tags ILIKE '%%listingside%%'
                 THEN CASE
                     WHEN COALESCE(scn.listingcommissionamount, scn.officeGrossCommissionOnSale) IS NULL
-                      OR be.be_gross_commission IS NULL
+                      OR cs.source_gross_commission IS NULL
                       OR COALESCE(scn.listingcommissionamount, scn.officeGrossCommissionOnSale) = 0
-                      OR be.be_gross_commission = 0
+                      OR cs.source_gross_commission = 0
                     THEN NULL
                     WHEN ROUND(COALESCE(scn.listingcommissionamount, scn.officeGrossCommissionOnSale)::numeric, 2)
-                         IS DISTINCT FROM ROUND(be.be_gross_commission::numeric, 2)
+                         IS DISTINCT FROM ROUND(cs.source_gross_commission::numeric, 2)
                     THEN 'mismatch'
                     ELSE 'match'
                 END
 
-            WHEN be.tags ILIKE '%%sellingside%%'
+            WHEN cs.tags ILIKE '%%sellingside%%'
                 THEN CASE
                     WHEN COALESCE(scn.salecommissionamount, scn.officeGrossCommissionOnSale) IS NULL
-                      OR be.be_gross_commission IS NULL
+                      OR cs.source_gross_commission IS NULL
                       OR COALESCE(scn.salecommissionamount, scn.officeGrossCommissionOnSale) = 0
-                      OR be.be_gross_commission = 0
+                      OR cs.source_gross_commission = 0
                     THEN NULL
                     WHEN ROUND(COALESCE(scn.salecommissionamount, scn.officeGrossCommissionOnSale)::numeric, 2)
-                         IS DISTINCT FROM ROUND(be.be_gross_commission::numeric, 2)
+                         IS DISTINCT FROM ROUND(cs.source_gross_commission::numeric, 2)
                     THEN 'mismatch'
                     ELSE 'match'
                 END
 
             ELSE NULL
         END AS match_result
-    FROM commission_resolved be
+    FROM combined_source cs
     LEFT JOIN sale s
-        ON s.saleguid = be.skyslopefileid
+        ON s.saleguid::text = cs.skyslopefileid
     LEFT JOIN sale_commission scn
         ON scn.saleguid = s.saleguid
 )
 """
+
 
 @router.get("/compare/gross_commission")
 def gross_commission(
     page: int = Query(default=1, ge=1),
     mismatch: bool = Query(default=False),
     no_skyslope: bool = Query(default=False),
+    other_income: bool = Query(default=False),
     track_status: str = Query(default=None),
     search: str = Query(default=None),
     conn=Depends(get_db)
@@ -121,6 +165,9 @@ def gross_commission(
 
     if no_skyslope:
         conditions.append("b.match_result = 'no_skyslope_record'")
+
+    if other_income:
+        conditions.append("b.source_table = 'otherincome_transactions'")
 
     if search:
         conditions.append("""
@@ -166,6 +213,7 @@ def gross_commission(
     data_query = f"""
         {GROSS_COMMISSION_BASE_QUERY}
         SELECT
+            b.source_table,
             b.saleguid,
             b.transactionid,
             b.propertyaddress,
