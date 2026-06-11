@@ -6,46 +6,81 @@ router = APIRouter()
 
 
 CLOSE_DATE_BASE_QUERY = """
-WITH base AS (
+WITH brokerage_base AS (
     SELECT
-        be.skyslopefileid AS skyslopefileid,
-        s.saleguid,
-
+        'brokerage_engine'::text AS source_table,
+        be.skyslopefileid::text AS skyslopefileid,
         be.transaction_identifier_transactionid AS transactionid,
-        be.property_address AS propertyaddress,
+        be.property_address::text AS propertyaddress,
+        be.transaction_status::text AS be_transaction_status,
+        be.closed_date::date AS be_close_date
+    FROM brokerage_engine be
+),
+other_income_base AS (
+    SELECT
+        'otherincome_transactions'::text AS source_table,
+        oit.skyslopefileid::text AS skyslopefileid,
+        oit.transaction_identifier_transactionid AS transactionid,
+        oit.property_address::text AS propertyaddress,
+        oit.transaction_status::text AS be_transaction_status,
+        oit.income_received_date::date AS be_close_date
+    FROM otherincome_transactions oit
+    WHERE oit.skyslopefileid IS NOT NULL
+),
+combined_source AS (
+    SELECT
+        source_table,
+        skyslopefileid,
+        transactionid,
+        propertyaddress,
+        be_transaction_status,
+        be_close_date
+    FROM brokerage_base
 
-        be.transaction_status AS be_transaction_status,
+    UNION ALL
+
+    SELECT
+        source_table,
+        skyslopefileid,
+        transactionid,
+        propertyaddress,
+        be_transaction_status,
+        be_close_date
+    FROM other_income_base
+),
+base AS (
+    SELECT
+        cs.source_table,
+        cs.skyslopefileid,
+        s.saleguid,
+        cs.transactionid,
+        cs.propertyaddress,
+        cs.be_transaction_status,
         s.status AS skyslope_status,
-
-        s.escrowclosingdate AS skyslope_close_date,
-        be.closed_date AS be_close_date,
-
+        s.escrowclosingdate::date AS skyslope_close_date,
+        cs.be_close_date,
         CASE
             WHEN s.saleguid IS NULL
                 THEN 'no_skyslope_record'
 
-            WHEN LOWER(be.transaction_status) = 'cancelled'
+            WHEN LOWER(cs.be_transaction_status) = 'cancelled'
                  AND LOWER(COALESCE(s.status, '')) IN ('canceled/app', 'canceled/pend')
                 THEN NULL
 
-            WHEN be.transaction_status ILIKE 'cancelled'
-                AND (
-                    s.status ILIKE 'canceled/pend'
-                    OR s.status ILIKE 'canceled/app'
-                )
+            WHEN cs.be_close_date IS NULL OR s.escrowclosingdate IS NULL
                 THEN NULL
 
-            WHEN s.escrowclosingdate IS DISTINCT FROM be.closed_date
+            WHEN s.escrowclosingdate::date IS DISTINCT FROM cs.be_close_date
                 THEN 'mismatch'
 
             ELSE 'match'
         END AS match_result
-
-    FROM brokerage_engine be
+    FROM combined_source cs
     LEFT JOIN sale s
-        ON s.saleguid = be.skyslopefileid
+        ON s.saleguid::text = cs.skyslopefileid
 )
 """
+
 
 @router.get("/compare/close_date")
 def close_date(
@@ -95,7 +130,16 @@ def close_date(
         SELECT
             COUNT(*) FILTER (WHERE match_result = 'match') AS match_count,
             COUNT(*) FILTER (WHERE match_result = 'mismatch') AS mismatch_count,
-            COUNT(*) FILTER (WHERE match_result = 'no_skyslope_record') AS no_skyslope_record_count
+            (
+                SELECT COUNT(*)
+                FROM brokerage_engine be
+                WHERE be.skyslopefileid IS NULL
+            ) AS saleincome_no_skyslopefileid_count,
+            (
+                SELECT COUNT(*)
+                FROM otherincome_transactions oit
+                WHERE oit.skyslopefileid IS NULL
+            ) AS otherincome_no_skyslopefileid_count
         FROM base;
     """
 
@@ -112,6 +156,7 @@ def close_date(
     data_query = f"""
         {CLOSE_DATE_BASE_QUERY}
         SELECT
+            b.source_table,
             b.saleguid,
             b.transactionid,
             b.propertyaddress,
@@ -155,7 +200,8 @@ def close_date(
             "match_percentage": match_percentage,
             "mismatch_percentage": mismatch_percentage,
             "mismatch_count": mismatch_count,
-            "no_skyslope_record_count": summary["no_skyslope_record_count"]
+            "saleincome_no_skyslopefileid_count": summary["saleincome_no_skyslopefileid_count"],
+            "otherincome_no_skyslopefileid_count": summary["otherincome_no_skyslopefileid_count"]
         },
         "page": page,
         "page_size": limit,
