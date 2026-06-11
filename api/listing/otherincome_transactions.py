@@ -165,7 +165,6 @@ def otherincome_detail(transactionid: str, conn=Depends(get_db)):
             s.escrowclosingdate,
             s.reviewerguid,
             s.agentguid,
-            s.canceldate,
 
             COALESCE(r.firstname || ' ' || r.lastname, '') AS reviewer_full_name,
 
@@ -245,7 +244,6 @@ def otherincome_detail(transactionid: str, conn=Depends(get_db)):
             "status": data.get("status"),
             "contractacceptancedate": data.get("contractacceptancedate"),
             "escrowclosingdate": data.get("escrowclosingdate"),
-            "canceldate": data.get("canceldate"),
             "officegrosscommissiononsale": data.get("officegrosscommissiononsale")
         }
     }
