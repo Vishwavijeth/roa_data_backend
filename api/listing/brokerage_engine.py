@@ -4,28 +4,6 @@ from services.loaders import get_be_sync
 
 router = APIRouter()
 
-def get_brokerage_engine_statuses(conn):
-    cursor = conn.cursor()
-
-    query = """
-        SELECT DISTINCT transaction_status AS status
-        FROM brokerage_engine
-        WHERE transaction_status IS NOT NULL
-        ORDER BY transaction_status
-    """
-
-    cursor.execute(query)
-    return [row[0] for row in cursor.fetchall()]
-
-@router.get("/brokerage_engine/status-filter")
-def brokerage_engine_status_list(conn=Depends(get_db)):
-
-    status_list = get_brokerage_engine_statuses(conn)
-
-    return {
-        "status_list": status_list
-    }
-
 @router.get("/brokerage_engine/sync_info")
 def brokerage_engine_sync_info(conn=Depends(get_db)):
     return get_be_sync(conn)
@@ -34,15 +12,11 @@ def brokerage_engine_sync_info(conn=Depends(get_db)):
 def brokerage_engine(
     brokerhold: bool = Query(default=False),
     page: int = Query(default=1, ge=1),
-
     from_close_date: str = Query(default=None),
     to_close_date: str = Query(default=None),
-
     from_contract_date: str = Query(default=None),
     to_contract_date: str = Query(default=None),
-
     status: str = Query(default=None),
-
     search: str = Query(default=None),
     conn=Depends(get_db)
 ):
@@ -82,40 +56,31 @@ def brokerage_engine(
         base_query += " AND contract_date <= %s"
         params.append(to_contract_date)
 
-    # ------------------------
-    # SEARCH FILTER (NEW)
-    # ------------------------
     if search:
-        search = f"%{search.lower()}%"
+        search_value = f"%{search.lower()}%"
         base_query += """
             AND (
                 LOWER(transaction_identifier_transactionid::text) LIKE %s
-                OR LOWER(property_address) LIKE %s
-                OR LOWER(buying_agent_name) LIKE %s
+                OR LOWER(COALESCE(property_address, '')) LIKE %s
+                OR LOWER(COALESCE(buying_agent_name, '')) LIKE %s
             )
         """
-        params.extend([search, search, search])
+        params.extend([search_value, search_value, search_value])
 
-    # ------------------------
-    # COUNT QUERY
-    # ------------------------
     count_query = "SELECT COUNT(*) " + base_query
     cursor.execute(count_query, params)
     total_count = cursor.fetchone()[0]
 
-    # ------------------------
-    # DATA QUERY
-    # ------------------------
     data_query = """
         SELECT
-            transaction_identifier_transactionid as transactionid,
+            transaction_identifier_transactionid AS transactionid,
             property_address,
             buying_agent_name,
             sale_price,
             contract_date,
-            closed_date as close_date,
+            closed_date AS close_date,
             transaction_specialist,
-            transaction_status as status,
+            transaction_status AS status,
             skyslopefileid
     """ + base_query
 
@@ -128,11 +93,22 @@ def brokerage_engine(
 
     columns = [desc[0] for desc in cursor.description]
     rows = cursor.fetchall()
-
     data = [dict(zip(columns, row)) for row in rows]
+
+    status_query = """
+        SELECT DISTINCT transaction_status AS status
+        FROM brokerage_engine
+        WHERE transaction_status IS NOT NULL
+        ORDER BY transaction_status
+    """
+    cursor.execute(status_query)
+    status_list = [row[0] for row in cursor.fetchall()]
 
     return {
         "total_count": total_count,
+        "filters": {
+            "status_list": status_list
+        },
         "data": data
     }
 
@@ -236,7 +212,7 @@ def brokerage_detail(transactionid: str, conn=Depends(get_db)):
             "tags": data.get("tags"),
             "status": data.get("transaction_status"),
             "transaction_specialist": data.get("transaction_specialist"),
-            "skyslopefileid": data.get("skyslopefileid")
+            "skyslopefileid": data.get("skyslopefileid")    
         },
         "skyslope": {
             "match": skyslope_match,
