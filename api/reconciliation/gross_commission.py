@@ -34,7 +34,7 @@ other_income_base AS (
         oit.tags::text AS tags,
         oit.gross_commission AS source_gross_commission
     FROM otherincome_transactions oit
-    WHERE oit.skyslopefileid IS NOT NULL
+    -- removed filter: include ALL other income rows now
 ),
 combined_source AS (
     SELECT
@@ -198,7 +198,7 @@ def gross_commission(
                 SELECT COUNT(*)
                 FROM brokerage_engine be
                 WHERE be.skyslopefileid IS NULL
-            ) AS brokerage_engine_no_skyslopefileid_count,
+            ) AS saleincome_no_skyslopefileid_count,
             (
                 SELECT COUNT(*)
                 FROM otherincome_transactions oit
@@ -222,14 +222,9 @@ def gross_commission(
                 conditions.append("m.source_table = 'otherincome_transactions'")
 
             if search:
-                conditions.append("""
-                    (
-                        CAST(m.transactionid AS TEXT) ILIKE %s
-                        OR m.propertyaddress ILIKE %s
-                    )
-                """)
+                conditions.append("m.propertyaddress ILIKE %s")
                 search_term = f"%{search}%"
-                params.extend([search_term, search_term])
+                params.append(search_term)
 
             where_clause = ""
             if conditions:
@@ -282,7 +277,7 @@ def gross_commission(
                     "match_percentage": match_percentage,
                     "mismatch_percentage": mismatch_percentage,
                     "mismatch_count": mismatch_count,
-                    "saleincome_no_skyslopefileid_count": summary["brokerage_engine_no_skyslopefileid_count"],
+                    "saleincome_no_skyslopefileid_count": summary["saleincome_no_skyslopefileid_count"],
                     "otherincome_no_skyslopefileid_count": summary["otherincome_no_skyslopefileid_count"]
                 },
                 "page": page,
@@ -301,15 +296,9 @@ def gross_commission(
             conditions.append("b.match_result = 'no_skyslope_record'")
 
         if search:
-            conditions.append("""
-                (
-                    CAST(b.saleguid AS TEXT) ILIKE %s
-                    OR CAST(b.transactionid AS TEXT) ILIKE %s
-                    OR b.propertyaddress ILIKE %s
-                )
-            """)
+            conditions.append("b.propertyaddress ILIKE %s")
             search_term = f"%{search}%"
-            params.extend([search_term, search_term, search_term])
+            params.append(search_term)
 
         if track_status:
             if track_status == "open":
@@ -375,7 +364,7 @@ def gross_commission(
             "match_percentage": match_percentage,
             "mismatch_percentage": mismatch_percentage,
             "mismatch_count": mismatch_count,
-            "saleincome_no_skyslopefileid_count": summary["brokerage_engine_no_skyslopefileid_count"],
+            "saleincome_no_skyslopefileid_count": summary["saleincome_no_skyslopefileid_count"],
             "otherincome_no_skyslopefileid_count": summary["otherincome_no_skyslopefileid_count"]
         },
         "page": page,

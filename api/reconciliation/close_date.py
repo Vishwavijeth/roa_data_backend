@@ -25,7 +25,6 @@ other_income_base AS (
         oit.transaction_status::text AS be_transaction_status,
         oit.income_received_date::date AS be_close_date
     FROM otherincome_transactions oit
-    WHERE oit.skyslopefileid IS NOT NULL
 ),
 combined_source AS (
     SELECT
@@ -156,14 +155,9 @@ def close_date(
                 conditions.append("m.source_table = 'otherincome_transactions'")
 
             if search:
-                conditions.append("""
-                    (
-                        CAST(m.transactionid AS TEXT) ILIKE %s
-                        OR m.propertyaddress ILIKE %s
-                    )
-                """)
+                conditions.append("m.propertyaddress ILIKE %s")
                 search_term = f"%{search}%"
-                params.extend([search_term, search_term])
+                params.append(search_term)
 
             where_clause = ""
             if conditions:
@@ -235,15 +229,9 @@ def close_date(
             conditions.append("b.match_result = 'no_skyslope_record'")
 
         if search:
-            conditions.append("""
-                (
-                    CAST(b.saleguid AS TEXT) ILIKE %s
-                    OR CAST(b.transactionid AS TEXT) ILIKE %s
-                    OR b.propertyaddress ILIKE %s
-                )
-            """)
+            conditions.append("b.propertyaddress ILIKE %s")
             search_term = f"%{search}%"
-            params.extend([search_term, search_term, search_term])
+            params.append(search_term)
 
         if track_status:
             if track_status == "open":
