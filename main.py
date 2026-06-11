@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from api.listing.brokerage_engine import router as brokerage_router
+from api.listing.otherincome_transactions import router as other_income_listing_router
 from api.listing.skyslope import router as skyslope_router
 from api.listing.transaction_specialist import router as transaction_specialist_router
 from api.listing.reviewer import router as reviewer_router
@@ -39,6 +40,7 @@ app.add_middleware(
 )
 
 app.include_router(brokerage_router)
+app.include_router(other_income_listing_router)
 app.include_router(skyslope_router)
 app.include_router(transaction_specialist_router)
 app.include_router(reviewer_router)
