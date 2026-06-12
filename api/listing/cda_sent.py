@@ -11,71 +11,36 @@ import datetime
 
 router = APIRouter()
 
-def fetch_cda_sent_data(filter: str, conn=None):
+from fastapi import Query, Depends
+from psycopg2.extras import RealDictCursor
+
+
+def fetch_cda_sent_data(filter: str, page: int = 1, search: str = None, conn=None):
     passed_conn = conn is not None
     if not passed_conn:
         conn = get_conn()
+
+    limit = 50
+    offset = (page - 1) * limit
+
     try:
-        # For no_skyslope filter, run a simpler query and return early
-        if filter == "no_skyslope":
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT
-                        be.transaction_identifier_transactionid AS transaction_id,
-                        be.skyslopefileid,
-                        be.property_address,
-                        be.tags,
-                        be.sale_price AS be_sale_price,
-                        be.closed_date AS be_closed_date,
-                        be.contract_date AS be_contract_date,
-                        be.listing_price AS be_listing_price,
-                        be.transaction_status AS be_transaction_status,
-                        be.buyer_name AS be_buyer_name,
-                        be.seller_name AS be_seller_name
-                    FROM brokerage_engine be
-                    WHERE be.tags LIKE '%CdaSent%'
-                    AND be.skyslopefileid IS NULL
-                    ORDER BY be.transaction_identifier_transactionid;
-                """)
-                no_skyslope_rows = cur.fetchall()
-                cur.execute("""
-                    SELECT COUNT(*) AS total_cda_sent
-                    FROM brokerage_engine be
-                    WHERE be.tags LIKE '%CdaSent%'
-                """)
-                summary = cur.fetchone()
-                cur.execute("""
-                    SELECT COUNT(*) AS no_skyslope_record
-                    FROM brokerage_engine be
-                    WHERE be.tags LIKE '%CdaSent%'
-                    AND be.skyslopefileid IS NULL
-                """)
-                no_skyslope = cur.fetchone()
-            return {
-                "filter": filter,
-                "total_cda_sent": summary["total_cda_sent"],
-                "unmatched_count": None,
-                "no_skyslope_record": no_skyslope["no_skyslope_record"],
-                "data": [dict(row) for row in no_skyslope_rows],
-            }
-        # all / mismatch filters
-        query = """
-            WITH base AS (
+        params: list = []
+
+        summary_cte = """
+            WITH brokerage_base AS (
                 SELECT
+                    'brokerage_engine'::text AS source_table,
                     be.transaction_identifier_transactionid AS transaction_id,
-                    be.skyslopefileid,
+                    be.skyslopefileid::text AS skyslopefileid,
                     be.property_address,
                     be.tags,
-                    be.sale_price AS be_sale_price,
-                    s.saleprice AS ss_sale_price,
-                    be.closed_date AS be_closed_date,
-                    s.escrowclosingdate AS ss_closed_date,
-                    be.contract_date AS be_contract_date,
-                    s.contractacceptancedate AS ss_contract_date,
-                    be.listing_price AS be_listing_price,
-                    s.listingprice AS ss_listing_price,
+                    be.sale_price::numeric AS be_sale_price,
+                    be.closed_date::date AS be_closed_date,
+                    be.contract_date::date AS be_contract_date,
+                    be.listing_price::numeric AS be_listing_price,
                     be.transaction_status AS be_transaction_status,
-                    s.status AS ss_transaction_status,
+                    be.buyer_name AS be_buyer_name,
+                    be.seller_name AS be_seller_name,
                     CASE
                         WHEN be.tags ILIKE '%%listingside%%' AND be.tags ILIKE '%%sellingside%%'
                             THEN be.total_gross_commission
@@ -84,216 +49,716 @@ def fetch_cda_sent_data(filter: str, conn=None):
                         WHEN be.tags ILIKE '%%sellingside%%'
                             THEN be.buying_side_gross_commission
                         ELSE be.buying_side_gross_commission
-                    END AS be_gross_commission,
+                    END AS be_gross_commission
+                FROM brokerage_engine be
+                WHERE be.tags ILIKE '%%CdaSent%%'
+            ),
+            other_income_base AS (
+                SELECT
+                    'otherincome_transactions'::text AS source_table,
+                    oit.transaction_identifier_transactionid AS transaction_id,
+                    oit.skyslopefileid::text AS skyslopefileid,
+                    oit.property_address,
+                    oit.tags,
+                    oit.income_received::numeric AS be_sale_price,
+                    oit.income_received_date::date AS be_closed_date,
+                    NULL::date AS be_contract_date,
+                    NULL::numeric AS be_listing_price,
+                    oit.transaction_status AS be_transaction_status,
+                    NULL::text AS be_buyer_name,
+                    NULL::text AS be_seller_name,
+                    oit.gross_commission::numeric AS be_gross_commission
+                FROM otherincome_transactions oit
+                WHERE oit.tags ILIKE '%%CdaSent%%'
+            ),
+            combined_source AS (
+                SELECT * FROM brokerage_base
+                UNION ALL
+                SELECT * FROM other_income_base
+            ),
+            base_summary AS (
+                SELECT
+                    cs.source_table,
+                    cs.transaction_id,
+                    cs.skyslopefileid,
+                    cs.property_address,
+                    cs.tags,
+                    cs.be_sale_price,
+                    s.saleprice::numeric AS ss_sale_price,
+                    cs.be_closed_date,
+                    s.escrowclosingdate::date AS ss_closed_date,
+                    cs.be_contract_date,
+                    s.contractacceptancedate::date AS ss_contract_date,
+                    cs.be_listing_price,
+                    s.listingprice::numeric AS ss_listing_price,
+                    cs.be_transaction_status,
+                    s.status AS ss_transaction_status,
+                    cs.be_gross_commission,
                     CASE
-                        WHEN be.tags ILIKE '%%listingside%%' AND be.tags ILIKE '%%sellingside%%'
+                        WHEN cs.tags ILIKE '%%listingside%%' AND cs.tags ILIKE '%%sellingside%%'
                             THEN scn.officegrosscommissiononsale
-                        WHEN be.tags ILIKE '%%listingside%%'
+                        WHEN cs.tags ILIKE '%%listingside%%'
                             THEN COALESCE(scn.listingcommissionamount, scn.officegrosscommissiononsale)
-                        WHEN be.tags ILIKE '%%sellingside%%'
+                        WHEN cs.tags ILIKE '%%sellingside%%'
                             THEN COALESCE(scn.salecommissionamount, scn.officegrosscommissiononsale)
                         ELSE COALESCE(scn.salecommissionamount, scn.officegrosscommissiononsale)
                     END AS ss_gross_commission,
-                    scn.officegrosscommissiononsale,
-                    scn.listingcommissionamount,
-                    scn.salecommissionamount,
-                    COALESCE(
-                        (
-                            SELECT STRING_AGG(
-                                TRIM(COALESCE(sc.firstname, '') || ' ' || COALESCE(sc.lastname, '')),
-                                ', '
-                            )
-                            FROM sale_contact sc
-                            WHERE sc.saleguid = s.saleguid
-                            AND LOWER(sc.role) = 'buyer'
-                        ),
-                        ''
-                    ) AS ss_buyer_name,
-                    be.buyer_name AS be_buyer_name,
-                    COALESCE(
-                        (
-                            SELECT STRING_AGG(
-                                TRIM(COALESCE(sc.firstname, '') || ' ' || COALESCE(sc.lastname, '')),
-                                ', '
-                            )
-                            FROM sale_contact sc
-                            WHERE sc.saleguid = s.saleguid
-                            AND LOWER(sc.role) = 'seller'
-                        ),
-                        ''
-                    ) AS ss_seller_name,
-                    be.seller_name AS be_seller_name,
                     CASE
-                        WHEN be.sale_price IS DISTINCT FROM s.saleprice
-                        THEN true
-                        ELSE false
+                        WHEN cs.skyslopefileid IS NULL OR s.saleguid IS NULL THEN TRUE
+                        WHEN cs.be_sale_price IS DISTINCT FROM s.saleprice::numeric THEN TRUE
+                        ELSE FALSE
                     END AS sale_price_mismatch,
                     CASE
-                        WHEN be.closed_date IS DISTINCT FROM s.escrowclosingdate
-                        THEN true
-                        ELSE false
+                        WHEN cs.skyslopefileid IS NULL OR s.saleguid IS NULL THEN TRUE
+                        WHEN cs.be_closed_date IS DISTINCT FROM s.escrowclosingdate::date THEN TRUE
+                        ELSE FALSE
                     END AS closed_date_mismatch,
                     CASE
-                        WHEN be.contract_date IS DISTINCT FROM s.contractacceptancedate
-                        THEN true
-                        ELSE false
+                        WHEN cs.source_table = 'otherincome_transactions' THEN NULL
+                        WHEN cs.skyslopefileid IS NULL OR s.saleguid IS NULL THEN TRUE
+                        WHEN cs.be_contract_date IS DISTINCT FROM s.contractacceptancedate::date THEN TRUE
+                        ELSE FALSE
                     END AS contract_date_mismatch,
                     CASE
+                        WHEN cs.source_table = 'otherincome_transactions' THEN NULL
+                        WHEN cs.skyslopefileid IS NULL OR s.saleguid IS NULL THEN TRUE
+                        WHEN cs.be_listing_price IS DISTINCT FROM s.listingprice::numeric THEN TRUE
+                        ELSE FALSE
+                    END AS listing_price_mismatch_db,
+                    CASE
+                        WHEN cs.skyslopefileid IS NULL OR s.saleguid IS NULL THEN TRUE
                         WHEN LOWER(s.status) = 'expired' THEN NULL
-                        WHEN be.transaction_status IS NULL OR s.status IS NULL THEN NULL
-                        WHEN LOWER(be.transaction_status) = LOWER(s.status) THEN false
-                        WHEN LOWER(be.transaction_status) = 'cancelled'
-                            AND LOWER(s.status) IN ('canceled/app', 'canceled/pend')
-                        THEN false
-                        ELSE true
+                        WHEN cs.be_transaction_status IS NULL OR s.status IS NULL THEN NULL
+                        WHEN LOWER(cs.be_transaction_status) = LOWER(s.status) THEN FALSE
+                        WHEN LOWER(cs.be_transaction_status) = 'cancelled'
+                             AND LOWER(s.status) IN ('canceled/app', 'canceled/pend')
+                        THEN FALSE
+                        WHEN LOWER(cs.be_transaction_status) = 'closed'
+                             AND LOWER(s.status) IN ('archived', 'closed')
+                        THEN FALSE
+                        ELSE TRUE
                     END AS transaction_status_mismatch,
                     CASE
-                        -- Both sides: compare against officegrosscommissiononsale
-                        WHEN be.tags ILIKE '%%listingside%%' AND be.tags ILIKE '%%sellingside%%'
+                        WHEN cs.skyslopefileid IS NULL OR s.saleguid IS NULL THEN 'mismatch'
+                        WHEN cs.tags ILIKE '%%listingside%%' AND cs.tags ILIKE '%%sellingside%%'
                             THEN CASE
                                 WHEN scn.officegrosscommissiononsale IS NULL
-                                OR be.total_gross_commission IS NULL
-                                OR scn.officegrosscommissiononsale = 0
-                                OR be.total_gross_commission = 0
+                                  OR cs.be_gross_commission IS NULL
+                                  OR scn.officegrosscommissiononsale = 0
+                                  OR cs.be_gross_commission = 0
                                 THEN NULL
-                                WHEN scn.officegrosscommissiononsale <> be.total_gross_commission
+                                WHEN ROUND(scn.officegrosscommissiononsale::numeric, 2)
+                                     IS DISTINCT FROM ROUND(cs.be_gross_commission::numeric, 2)
                                 THEN 'mismatch'
                                 ELSE 'match'
                             END
-
-                        -- Listing side only: listingcommissionamount, fallback to officegrosscommissiononsale
-                        WHEN be.tags ILIKE '%%listingside%%'
+                        WHEN cs.tags ILIKE '%%listingside%%'
                             THEN CASE
                                 WHEN COALESCE(scn.listingcommissionamount, scn.officegrosscommissiononsale) IS NULL
-                                OR be.listing_side_gross_commission IS NULL
-                                OR COALESCE(scn.listingcommissionamount, scn.officegrosscommissiononsale) = 0
-                                OR be.listing_side_gross_commission = 0
+                                  OR cs.be_gross_commission IS NULL
+                                  OR COALESCE(scn.listingcommissionamount, scn.officegrosscommissiononsale) = 0
+                                  OR cs.be_gross_commission = 0
                                 THEN NULL
-                                WHEN COALESCE(scn.listingcommissionamount, scn.officegrosscommissiononsale)
-                                    <> be.listing_side_gross_commission
+                                WHEN ROUND(COALESCE(scn.listingcommissionamount, scn.officegrosscommissiononsale)::numeric, 2)
+                                     IS DISTINCT FROM ROUND(cs.be_gross_commission::numeric, 2)
                                 THEN 'mismatch'
                                 ELSE 'match'
                             END
-
-                        -- Selling side only (or fallback): salecommissionamount, fallback to officegrosscommissiononsale
                         ELSE
                             CASE
                                 WHEN COALESCE(scn.salecommissionamount, scn.officegrosscommissiononsale) IS NULL
-                                OR be.buying_side_gross_commission IS NULL
-                                OR COALESCE(scn.salecommissionamount, scn.officegrosscommissiononsale) = 0
-                                OR be.buying_side_gross_commission = 0
+                                  OR cs.be_gross_commission IS NULL
+                                  OR COALESCE(scn.salecommissionamount, scn.officegrosscommissiononsale) = 0
+                                  OR cs.be_gross_commission = 0
                                 THEN NULL
-                                WHEN COALESCE(scn.salecommissionamount, scn.officegrosscommissiononsale)
-                                    <> be.buying_side_gross_commission
+                                WHEN ROUND(COALESCE(scn.salecommissionamount, scn.officegrosscommissiononsale)::numeric, 2)
+                                     IS DISTINCT FROM ROUND(cs.be_gross_commission::numeric, 2)
                                 THEN 'mismatch'
                                 ELSE 'match'
                             END
-                    END AS gross_commission_mismatch
-                FROM brokerage_engine be
-                LEFT JOIN sale s ON s.saleguid = be.skyslopefileid
-                LEFT JOIN sale_commission scn ON scn.saleguid = s.saleguid
-                WHERE be.tags LIKE '%CdaSent%'
+                    END AS gross_commission_mismatch,
+                    CASE
+                        WHEN cs.skyslopefileid IS NULL OR s.saleguid IS NULL THEN TRUE
+                        ELSE FALSE
+                    END AS no_skyslope_record
+                FROM combined_source cs
+                LEFT JOIN sale s
+                    ON s.saleguid = cs.skyslopefileid::uuid
+                LEFT JOIN sale_commission scn
+                    ON scn.saleguid = s.saleguid
             )
-            SELECT *
-            FROM base
-            ORDER BY transaction_id;
         """
+
+        summary_query = f"""
+            {summary_cte}
+            SELECT
+                COUNT(*) AS total_cda_sent,
+                COUNT(*) FILTER (
+                    WHERE
+                        no_skyslope_record = TRUE
+                        OR sale_price_mismatch = TRUE
+                        OR closed_date_mismatch = TRUE
+                        OR contract_date_mismatch = TRUE
+                        OR transaction_status_mismatch = TRUE
+                        OR gross_commission_mismatch = 'mismatch'
+                ) AS unmatched_count,
+                COUNT(*) FILTER (
+                    WHERE
+                        no_skyslope_record = FALSE
+                        AND COALESCE(sale_price_mismatch, FALSE) = FALSE
+                        AND COALESCE(closed_date_mismatch, FALSE) = FALSE
+                        AND COALESCE(contract_date_mismatch, FALSE) = FALSE
+                        AND COALESCE(transaction_status_mismatch, FALSE) = FALSE
+                        AND COALESCE(gross_commission_mismatch, 'match') <> 'mismatch'
+                ) AS matched_count,
+                COUNT(*) FILTER (WHERE no_skyslope_record = TRUE) AS no_skyslope_record
+            FROM base_summary;
+        """
+
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(query)
-            rows = cur.fetchall()
-            reshaped_rows = []
-            for row in rows:
-                buyer_result = compare_names(
-                    row["ss_buyer_name"],
-                    row["be_buyer_name"]
-                )
-                seller_result = compare_names(
-                    row["ss_seller_name"],
-                    row["be_seller_name"]
-                )
-                listing_price_result = compare_listing_price(
-                    row["be_listing_price"],
-                    row["ss_listing_price"]
-                )
-                status_mismatch = row["transaction_status_mismatch"]
-                gross_commission_mismatch = row["gross_commission_mismatch"]
-                is_stale = (
-                    row["sale_price_mismatch"]
-                    or row["closed_date_mismatch"]
-                    or row["contract_date_mismatch"]
-                    or listing_price_result == "mismatch"
-                    or status_mismatch is True
-                    or buyer_result == "mismatch"
-                    or seller_result == "mismatch"
-                    or gross_commission_mismatch == "mismatch"
-                )
-                reshaped_row = {
-                    "transaction_id": row["transaction_id"],
-                    "skyslopefileid": row["skyslopefileid"],
-                    "property_address": row["property_address"],
-                    "tags": row["tags"],
-                    "is_stale": is_stale,
-                    "be_gross_commission": row["be_gross_commission"],
-                    "ss_gross_commission": row["ss_gross_commission"],
-                    "gross_commission_mismatch": gross_commission_mismatch,
-                    "be_closed_date": row["be_closed_date"],
-                    "ss_closed_date": row["ss_closed_date"],
-                    "closed_date_mismatch": row["closed_date_mismatch"],
-                    "be_sale_price": row["be_sale_price"],
-                    "ss_sale_price": row["ss_sale_price"],
-                    "sale_price_mismatch": row["sale_price_mismatch"],
-                    "be_transaction_status": row["be_transaction_status"],
-                    "ss_transaction_status": row["ss_transaction_status"],
-                    "transaction_status_mismatch": status_mismatch,
-                    "be_contract_date": row["be_contract_date"],
-                    "ss_contract_date": row["ss_contract_date"],
-                    "contract_date_mismatch": row["contract_date_mismatch"],
-                    "be_listing_price": row["be_listing_price"],
-                    "ss_listing_price": row["ss_listing_price"],
-                    "listing_price_mismatch": listing_price_result,
-                    "be_buyer_name": row["be_buyer_name"],
-                    "ss_buyer_name": row["ss_buyer_name"],
-                    "buyer_name_comparison": buyer_result,
-                    "be_seller_name": row["be_seller_name"],
-                    "ss_seller_name": row["ss_seller_name"],
-                    "seller_name_comparison": seller_result,
-                }
-                if filter == "all":
-                    reshaped_rows.append(reshaped_row)
-                elif filter == "mismatch" and is_stale:
-                    reshaped_rows.append(reshaped_row)
-            cur.execute("""
-                SELECT COUNT(*) AS total_cda_sent
-                FROM brokerage_engine be
-                LEFT JOIN sale s ON s.saleguid = be.skyslopefileid
-                WHERE be.tags LIKE '%CdaSent%'
-            """)
+            cur.execute(summary_query)
             summary = cur.fetchone()
-            cur.execute("""
-                SELECT COUNT(*) AS no_skyslope_record
+
+        if filter == "no_skyslope":
+            search_conditions = []
+            no_skyslope_params = []
+
+            if search:
+                search_conditions.append("""
+                    (
+                        CAST(x.transaction_id AS TEXT) ILIKE %s
+                        OR x.property_address ILIKE %s
+                    )
+                """)
+                search_term = f"%{search}%"
+                no_skyslope_params.extend([search_term, search_term])
+
+            where_clause = ""
+            if search_conditions:
+                where_clause = "WHERE " + " AND ".join(search_conditions)
+
+            no_skyslope_base = """
+                WITH no_skyslope_base AS (
+                    SELECT
+                        'brokerage_engine'::text AS source_table,
+                        be.transaction_identifier_transactionid AS transaction_id,
+                        be.skyslopefileid::text AS skyslopefileid,
+                        be.property_address,
+                        be.tags,
+                        be.sale_price::numeric AS be_sale_price,
+                        NULL::numeric AS ss_sale_price,
+                        be.closed_date::date AS be_closed_date,
+                        NULL::date AS ss_closed_date,
+                        be.contract_date::date AS be_contract_date,
+                        NULL::date AS ss_contract_date,
+                        be.listing_price::numeric AS be_listing_price,
+                        NULL::numeric AS ss_listing_price,
+                        be.transaction_status AS be_transaction_status,
+                        NULL::text AS ss_transaction_status,
+                        be.buyer_name AS be_buyer_name,
+                        NULL::text AS ss_buyer_name,
+                        be.seller_name AS be_seller_name,
+                        NULL::text AS ss_seller_name,
+                        CASE
+                            WHEN be.tags ILIKE '%%listingside%%' AND be.tags ILIKE '%%sellingside%%'
+                                THEN be.total_gross_commission
+                            WHEN be.tags ILIKE '%%listingside%%'
+                                THEN be.listing_side_gross_commission
+                            WHEN be.tags ILIKE '%%sellingside%%'
+                                THEN be.buying_side_gross_commission
+                            ELSE be.buying_side_gross_commission
+                        END AS be_gross_commission,
+                        NULL::numeric AS ss_gross_commission,
+                        TRUE AS no_skyslope_record
+                    FROM brokerage_engine be
+                    LEFT JOIN sale s
+                        ON s.saleguid = be.skyslopefileid::uuid
+                    WHERE be.tags ILIKE '%%CdaSent%%'
+                      AND (be.skyslopefileid IS NULL OR s.saleguid IS NULL)
+
+                    UNION ALL
+
+                    SELECT
+                        'otherincome_transactions'::text AS source_table,
+                        oit.transaction_identifier_transactionid AS transaction_id,
+                        oit.skyslopefileid::text AS skyslopefileid,
+                        oit.property_address,
+                        oit.tags,
+                        oit.income_received::numeric AS be_sale_price,
+                        NULL::numeric AS ss_sale_price,
+                        oit.income_received_date::date AS be_closed_date,
+                        NULL::date AS ss_closed_date,
+                        NULL::date AS be_contract_date,
+                        NULL::date AS ss_contract_date,
+                        NULL::numeric AS be_listing_price,
+                        NULL::numeric AS ss_listing_price,
+                        oit.transaction_status AS be_transaction_status,
+                        NULL::text AS ss_transaction_status,
+                        NULL::text AS be_buyer_name,
+                        NULL::text AS ss_buyer_name,
+                        NULL::text AS be_seller_name,
+                        NULL::text AS ss_seller_name,
+                        oit.gross_commission::numeric AS be_gross_commission,
+                        NULL::numeric AS ss_gross_commission,
+                        TRUE AS no_skyslope_record
+                    FROM otherincome_transactions oit
+                    LEFT JOIN sale s
+                        ON s.saleguid = oit.skyslopefileid::uuid
+                    WHERE oit.tags ILIKE '%%CdaSent%%'
+                      AND (oit.skyslopefileid IS NULL OR s.saleguid IS NULL)
+                )
+            """
+
+            count_query = f"""
+                {no_skyslope_base}
+                SELECT COUNT(*) AS count
+                FROM no_skyslope_base x
+                {where_clause};
+            """
+
+            data_query = f"""
+                {no_skyslope_base}
+                SELECT
+                    x.source_table,
+                    x.transaction_id,
+                    x.skyslopefileid,
+                    x.property_address,
+                    x.tags,
+                    TRUE AS is_stale,
+                    x.be_gross_commission,
+                    x.ss_gross_commission,
+                    'mismatch'::text AS gross_commission_mismatch,
+                    x.be_closed_date,
+                    x.ss_closed_date,
+                    TRUE AS closed_date_mismatch,
+                    x.be_sale_price,
+                    x.ss_sale_price,
+                    TRUE AS sale_price_mismatch,
+                    x.be_transaction_status,
+                    x.ss_transaction_status,
+                    TRUE AS transaction_status_mismatch,
+                    x.be_contract_date,
+                    x.ss_contract_date,
+                    TRUE AS contract_date_mismatch,
+                    x.be_listing_price,
+                    x.ss_listing_price,
+                    NULL::text AS listing_price_mismatch,
+                    x.be_buyer_name,
+                    x.ss_buyer_name,
+                    NULL::text AS buyer_name_comparison,
+                    x.be_seller_name,
+                    x.ss_seller_name,
+                    NULL::text AS seller_name_comparison,
+                    x.no_skyslope_record
+                FROM no_skyslope_base x
+                {where_clause}
+                ORDER BY x.transaction_id
+                LIMIT %s OFFSET %s;
+            """
+
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(count_query, no_skyslope_params)
+                total_count = cur.fetchone()["count"]
+
+                cur.execute(data_query, no_skyslope_params + [limit, offset])
+                rows = cur.fetchall()
+
+            comparison_total = (summary["matched_count"] or 0) + (summary["unmatched_count"] or 0)
+            match_percentage = round(((summary["matched_count"] or 0) / comparison_total) * 100, 2) if comparison_total else 0
+            total_pages = (total_count + limit - 1) // limit
+
+            return {
+                "filter": filter,
+                "summary": {
+                    "count": total_count,
+                    "total_cda_sent": summary["total_cda_sent"],
+                    "unmatched_count": summary["unmatched_count"],
+                    "match_percentage": match_percentage,
+                    "no_skyslope_record": summary["no_skyslope_record"],
+                },
+                "page": page,
+                "page_size": limit,
+                "total_pages": total_pages,
+                "data": [dict(row) for row in rows],
+            }
+
+        search_clause = ""
+        if search:
+            search_clause = """
+                WHERE
+                    CAST(b.transaction_id AS TEXT) ILIKE %s
+                    OR b.property_address ILIKE %s
+            """
+            search_term = f"%{search}%"
+            params.extend([search_term, search_term])
+
+        base_cte = """
+            WITH brokerage_base AS (
+                SELECT
+                    'brokerage_engine'::text AS source_table,
+                    be.transaction_identifier_transactionid AS transaction_id,
+                    be.skyslopefileid::text AS skyslopefileid,
+                    be.property_address,
+                    be.tags,
+                    be.sale_price::numeric AS be_sale_price,
+                    be.closed_date::date AS be_closed_date,
+                    be.contract_date::date AS be_contract_date,
+                    be.listing_price::numeric AS be_listing_price,
+                    be.transaction_status AS be_transaction_status,
+                    be.buyer_name AS be_buyer_name,
+                    be.seller_name AS be_seller_name,
+                    CASE
+                        WHEN be.tags ILIKE '%%listingside%%' AND be.tags ILIKE '%%sellingside%%'
+                            THEN be.total_gross_commission
+                        WHEN be.tags ILIKE '%%listingside%%'
+                            THEN be.listing_side_gross_commission
+                        WHEN be.tags ILIKE '%%sellingside%%'
+                            THEN be.buying_side_gross_commission
+                        ELSE be.buying_side_gross_commission
+                    END AS be_gross_commission
                 FROM brokerage_engine be
-                WHERE be.tags LIKE '%CdaSent%'
-                AND be.skyslopefileid IS NULL
-            """)
-            no_skyslope = cur.fetchone()
-        stale_count = sum(1 for row in reshaped_rows if row["is_stale"])
+                WHERE be.tags ILIKE '%%CdaSent%%'
+            ),
+            other_income_base AS (
+                SELECT
+                    'otherincome_transactions'::text AS source_table,
+                    oit.transaction_identifier_transactionid AS transaction_id,
+                    oit.skyslopefileid::text AS skyslopefileid,
+                    oit.property_address,
+                    oit.tags,
+                    oit.income_received::numeric AS be_sale_price,
+                    oit.income_received_date::date AS be_closed_date,
+                    NULL::date AS be_contract_date,
+                    NULL::numeric AS be_listing_price,
+                    oit.transaction_status AS be_transaction_status,
+                    NULL::text AS be_buyer_name,
+                    NULL::text AS be_seller_name,
+                    oit.gross_commission::numeric AS be_gross_commission
+                FROM otherincome_transactions oit
+                WHERE oit.tags ILIKE '%%CdaSent%%'
+            ),
+            combined_source AS (
+                SELECT * FROM brokerage_base
+                UNION ALL
+                SELECT * FROM other_income_base
+            ),
+            buyer_contacts AS (
+                SELECT
+                    sc.saleguid,
+                    STRING_AGG(
+                        TRIM(COALESCE(sc.firstname, '') || ' ' || COALESCE(sc.lastname, '')),
+                        ', '
+                    ) AS ss_buyer_name
+                FROM sale_contact sc
+                WHERE LOWER(sc.role) = 'buyer'
+                GROUP BY sc.saleguid
+            ),
+            seller_contacts AS (
+                SELECT
+                    sc.saleguid,
+                    STRING_AGG(
+                        TRIM(COALESCE(sc.firstname, '') || ' ' || COALESCE(sc.lastname, '')),
+                        ', '
+                    ) AS ss_seller_name
+                FROM sale_contact sc
+                WHERE LOWER(sc.role) = 'seller'
+                GROUP BY sc.saleguid
+            ),
+            base AS (
+                SELECT
+                    cs.source_table,
+                    cs.transaction_id,
+                    cs.skyslopefileid,
+                    cs.property_address,
+                    cs.tags,
+                    cs.be_sale_price,
+                    s.saleprice::numeric AS ss_sale_price,
+                    cs.be_closed_date,
+                    s.escrowclosingdate::date AS ss_closed_date,
+                    cs.be_contract_date,
+                    s.contractacceptancedate::date AS ss_contract_date,
+                    cs.be_listing_price,
+                    s.listingprice::numeric AS ss_listing_price,
+                    cs.be_transaction_status,
+                    s.status AS ss_transaction_status,
+                    cs.be_buyer_name,
+                    cs.be_seller_name,
+                    COALESCE(bc.ss_buyer_name, '') AS ss_buyer_name,
+                    COALESCE(sc.ss_seller_name, '') AS ss_seller_name,
+                    cs.be_gross_commission,
+                    CASE
+                        WHEN cs.tags ILIKE '%%listingside%%' AND cs.tags ILIKE '%%sellingside%%'
+                            THEN scn.officegrosscommissiononsale
+                        WHEN cs.tags ILIKE '%%listingside%%'
+                            THEN COALESCE(scn.listingcommissionamount, scn.officegrosscommissiononsale)
+                        WHEN cs.tags ILIKE '%%sellingside%%'
+                            THEN COALESCE(scn.salecommissionamount, scn.officegrosscommissiononsale)
+                        ELSE COALESCE(scn.salecommissionamount, scn.officegrosscommissiononsale)
+                    END AS ss_gross_commission,
+                    CASE
+                        WHEN cs.skyslopefileid IS NULL OR s.saleguid IS NULL THEN TRUE
+                        WHEN cs.be_sale_price IS DISTINCT FROM s.saleprice::numeric THEN TRUE
+                        ELSE FALSE
+                    END AS sale_price_mismatch,
+                    CASE
+                        WHEN cs.skyslopefileid IS NULL OR s.saleguid IS NULL THEN TRUE
+                        WHEN cs.be_closed_date IS DISTINCT FROM s.escrowclosingdate::date THEN TRUE
+                        ELSE FALSE
+                    END AS closed_date_mismatch,
+                    CASE
+                        WHEN cs.source_table = 'otherincome_transactions' THEN NULL
+                        WHEN cs.skyslopefileid IS NULL OR s.saleguid IS NULL THEN TRUE
+                        WHEN cs.be_contract_date IS DISTINCT FROM s.contractacceptancedate::date THEN TRUE
+                        ELSE FALSE
+                    END AS contract_date_mismatch,
+                    CASE
+                        WHEN cs.source_table = 'otherincome_transactions' THEN NULL
+                        WHEN cs.skyslopefileid IS NULL OR s.saleguid IS NULL THEN TRUE
+                        WHEN cs.be_listing_price IS DISTINCT FROM s.listingprice::numeric THEN TRUE
+                        ELSE FALSE
+                    END AS listing_price_mismatch_db,
+                    CASE
+                        WHEN cs.skyslopefileid IS NULL OR s.saleguid IS NULL THEN TRUE
+                        WHEN LOWER(s.status) = 'expired' THEN NULL
+                        WHEN cs.be_transaction_status IS NULL OR s.status IS NULL THEN NULL
+                        WHEN LOWER(cs.be_transaction_status) = LOWER(s.status) THEN FALSE
+                        WHEN LOWER(cs.be_transaction_status) = 'cancelled'
+                             AND LOWER(s.status) IN ('canceled/app', 'canceled/pend')
+                        THEN FALSE
+                        WHEN LOWER(cs.be_transaction_status) = 'closed'
+                             AND LOWER(s.status) IN ('archived', 'closed')
+                        THEN FALSE
+                        ELSE TRUE
+                    END AS transaction_status_mismatch,
+                    CASE
+                        WHEN cs.skyslopefileid IS NULL OR s.saleguid IS NULL THEN 'mismatch'
+                        WHEN cs.tags ILIKE '%%listingside%%' AND cs.tags ILIKE '%%sellingside%%'
+                            THEN CASE
+                                WHEN scn.officegrosscommissiononsale IS NULL
+                                  OR cs.be_gross_commission IS NULL
+                                  OR scn.officegrosscommissiononsale = 0
+                                  OR cs.be_gross_commission = 0
+                                THEN NULL
+                                WHEN ROUND(scn.officegrosscommissiononsale::numeric, 2)
+                                     IS DISTINCT FROM ROUND(cs.be_gross_commission::numeric, 2)
+                                THEN 'mismatch'
+                                ELSE 'match'
+                            END
+                        WHEN cs.tags ILIKE '%%listingside%%'
+                            THEN CASE
+                                WHEN COALESCE(scn.listingcommissionamount, scn.officegrosscommissiononsale) IS NULL
+                                  OR cs.be_gross_commission IS NULL
+                                  OR COALESCE(scn.listingcommissionamount, scn.officegrosscommissiononsale) = 0
+                                  OR cs.be_gross_commission = 0
+                                THEN NULL
+                                WHEN ROUND(COALESCE(scn.listingcommissionamount, scn.officegrosscommissiononsale)::numeric, 2)
+                                     IS DISTINCT FROM ROUND(cs.be_gross_commission::numeric, 2)
+                                THEN 'mismatch'
+                                ELSE 'match'
+                            END
+                        ELSE
+                            CASE
+                                WHEN COALESCE(scn.salecommissionamount, scn.officegrosscommissiononsale) IS NULL
+                                  OR cs.be_gross_commission IS NULL
+                                  OR COALESCE(scn.salecommissionamount, scn.officegrosscommissiononsale) = 0
+                                  OR cs.be_gross_commission = 0
+                                THEN NULL
+                                WHEN ROUND(COALESCE(scn.salecommissionamount, scn.officegrosscommissiononsale)::numeric, 2)
+                                     IS DISTINCT FROM ROUND(cs.be_gross_commission::numeric, 2)
+                                THEN 'mismatch'
+                                ELSE 'match'
+                            END
+                    END AS gross_commission_mismatch,
+                    CASE
+                        WHEN cs.skyslopefileid IS NULL OR s.saleguid IS NULL THEN TRUE
+                        ELSE FALSE
+                    END AS no_skyslope_record
+                FROM combined_source cs
+                LEFT JOIN sale s
+                    ON s.saleguid = cs.skyslopefileid::uuid
+                LEFT JOIN sale_commission scn
+                    ON scn.saleguid = s.saleguid
+                LEFT JOIN buyer_contacts bc
+                    ON bc.saleguid = s.saleguid
+                LEFT JOIN seller_contacts sc
+                    ON sc.saleguid = s.saleguid
+            )
+        """
+
+        filter_clause = ""
+        if filter == "mismatch":
+            filter_clause = """
+                WHERE
+                    b.no_skyslope_record = TRUE
+                    OR b.sale_price_mismatch = TRUE
+                    OR b.closed_date_mismatch = TRUE
+                    OR b.contract_date_mismatch = TRUE
+                    OR b.transaction_status_mismatch = TRUE
+                    OR b.gross_commission_mismatch = 'mismatch'
+            """
+
+        where_parts = []
+        if filter_clause:
+            where_parts.append(filter_clause.replace("WHERE", "").strip())
+        if search_clause:
+            where_parts.append(search_clause.replace("WHERE", "").strip())
+
+        final_where = ""
+        if where_parts:
+            final_where = "WHERE " + " AND ".join(f"({p})" for p in where_parts)
+
+        count_query = f"""
+            {base_cte}
+            SELECT COUNT(*) AS count
+            FROM base b
+            {final_where};
+        """
+
+        data_query = f"""
+            {base_cte}
+            SELECT
+                b.source_table,
+                b.transaction_id,
+                b.skyslopefileid,
+                b.property_address,
+                b.tags,
+                b.be_gross_commission,
+                b.ss_gross_commission,
+                b.gross_commission_mismatch,
+                b.be_closed_date,
+                b.ss_closed_date,
+                b.closed_date_mismatch,
+                b.be_sale_price,
+                b.ss_sale_price,
+                b.sale_price_mismatch,
+                b.be_transaction_status,
+                b.ss_transaction_status,
+                b.transaction_status_mismatch,
+                b.be_contract_date,
+                b.ss_contract_date,
+                b.contract_date_mismatch,
+                b.be_listing_price,
+                b.ss_listing_price,
+                b.listing_price_mismatch_db,
+                b.be_buyer_name,
+                b.ss_buyer_name,
+                b.be_seller_name,
+                b.ss_seller_name,
+                b.no_skyslope_record
+            FROM base b
+            {final_where}
+            ORDER BY b.transaction_id
+            LIMIT %s OFFSET %s;
+        """
+
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(count_query, params)
+            total_count = cur.fetchone()["count"]
+
+            cur.execute(data_query, params + [limit, offset])
+            rows = cur.fetchall()
+
+        reshaped_rows = []
+        for row in rows:
+            is_brokerage = row["source_table"] == "brokerage_engine"
+
+            buyer_result = (
+                compare_names(row["ss_buyer_name"], row["be_buyer_name"])
+                if is_brokerage else None
+            )
+            seller_result = (
+                compare_names(row["ss_seller_name"], row["be_seller_name"])
+                if is_brokerage else None
+            )
+            listing_price_result = (
+                compare_listing_price(row["be_listing_price"], row["ss_listing_price"])
+                if is_brokerage else None
+            )
+
+            is_stale = (
+                row["no_skyslope_record"] is True
+                or row["sale_price_mismatch"] is True
+                or row["closed_date_mismatch"] is True
+                or row["contract_date_mismatch"] is True
+                or listing_price_result == "mismatch"
+                or row["transaction_status_mismatch"] is True
+                or buyer_result == "mismatch"
+                or seller_result == "mismatch"
+                or row["gross_commission_mismatch"] == "mismatch"
+            )
+
+            reshaped_row = {
+                "source_table": row["source_table"],
+                "transaction_id": row["transaction_id"],
+                "skyslopefileid": row["skyslopefileid"],
+                "property_address": row["property_address"],
+                "tags": row["tags"],
+                "is_stale": is_stale,
+                "be_gross_commission": row["be_gross_commission"],
+                "ss_gross_commission": row["ss_gross_commission"],
+                "gross_commission_mismatch": row["gross_commission_mismatch"],
+                "be_closed_date": row["be_closed_date"],
+                "ss_closed_date": row["ss_closed_date"],
+                "closed_date_mismatch": row["closed_date_mismatch"],
+                "be_sale_price": row["be_sale_price"],
+                "ss_sale_price": row["ss_sale_price"],
+                "sale_price_mismatch": row["sale_price_mismatch"],
+                "be_transaction_status": row["be_transaction_status"],
+                "ss_transaction_status": row["ss_transaction_status"],
+                "transaction_status_mismatch": row["transaction_status_mismatch"],
+                "be_contract_date": row["be_contract_date"],
+                "ss_contract_date": row["ss_contract_date"],
+                "contract_date_mismatch": row["contract_date_mismatch"],
+                "be_listing_price": row["be_listing_price"],
+                "ss_listing_price": row["ss_listing_price"],
+                "listing_price_mismatch": listing_price_result,
+                "be_buyer_name": row["be_buyer_name"],
+                "ss_buyer_name": row["ss_buyer_name"],
+                "buyer_name_comparison": buyer_result,
+                "be_seller_name": row["be_seller_name"],
+                "ss_seller_name": row["ss_seller_name"],
+                "seller_name_comparison": seller_result,
+            }
+
+            if filter == "all":
+                reshaped_rows.append(reshaped_row)
+            elif filter == "mismatch" and is_stale:
+                reshaped_rows.append(reshaped_row)
+
+        comparison_total = (summary["matched_count"] or 0) + (summary["unmatched_count"] or 0)
+        match_percentage = round(((summary["matched_count"] or 0) / comparison_total) * 100, 2) if comparison_total else 0
+
+        total_pages = (total_count + limit - 1) // limit
+
         return {
             "filter": filter,
-            "total_cda_sent": summary["total_cda_sent"],
-            "unmatched_count": stale_count,
-            "no_skyslope_record": no_skyslope["no_skyslope_record"],
+            "summary": {
+                "count": total_count,
+                "total_cda_sent": summary["total_cda_sent"],
+                "unmatched_count": summary["unmatched_count"],
+                "match_percentage": match_percentage,
+                "no_skyslope_record": summary["no_skyslope_record"],
+            },
+            "page": page,
+            "page_size": limit,
+            "total_pages": total_pages,
             "data": reshaped_rows,
         }
+
     finally:
         if not passed_conn:
             conn.close()
 
+
 @router.get("/cda-sent/listing")
 def get_cda_sent(
     filter: str = Query("all", enum=["all", "mismatch", "no_skyslope"]),
+    page: int = Query(default=1, ge=1),
+    search: str = Query(default=None),
     conn=Depends(get_db)
 ):
-    return fetch_cda_sent_data(filter, conn)
+    return fetch_cda_sent_data(filter, page, search, conn)
+
 
 @router.get("/cda-sent/download")
 def download_cda_sent(
