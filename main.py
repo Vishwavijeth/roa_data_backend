@@ -12,6 +12,7 @@ from api.listing.skyslope_sync import router as skyslope_sync_router
 from api.listing.skyslope_sync_logs import router as skyslope_sync_logs_router
 from api.dashboards.reviewer import router as review_dash_router
 from api.listing.cda_sent import router as cda_sent_router
+from api.listing.pre_cda import router as pre_cda_router
 from api.listing.month_closing import router as month_closing_router
 from api.reconciliation.sale_price import router as sale_price_router
 from api.reconciliation.close_date import router as close_date_router
@@ -51,6 +52,7 @@ app.include_router(other_income_sync_router)
 app.include_router(skyslope_sync_router)
 app.include_router(skyslope_sync_logs_router)
 app.include_router(cda_sent_router)
+app.include_router(pre_cda_router)
 app.include_router(month_closing_router)
 app.include_router(sale_price_router)
 app.include_router(close_date_router)
