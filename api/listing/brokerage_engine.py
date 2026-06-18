@@ -1,6 +1,12 @@
-from fastapi import HTTPException, APIRouter, Query, Depends
+from fastapi import HTTPException, APIRouter, Query, Depends, Response
 from db import get_db
 from services.loaders import get_be_sync
+import pandas as pd
+import io
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+from decimal import Decimal
+import datetime
 
 router = APIRouter()
 
@@ -232,3 +238,145 @@ def brokerage_detail(transactionid: str, conn=Depends(get_db)):
             "officegrosscommissiononsale": data.get("officegrosscommissiononsale")
         }
     }
+
+@router.get("/sale/noskyslopefileid/download")
+def download_sale_no_skyslopefileid(conn=Depends(get_db)):
+    cursor = conn.cursor()
+
+    query = """
+        SELECT *
+        FROM brokerage_engine
+        WHERE skyslopefileid IS NULL
+        ORDER BY closed_date DESC NULLS LAST, contract_date DESC NULLS LAST
+    """
+
+    cursor.execute(query)
+    data = cursor.fetchall()
+
+    columns = [desc[0] for desc in cursor.description]
+
+    rows_to_export = []
+    for row in data:
+        row_dict = dict(zip(columns, row))
+        export_row = {}
+
+        for col in columns:
+            val = row_dict.get(col)
+
+            if isinstance(val, Decimal):
+                val = float(val)
+            elif isinstance(val, (datetime.date, datetime.datetime)):
+                val = val.strftime("%Y-%m-%d")
+            elif isinstance(val, bool):
+                val = "Yes" if val else "No"
+            elif val is None:
+                val = ""
+
+            export_row[col] = val
+
+        rows_to_export.append(export_row)
+
+    df = pd.DataFrame(rows_to_export, columns=columns)
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="No SkySlope File ID", index=False)
+
+        worksheet = writer.sheets["No SkySlope File ID"]
+
+        worksheet.views.sheetView[0].showGridLines = True
+        worksheet.freeze_panes = "A2"
+        worksheet.auto_filter.ref = worksheet.dimensions
+
+        font_header = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
+        fill_header = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+        align_header = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+        font_body = Font(name="Segoe UI", size=10)
+        fill_even = PatternFill(start_color="F9FAFB", end_color="F9FAFB", fill_type="solid")
+
+        thin_border = Border(
+            left=Side(style="thin", color="D0D5DD"),
+            right=Side(style="thin", color="D0D5DD"),
+            top=Side(style="thin", color="D0D5DD"),
+            bottom=Side(style="thin", color="D0D5DD")
+        )
+
+        worksheet.row_dimensions[1].height = 28
+        for col_num in range(1, len(df.columns) + 1):
+            cell = worksheet.cell(row=1, column=col_num)
+            cell.font = font_header
+            cell.fill = fill_header
+            cell.alignment = align_header
+            cell.border = thin_border
+
+        currency_cols = []
+        date_cols = []
+        center_cols = []
+
+        currency_keywords = ["price", "commission", "amount", "gross", "net"]
+        date_keywords = ["date"]
+        center_keywords = ["id", "guid", "status"]
+
+        for idx, col_name in enumerate(df.columns):
+            col_name_lower = col_name.lower()
+            if any(kw in col_name_lower for kw in currency_keywords):
+                currency_cols.append(idx + 1)
+            elif any(kw in col_name_lower for kw in date_keywords):
+                date_cols.append(idx + 1)
+            elif any(kw in col_name_lower for kw in center_keywords):
+                center_cols.append(idx + 1)
+
+        for row_num in range(2, len(df) + 2):
+            worksheet.row_dimensions[row_num].height = 20
+            is_even_row = (row_num % 2 == 0)
+
+            for col_num in range(1, len(df.columns) + 1):
+                cell = worksheet.cell(row=row_num, column=col_num)
+                cell.font = font_body
+                cell.border = thin_border
+
+                if is_even_row:
+                    cell.fill = fill_even
+
+                val = cell.value
+
+                if col_num in currency_cols:
+                    cell.alignment = Alignment(horizontal="right", vertical="center")
+                    if isinstance(val, (int, float)):
+                        cell.number_format = '$#,##0.00'
+                elif col_num in date_cols:
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                elif col_num in center_cols:
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                else:
+                    cell.alignment = Alignment(horizontal="left", vertical="center")
+
+        for col in worksheet.columns:
+            max_len = 0
+            col_letter = get_column_letter(col[0].column)
+
+            for cell in col:
+                val = cell.value
+                if val is not None:
+                    if cell.column in currency_cols and isinstance(val, (int, float)):
+                        val_len = len(f"${val:,.2f}")
+                    else:
+                        val_len = len(str(val))
+                    if val_len > max_len:
+                        max_len = val_len
+
+            worksheet.column_dimensions[col_letter].width = min(max(max_len + 3, 12), 40)
+
+    output.seek(0)
+
+    filename = "sale_no_skyslopefileid_report.xlsx"
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"'
+    }
+
+    return Response(
+        content=output.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers=headers
+    )
