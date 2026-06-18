@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from api.auth import router as auth_router
 from api.listing.brokerage_engine import router as brokerage_router
 from api.listing.otherincome_transactions import router as other_income_listing_router
 from api.listing.skyslope import router as skyslope_router
@@ -42,6 +43,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth_router)
 app.include_router(brokerage_router)
 app.include_router(other_income_listing_router)
 app.include_router(skyslope_router)

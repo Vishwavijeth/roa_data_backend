@@ -3,9 +3,13 @@ uvicorn
 psycopg2-binary
 python-dotenv
 psycopg2-binary
+email-validator
 mangum
 httpx
 requests
 urllib3
 openpyxl
 pandas
+pwdlib[argon2]
+python-jose[cryptography]
+SQLAlchemy
