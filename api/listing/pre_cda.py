@@ -1,13 +1,22 @@
-from psycopg2.extras import RealDictCursor
+from enum import Enum
+
 from fastapi import APIRouter, Depends, Query
+from psycopg2.extras import RealDictCursor
+
 from db import get_db
-from services.quickbooks import enrich_rows_with_ar_balance
+from services.quickbooks import fetch_ar_balance
 
 router = APIRouter(tags=["pre-cda"])
 
 
+class PreCDAFilter(str, Enum):
+    all = "all"
+    transaction_flag = "transaction_flag"
+    agent_flag = "agent_flag"
+    all_flagged = "all_flagged"
 
-def fetch_pre_cda_data(
+
+async def fetch_pre_cda_data(
     filter: str,
     page: int = 1,
     search: str = None,
@@ -387,6 +396,7 @@ def fetch_pre_cda_data(
         )
 
         reshaped_rows.append({
+            "record_id": f"{row['source_table']}:{row['transaction_id']}:{row['skyslopefileid'] or 'null'}",
             "source_table": row["source_table"],
             "transaction_id": row["transaction_id"],
             "skyslopefileid": row["skyslopefileid"],
@@ -411,7 +421,7 @@ def fetch_pre_cda_data(
             "gross_commission_mismatch": row["gross_commission_mismatch"],
         })
 
-    reshaped_rows = enrich_rows_with_ar_balance(reshaped_rows, conn)
+    reshaped_rows = await fetch_ar_balance(reshaped_rows, conn)
 
     total_pages = (total_count + limit - 1) // limit
 
@@ -432,12 +442,13 @@ def fetch_pre_cda_data(
         "data": reshaped_rows,
     }
 
+
 @router.get("/pre-cda/listing")
-def get_pre_cda(
-    filter: str = Query("all", enum=["all", "transaction_flag", "agent_flag", "all_flagged"]),
+async def get_pre_cda(
+    filter: PreCDAFilter = Query(default=PreCDAFilter.all),
     page: int = Query(default=1, ge=1),
-    search: str = Query(default=None),
-    agent_name: str = Query(default=None),
+    search: str | None = Query(default=None),
+    agent_name: str | None = Query(default=None),
     conn=Depends(get_db)
 ):
-    return fetch_pre_cda_data(filter, page, search, agent_name, conn)
+    return await fetch_pre_cda_data(filter.value, page, search, agent_name, conn)
