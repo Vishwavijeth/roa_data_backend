@@ -20,7 +20,7 @@ def reviewer_listing(
     state: list[str] | None = Query(default=None),
     status: list[str] | None = Query(default=None),
     reviewer: list[str] | None = Query(default=None),
-    type_of_sale: list[str] | None = Query(default=None),   # ← NEW
+    type_of_sale: list[str] | None = Query(default=None),
     conn=Depends(get_db)
 ):
     cursor = conn.cursor(cursor_factory=RealDictCursor)
