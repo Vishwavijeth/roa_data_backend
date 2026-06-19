@@ -20,6 +20,7 @@ def reviewer_listing(
     state: list[str] | None = Query(default=None),
     status: list[str] | None = Query(default=None),
     reviewer: list[str] | None = Query(default=None),
+    type_of_sale: list[str] | None = Query(default=None),   # ← NEW
     conn=Depends(get_db)
 ):
     cursor = conn.cursor(cursor_factory=RealDictCursor)
@@ -68,7 +69,6 @@ def reviewer_listing(
 
     if reviewer:
         reviewer = [x for x in reviewer if x]
-
         if reviewer:
             non_unassigned_reviewers = [x for x in reviewer if x != "Unassigned"]
             has_unassigned = "Unassigned" in reviewer
@@ -86,6 +86,12 @@ def reviewer_listing(
 
             if reviewer_conditions:
                 base_query += " AND (" + " OR ".join(reviewer_conditions) + ")"
+
+    if type_of_sale:
+        type_of_sale = [x for x in type_of_sale if x]
+        if type_of_sale:
+            base_query += " AND s.dealtype = ANY(%s)"
+            params.append(type_of_sale)
 
     count_query = "SELECT COUNT(*) AS total_count " + base_query
     cursor.execute(count_query, params)
@@ -109,7 +115,8 @@ def reviewer_listing(
                 WHEN s.reviewerguid IS NULL THEN 'Unassigned'
                 ELSE COALESCE(NULLIF(TRIM(CONCAT_WS(' ', r.firstname, r.lastname)), ''), 'Unassigned')
             END AS reviewer_name,
-            sp.state AS state
+            sp.state AS state,
+            s.dealtype AS type_of_sale          -- ← NEW
     """ + base_query
 
     data_query += " ORDER BY s.saleguid"
@@ -120,6 +127,7 @@ def reviewer_listing(
     cursor.execute(data_query, data_params)
     rows = cursor.fetchall()
 
+    # ── existing filter dropdowns ──────────────────────────────────────────
     stage_query = """
         SELECT DISTINCT name
         FROM stage
@@ -164,13 +172,25 @@ def reviewer_listing(
     cursor.execute(reviewer_query)
     reviewer_list = [row["reviewer_name"] for row in cursor.fetchall()]
 
+    # ─── NEW: distinct dealtype values for the filter dropdown ─────────────
+    type_of_sale_query = """
+        SELECT DISTINCT dealtype
+        FROM sale
+        WHERE dealtype IS NOT NULL AND dealtype <> ''
+        ORDER BY dealtype
+    """
+    cursor.execute(type_of_sale_query)
+    type_of_sale_list = [row["dealtype"] for row in cursor.fetchall()]
+    # ────────────────────────────────────────────────────────────────────────
+
     return {
         "total_count": total_count,
         "filters": {
             "stage_list": stage_list,
             "state_list": state_list,
             "status_list": status_list,
-            "reviewer_list": reviewer_list
+            "reviewer_list": reviewer_list,
+            "type_of_sale_list": type_of_sale_list,   # ← NEW
         },
         "data": rows
     }
@@ -183,6 +203,7 @@ def download_reviewer_listing(
     state: list[str] | None = Query(default=None),
     status: list[str] | None = Query(default=None),
     reviewer: list[str] | None = Query(default=None),
+    type_of_sale: list[str] | None = Query(default=None),   # ← NEW
     conn=Depends(get_db)
 ):
     cursor = conn.cursor(cursor_factory=RealDictCursor)
@@ -228,7 +249,6 @@ def download_reviewer_listing(
 
     if reviewer:
         reviewer = [x for x in reviewer if x]
-
         if reviewer:
             non_unassigned_reviewers = [x for x in reviewer if x != "Unassigned"]
             has_unassigned = "Unassigned" in reviewer
@@ -246,6 +266,14 @@ def download_reviewer_listing(
 
             if reviewer_conditions:
                 base_query += " AND (" + " OR ".join(reviewer_conditions) + ")"
+
+    # ─── NEW: type_of_sale filter ───────────────────────────────────────────
+    if type_of_sale:
+        type_of_sale = [x for x in type_of_sale if x]
+        if type_of_sale:
+            base_query += " AND s.dealtype = ANY(%s)"
+            params.append(type_of_sale)
+    # ────────────────────────────────────────────────────────────────────────
 
     data_query = """
         SELECT
@@ -265,7 +293,8 @@ def download_reviewer_listing(
                 WHEN s.reviewerguid IS NULL THEN 'Unassigned'
                 ELSE COALESCE(NULLIF(TRIM(CONCAT_WS(' ', r.firstname, r.lastname)), ''), 'Unassigned')
             END AS reviewer_name,
-            sp.state AS state
+            sp.state AS state,
+            s.dealtype AS type_of_sale          -- ← NEW
     """ + base_query + """
         ORDER BY s.saleguid
     """
@@ -282,7 +311,8 @@ def download_reviewer_listing(
         "ss_status": "Status",
         "stage_name": "Stage Name",
         "reviewer_name": "Reviewer Name",
-        "state": "State"
+        "state": "State",
+        "type_of_sale": "Type of Sale",           # ← NEW
     }
 
     rows_to_export = []
@@ -312,30 +342,20 @@ def download_reviewer_listing(
         workbook = writer.book
         worksheet = writer.sheets["Reviewer Listing"]
 
-        worksheet.views.sheetView[0].showGridLines = True
         worksheet.freeze_panes = "A2"
 
-        font_header = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
-        fill_header = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+        # ── Bold header row only, no colors ────────────────────────────────
+        font_header = Font(name="Segoe UI", size=11, bold=True)
         align_header = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
         font_body = Font(name="Segoe UI", size=10)
-        fill_even = PatternFill(start_color="F9FAFB", end_color="F9FAFB", fill_type="solid")
-
-        thin_border = Border(
-            left=Side(style="thin", color="D0D5DD"),
-            right=Side(style="thin", color="D0D5DD"),
-            top=Side(style="thin", color="D0D5DD"),
-            bottom=Side(style="thin", color="D0D5DD")
-        )
 
         worksheet.row_dimensions[1].height = 28
         for col_num in range(1, len(df.columns) + 1):
             cell = worksheet.cell(row=1, column=col_num)
             cell.font = font_header
-            cell.fill = fill_header
             cell.alignment = align_header
-            cell.border = thin_border
+        # ───────────────────────────────────────────────────────────────────
 
         currency_cols = []
         date_cols = []
@@ -343,7 +363,7 @@ def download_reviewer_listing(
 
         currency_keywords = ["sale price", "listing price"]
         date_keywords = ["date"]
-        center_keywords = ["sale guid", "status", "stage", "reviewer", "state"]
+        center_keywords = ["sale guid", "status", "stage", "reviewer", "state", "type of sale"]
 
         for idx, col_name in enumerate(df.columns):
             col_name_lower = col_name.lower()
@@ -356,15 +376,10 @@ def download_reviewer_listing(
 
         for row_num in range(2, len(df) + 2):
             worksheet.row_dimensions[row_num].height = 20
-            is_even_row = (row_num % 2 == 0)
 
             for col_num in range(1, len(df.columns) + 1):
                 cell = worksheet.cell(row=row_num, column=col_num)
                 cell.font = font_body
-                cell.border = thin_border
-
-                if is_even_row:
-                    cell.fill = fill_even
 
                 val = cell.value
 
