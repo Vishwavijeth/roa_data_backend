@@ -1,14 +1,10 @@
 from typing import Optional, List
-
 from fastapi import APIRouter, Query, Depends, HTTPException
 from psycopg2.extras import RealDictCursor
-
 from db import get_db
 from services.comparison import compare_names, compare_buying_agent
 
-
 router = APIRouter()
-
 
 BASE_QUERY = """
 WITH brokerage_base AS (
@@ -59,6 +55,16 @@ combined_source AS (
     SELECT * FROM brokerage_base
     UNION ALL
     SELECT * FROM other_income_base
+),
+latest_review AS (
+    SELECT DISTINCT ON (rr.transactionid)
+        rr.transactionid::text AS transactionid,
+        rr.review_status,
+        rr.notes,
+        rr.updated_by,
+        rr.updated_at
+    FROM reconciliation_review rr
+    ORDER BY rr.transactionid, rr.updated_at DESC
 )
 SELECT
     cs.source_table,
@@ -119,12 +125,16 @@ SELECT
     s.escrowclosingdate::date AS skyslope_close_date,
     scn.officeGrossCommissionOnSale::numeric AS officegrosscommissiononsale,
     scn.listingcommissionamount::numeric AS listingcommissionamount,
-    scn.salecommissionamount::numeric AS salecommissionamount
+    scn.salecommissionamount::numeric AS salecommissionamount,
+    lr.review_status,
+    lr.notes AS review_notes,
+    lr.updated_by AS review_updated_by,
+    lr.updated_at AS review_updated_at
 FROM combined_source cs
 LEFT JOIN sale s ON s.saleguid = cs.skyslopefileid
 LEFT JOIN sale_commission scn ON scn.saleguid = s.saleguid
+LEFT JOIN latest_review lr ON lr.transactionid = cs.transactionid
 """
-
 
 PARAMETER_DISPLAY_NAMES = {
     "gross_commission": "Gross Commission",
@@ -138,14 +148,12 @@ PARAMETER_DISPLAY_NAMES = {
     "title_company": "Title Company",
 }
 
-
 NOT_CANCELLED = """
 NOT (
     cs.be_status ILIKE 'cancelled'
     AND cs.skyslope_status ILIKE ANY (ARRAY['canceled/pend', 'canceled/app'])
 )
 """
-
 
 MISMATCH_SQL_FILTERS = {
     "close_date": f"""
@@ -641,12 +649,23 @@ def get_reconciliation_transactions(
             if not any(p in mismatch_params for p in parsed_mismatch_params):
                 continue
 
+        source_table_label = row["source_table"]
+        if source_table_label == "brokerage_engine":
+            source_table_label = "sale income"
+        elif source_table_label == "otherincome_transactions":
+            source_table_label = "other income"
+
         results.append({
             "transactionid": row["transactionid"],
             "saleguid": row["saleguid"],
             "propertyaddress": row["propertyaddress"],
-            "source_table": row["source_table"],
+            "source_table": source_table_label,
             "mismatched_parameters": mismatch_params,
+            "review": {
+                "review_status": row.get("review_status"),
+                "notes": row.get("review_notes"),
+                "updated_by": row.get("review_updated_by"),
+            },
         })
 
     if database_pagination:
