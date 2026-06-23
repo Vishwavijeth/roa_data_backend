@@ -1,6 +1,12 @@
-from fastapi import APIRouter, HTTPException, Query, Depends
+from fastapi import APIRouter, HTTPException, Query, Depends, Response
 from db import get_db
-from services.loaders import get_skyslope_sync  
+from services.loaders import get_skyslope_sync
+import io
+import datetime
+from decimal import Decimal
+import pandas as pd
+from openpyxl.styles import Font, Alignment
+from openpyxl.utils import get_column_letter
 
 router = APIRouter()
 
@@ -336,3 +342,201 @@ def skyslope_detail(saleguid: str, conn=Depends(get_db)):
         "brokerage_engine_records": brokerage_engine_records,
         "otherincome_transactions": otherincome_records,
     }
+
+@router.get("/skyslope/download")
+def skyslope_download(conn=Depends(get_db)):
+    cursor = conn.cursor()
+
+    # ───────────────────────────── SQL (sale + sale_property + stage + sale_contact + sale_commission) ─────────────────────────────
+    data_query = """
+        SELECT
+            s.saleguid AS saleguid,
+            CONCAT_WS(', ',
+                CONCAT_WS(' ', sp.streetnumber, sp.streetaddress),
+                sp.city,
+                sp.state,
+                sp.zip
+            ) AS property_address,
+
+            NULLIF(
+                (
+                    SELECT STRING_AGG(
+                        TRIM(COALESCE(sc.firstname, '') || ' ' || COALESCE(sc.lastname, '')),
+                        ', '
+                        ORDER BY sc.firstname, sc.lastname
+                    )
+                    FROM sale_contact sc
+                    WHERE sc.saleguid = s.saleguid
+                      AND LOWER(sc.role) = 'buyer'
+                ),
+                ''
+            ) AS buyer_name,
+
+            NULLIF(
+                (
+                    SELECT STRING_AGG(
+                        TRIM(COALESCE(sc.firstname, '') || ' ' || COALESCE(sc.lastname, '')),
+                        ', '
+                        ORDER BY sc.firstname, sc.lastname
+                    )
+                    FROM sale_contact sc
+                    WHERE sc.saleguid = s.saleguid
+                      AND LOWER(sc.role) = 'seller'
+                ),
+                ''
+            ) AS seller_name,
+
+            s.saleprice              AS sale_price,
+            s.listingprice           AS listing_price,
+            s.escrowclosingdate      AS escrow_close_date,
+            s.contractacceptancedate AS contract_date,
+            s.status                 AS status,
+            st.name                  AS stage,
+            s.dealtype               AS dealtype,
+
+            sc2."officegrosscommissiononsale" AS office_gross_commission_on_sale,
+            sc2."salecommissionamount"        AS sale_commission_amount,
+            sc2."listingcommissionamount"     AS listing_commission_amount
+        FROM sale s
+        LEFT JOIN sale_property sp   ON s.saleguid = sp.saleguid
+        LEFT JOIN stage st           ON s.stageid = st.stageid
+        LEFT JOIN sale_commission sc2 ON sc2.saleguid = s.saleguid
+        ORDER BY s.escrowclosingdate DESC NULLS LAST, s.saleguid
+    """
+
+    cursor.execute(data_query)
+    columns = [desc[0] for desc in cursor.description]
+    rows = cursor.fetchall()
+    data = [dict(zip(columns, row)) for row in rows]
+
+    # ───────────────────────────── Map to export headers ─────────────────────────────
+    columns_map = {
+        "saleguid": "Sale GUID",
+        "property_address": "Property Address",
+        "buyer_name": "Buyer Name",
+        "seller_name": "Seller Name",
+        "sale_price": "Sale Price",
+        "listing_price": "Listing Price",
+        "escrow_close_date": "Escrow Close Date",
+        "contract_date": "Contract Date",
+        "status": "Status",
+        "stage": "Stage",
+        "dealtype": "Deal Type",
+        "office_gross_commission_on_sale": "Office Gross Commission On Sale",
+        "sale_commission_amount": "Sale Commission Amount",
+        "listing_commission_amount": "Listing Commission Amount",
+    }
+
+    rows_to_export = []
+    for record in data:
+        row_dict = {}
+        for key, header in columns_map.items():
+            val = record.get(key)
+
+            if isinstance(val, Decimal):
+                val = float(val)
+            elif isinstance(val, (datetime.date, datetime.datetime)):
+                val = val.strftime("%Y-%m-%d")
+            elif isinstance(val, bool):
+                val = "Yes" if val else "No"
+            elif val is None:
+                val = ""
+
+            row_dict[header] = val
+
+        rows_to_export.append(row_dict)
+
+    df = pd.DataFrame(rows_to_export)
+
+    # ───────────────────────────── Excel generation ─────────────────────────────
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="SkySlope Report", index=False)
+
+        workbook = writer.book
+        worksheet = writer.sheets["SkySlope Report"]
+
+        worksheet.freeze_panes = "A2"
+
+        font_header = Font(name="Segoe UI", size=11, bold=True)
+        align_header = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        font_body = Font(name="Segoe UI", size=10)
+
+        worksheet.row_dimensions[1].height = 28
+
+        # Header styling
+        for col_num in range(1, len(df.columns) + 1):
+            cell = worksheet.cell(row=1, column=col_num)
+            cell.font = font_header
+            cell.alignment = align_header
+
+        currency_cols = []
+        date_cols = []
+        center_cols = []
+
+        currency_keywords = [
+            "sale price",
+            "listing price",
+            "commission",
+        ]
+        date_keywords = ["date"]
+        center_keywords = ["sale guid", "status", "stage", "deal type"]
+
+        for idx, col_name in enumerate(df.columns):
+            col_name_lower = col_name.lower()
+            if any(kw in col_name_lower for kw in currency_keywords):
+                currency_cols.append(idx + 1)
+            elif any(kw in col_name_lower for kw in date_keywords):
+                date_cols.append(idx + 1)
+            elif any(kw in col_name_lower for kw in center_keywords):
+                center_cols.append(idx + 1)
+
+        # Body styling
+        for row_num in range(2, len(df) + 2):
+            worksheet.row_dimensions[row_num].height = 20
+
+            for col_num in range(1, len(df.columns) + 1):
+                cell = worksheet.cell(row=row_num, column=col_num)
+                cell.font = font_body
+                val = cell.value
+
+                if col_num in currency_cols:
+                    cell.alignment = Alignment(horizontal="right", vertical="center")
+                    if isinstance(val, (int, float)):
+                        cell.number_format = '$#,##0.00'
+                elif col_num in date_cols:
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                elif col_num in center_cols:
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                else:
+                    cell.alignment = Alignment(horizontal="left", vertical="center")
+
+        # Auto-fit columns
+        for col in worksheet.columns:
+            max_len = 0
+            col_letter = get_column_letter(col[0].column)
+
+            for cell in col:
+                val = cell.value
+                if val is not None:
+                    if cell.column in currency_cols and isinstance(val, (int, float)):
+                        val_len = len(f"${val:,.2f}")
+                    else:
+                        val_len = len(str(val))
+                    if val_len > max_len:
+                        max_len = val_len
+
+            worksheet.column_dimensions[col_letter].width = max(max_len + 3, 12)
+
+    output.seek(0)
+
+    filename = "skyslope_sale_report.xlsx"
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"'
+    }
+
+    return Response(
+        content=output.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers=headers,
+    )
