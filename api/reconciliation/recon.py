@@ -74,6 +74,7 @@ SELECT
     cs.propertyaddress,
     cs.transaction_status AS be_status,
     s.status AS skyslope_status,
+    st.name AS skyslope_stage,
     cs.tags,
     cs.be_buyer_name,
     cs.be_seller_name,
@@ -132,9 +133,11 @@ SELECT
     lr.updated_at AS review_updated_at
 FROM combined_source cs
 LEFT JOIN sale s ON s.saleguid = cs.skyslopefileid
+LEFT JOIN stage st ON st.stageid = s.stageid
 LEFT JOIN sale_commission scn ON scn.saleguid = s.saleguid
 LEFT JOIN latest_review lr ON lr.transactionid = cs.transactionid
 """
+
 
 PARAMETER_DISPLAY_NAMES = {
     "gross_commission": "Gross Commission",
@@ -148,12 +151,24 @@ PARAMETER_DISPLAY_NAMES = {
     "title_company": "Title Company",
 }
 
+SOURCE_TABLE_DISPLAY_NAMES = {
+    "brokerage_engine": "sale income",
+    "otherincome_transactions": "other income",
+}
+
+SOURCE_TABLE_FILTER_MAP = {
+    "sale income": "brokerage_engine",
+    "other income": "otherincome_transactions",
+}
+
+
 NOT_CANCELLED = """
 NOT (
     cs.be_status ILIKE 'cancelled'
     AND cs.skyslope_status ILIKE ANY (ARRAY['canceled/pend', 'canceled/app'])
 )
 """
+
 
 MISMATCH_SQL_FILTERS = {
     "close_date": f"""
@@ -292,9 +307,22 @@ def parse_mismatch_params(mismatch_parameter: Optional[List[str]]) -> List[str]:
     return parsed
 
 
+def parse_source_table_params(source_table: Optional[List[str]]) -> List[str]:
+    parsed = []
+    if source_table:
+        for value in source_table:
+            for part in value.split(","):
+                normalized = part.strip().lower()
+                mapped_value = SOURCE_TABLE_FILTER_MAP.get(normalized)
+                if mapped_value:
+                    parsed.append(mapped_value)
+    return parsed
+
+
 def build_where_clause(
     search: Optional[str],
     parsed_mismatch_params: List[str],
+    parsed_source_tables: Optional[List[str]] = None,
 ):
     conditions = []
     params = []
@@ -309,6 +337,10 @@ def build_where_clause(
         """)
         search_term = f"%{search}%"
         params.extend([search_term, search_term, search_term])
+
+    if parsed_source_tables:
+        conditions.append("cs.source_table = ANY(%s)")
+        params.append(parsed_source_tables)
 
     if parsed_mismatch_params:
         active_filters = [
@@ -600,10 +632,12 @@ def get_reconciliation_transactions(
     limit: int = Query(default=50, ge=1),
     search: Optional[str] = Query(default=None),
     mismatch_parameter: Optional[List[str]] = Query(default=None),
+    source_table: Optional[List[str]] = Query(default=None),
     conn=Depends(get_db),
 ):
     parsed_mismatch_params = parse_mismatch_params(mismatch_parameter)
-    where_clause, params = build_where_clause(search, parsed_mismatch_params)
+    parsed_source_tables = parse_source_table_params(source_table)
+    where_clause, params = build_where_clause(search, parsed_mismatch_params, parsed_source_tables)
 
     database_pagination = not parsed_mismatch_params
 
@@ -649,17 +683,14 @@ def get_reconciliation_transactions(
             if not any(p in mismatch_params for p in parsed_mismatch_params):
                 continue
 
-        source_table_label = row["source_table"]
-        if source_table_label == "brokerage_engine":
-            source_table_label = "sale income"
-        elif source_table_label == "otherincome_transactions":
-            source_table_label = "other income"
+        source_table_label = SOURCE_TABLE_DISPLAY_NAMES.get(row["source_table"], row["source_table"])
 
         results.append({
             "transactionid": row["transactionid"],
             "saleguid": row["saleguid"],
             "propertyaddress": row["propertyaddress"],
             "source_table": source_table_label,
+            "skyslope_stage": row.get("skyslope_stage"),
             "mismatched_parameters": mismatch_params,
             "review": {
                 "review_status": row.get("review_status"),
@@ -684,6 +715,7 @@ def get_reconciliation_transactions(
         },
         "filters": {
             "parameter": list(PARAMETER_DISPLAY_NAMES.values()),
+            "source_table": ["sale income", "other income"],
         },
         "data": paginated_data,
     }
