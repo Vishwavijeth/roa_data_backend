@@ -7,8 +7,9 @@ from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
+from sqlalchemy import Column, Integer, String, DateTime
 from pwdlib import PasswordHash
-from database import get_db
+from database import get_db, Base
 from models.roa_data_users import RoaDataUser
 
 load_dotenv()
@@ -28,6 +29,12 @@ class LoginRequest(BaseModel):
     email: EmailStr
     password: str
 
+class RefreshToken(Base):
+    __tablename__ = "refresh_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    token = Column(String, unique=True, nullable=False, index=True)
+    expires_at = Column(DateTime, nullable=False)
 
 class RefreshRequest(BaseModel):
     refresh_token: str
@@ -51,10 +58,12 @@ class UserResponse(BaseModel):
 def create_token(data: dict, expires_delta: timedelta, token_type: str):
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + expires_delta
-    to_encode.update({
-        "exp": expire,
-        "type": token_type,
-    })
+    to_encode.update(
+        {
+            "exp": expire,
+            "type": token_type,
+        }
+    )
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM), expire
 
 
@@ -138,8 +147,12 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     access_token, _ = create_access_token(user)
     refresh_token, refresh_expiry = create_refresh_token(user)
 
-    user.refresh_token = refresh_token
-    user.refresh_token_expires_at = refresh_expiry
+    db.add(
+        RefreshToken(
+            token=refresh_token,
+            expires_at=refresh_expiry.replace(tzinfo=None),
+        )
+    )
     db.commit()
 
     return TokenResponse(
@@ -178,28 +191,33 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)):
             detail="User is inactive",
         )
 
-    if user.refresh_token != payload.refresh_token:
+    token_row = (
+        db.query(RefreshToken)
+        .filter(RefreshToken.token == payload.refresh_token)
+        .first()
+    )
+    if not token_row:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid refresh token",
         )
 
-    expires_at = user.refresh_token_expires_at
-    if expires_at is not None:
-        expires_at_utc = expires_at.replace(tzinfo=timezone.utc)
-        now_utc = datetime.now(timezone.utc)
+    expires_at_utc = token_row.expires_at.replace(tzinfo=timezone.utc)
+    now_utc = datetime.now(timezone.utc)
 
-        if expires_at_utc < now_utc:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Refresh token expired",
-            )
+    if expires_at_utc < now_utc:
+        db.delete(token_row)
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token expired",
+        )
 
     new_access_token, _ = create_access_token(user)
     new_refresh_token, new_refresh_expiry = create_refresh_token(user)
 
-    user.refresh_token = new_refresh_token
-    user.refresh_token_expires_at = new_refresh_expiry.replace(tzinfo=None)
+    token_row.token = new_refresh_token
+    token_row.expires_at = new_refresh_expiry.replace(tzinfo=None)
     db.commit()
 
     return TokenResponse(
@@ -209,19 +227,20 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/logout")
-def logout(
-    payload: RefreshRequest,
-    current_user: RoaDataUser = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    if current_user.refresh_token != payload.refresh_token:
+def logout(payload: RefreshRequest, db: Session = Depends(get_db)):
+    token_row = (
+        db.query(RefreshToken)
+        .filter(RefreshToken.token == payload.refresh_token)
+        .first()
+    )
+
+    if not token_row:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid refresh token",
         )
 
-    current_user.refresh_token = None
-    current_user.refresh_token_expires_at = None
+    db.delete(token_row)
     db.commit()
 
     return {"message": "Logged out successfully"}
