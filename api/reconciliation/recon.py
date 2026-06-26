@@ -326,6 +326,8 @@ def build_where_clause(
     from_close_date: Optional[str] = None,
     to_close_date: Optional[str] = None,
     status: Optional[List[str]] = None,
+    skyslope_stage: Optional[List[str]] = None,
+    review_status: Optional[List[str]] = None,
     saleincome_no_skyslopefileid: Optional[bool] = None,
     otherincome_no_skyslopefileid: Optional[bool] = None,
 ):
@@ -360,6 +362,33 @@ def build_where_clause(
         if normalized_status:
             conditions.append("LOWER(cs.be_status) = ANY(%s)")
             params.append(normalized_status)
+
+    if skyslope_stage:
+        normalized_stages = [s.strip().lower() for s in skyslope_stage if s and s.strip()]
+        if normalized_stages:
+            conditions.append("LOWER(cs.skyslope_stage) = ANY(%s)")
+            params.append(normalized_stages)
+
+    if review_status:
+        normalized_review_filters = [
+            s.strip().lower() for s in review_status if s and s.strip()
+        ]
+
+        review_conditions = []
+
+        if "in_review" in normalized_review_filters:
+            review_conditions.append("LOWER(cs.review_status) = 'in_review'")
+
+        if "review_done" in normalized_review_filters:
+            review_conditions.append("LOWER(cs.review_status) = 'review_done'")
+
+        if "not_a_mismatch" in normalized_review_filters:
+            review_conditions.append(
+                "(cs.review_status IS NULL OR LOWER(cs.review_status) = 'not_a_mismatch')"
+            )
+
+        if review_conditions:
+            conditions.append(f"({' OR '.join(review_conditions)})")
 
     if parsed_mismatch_params:
         active_filters = [
@@ -686,6 +715,8 @@ def get_reconciliation_transactions(
     from_close_date: Optional[str] = Query(None),
     to_close_date: Optional[str] = Query(None),
     status: Optional[List[str]] = Query(None),
+    skyslope_stage: Optional[List[str]] = Query(None),
+    review_status: Optional[List[str]] = Query(None),
     saleincome_no_skyslopefileid: Optional[bool] = Query(None),
     otherincome_no_skyslopefileid: Optional[bool] = Query(None),
     conn=Depends(get_db),
@@ -700,6 +731,8 @@ def get_reconciliation_transactions(
         from_close_date=from_close_date,
         to_close_date=to_close_date,
         status=status,
+        skyslope_stage=skyslope_stage,
+        review_status=review_status,
         saleincome_no_skyslopefileid=saleincome_no_skyslopefileid,
         otherincome_no_skyslopefileid=otherincome_no_skyslopefileid,
     )
@@ -783,6 +816,7 @@ def get_reconciliation_transactions(
         "filters": {
             "parameter": list(PARAMETER_DISPLAY_NAMES.values()),
             "source_table": ["sale income", "other income"],
+            "review_status": ["in_review", "review_done", "not_a_mismatch"],
         },
         "data": paginated_data,
     }
