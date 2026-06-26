@@ -323,6 +323,11 @@ def build_where_clause(
     search: Optional[str],
     parsed_mismatch_params: List[str],
     parsed_source_tables: Optional[List[str]] = None,
+    from_close_date: Optional[str] = None,
+    to_close_date: Optional[str] = None,
+    status: Optional[List[str]] = None,
+    saleincome_no_skyslopefileid: Optional[bool] = None,
+    otherincome_no_skyslopefileid: Optional[bool] = None,
 ):
     conditions = []
     params = []
@@ -342,6 +347,20 @@ def build_where_clause(
         conditions.append("cs.source_table = ANY(%s)")
         params.append(parsed_source_tables)
 
+    if from_close_date:
+        conditions.append("cs.be_close_date >= CAST(%s AS DATE)")
+        params.append(from_close_date)
+
+    if to_close_date:
+        conditions.append("cs.be_close_date <= CAST(%s AS DATE)")
+        params.append(to_close_date)
+
+    if status:
+        normalized_status = [s.strip().lower() for s in status if s and s.strip()]
+        if normalized_status:
+            conditions.append("LOWER(cs.be_status) = ANY(%s)")
+            params.append(normalized_status)
+
     if parsed_mismatch_params:
         active_filters = [
             MISMATCH_SQL_FILTERS[p]
@@ -350,6 +369,21 @@ def build_where_clause(
         ]
         if active_filters:
             conditions.append(f"({' OR '.join(active_filters)})")
+
+    no_skyslopefileid_filters = []
+
+    if saleincome_no_skyslopefileid is True:
+        no_skyslopefileid_filters.append(
+            "(cs.source_table = 'brokerage_engine' AND cs.skyslopefileid IS NULL)"
+        )
+
+    if otherincome_no_skyslopefileid is True:
+        no_skyslopefileid_filters.append(
+            "(cs.source_table = 'otherincome_transactions' AND cs.skyslopefileid IS NULL)"
+        )
+
+    if no_skyslopefileid_filters:
+        conditions.append(f"({' OR '.join(no_skyslopefileid_filters)})")
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
     return where_clause, params
@@ -633,11 +667,26 @@ def get_reconciliation_transactions(
     search: Optional[str] = Query(default=None),
     mismatch_parameter: Optional[List[str]] = Query(default=None),
     source_table: Optional[List[str]] = Query(default=None),
+    from_close_date: Optional[str] = Query(None),
+    to_close_date: Optional[str] = Query(None),
+    status: Optional[List[str]] = Query(None),
+    saleincome_no_skyslopefileid: Optional[bool] = Query(None),
+    otherincome_no_skyslopefileid: Optional[bool] = Query(None),
     conn=Depends(get_db),
 ):
     parsed_mismatch_params = parse_mismatch_params(mismatch_parameter)
     parsed_source_tables = parse_source_table_params(source_table)
-    where_clause, params = build_where_clause(search, parsed_mismatch_params, parsed_source_tables)
+
+    where_clause, params = build_where_clause(
+        search=search,
+        parsed_mismatch_params=parsed_mismatch_params,
+        parsed_source_tables=parsed_source_tables,
+        from_close_date=from_close_date,
+        to_close_date=to_close_date,
+        status=status,
+        saleincome_no_skyslopefileid=saleincome_no_skyslopefileid,
+        otherincome_no_skyslopefileid=otherincome_no_skyslopefileid,
+    )
 
     database_pagination = not parsed_mismatch_params
 
@@ -683,7 +732,9 @@ def get_reconciliation_transactions(
             if not any(p in mismatch_params for p in parsed_mismatch_params):
                 continue
 
-        source_table_label = SOURCE_TABLE_DISPLAY_NAMES.get(row["source_table"], row["source_table"])
+        source_table_label = SOURCE_TABLE_DISPLAY_NAMES.get(
+            row["source_table"], row["source_table"]
+        )
 
         results.append({
             "transactionid": row["transactionid"],
