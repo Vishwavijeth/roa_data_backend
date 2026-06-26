@@ -568,7 +568,8 @@ def process_sale_batch(sales_batch, worker_id):
                 clean_text(sale_data.get("commercialLease")),
                 clean_int(sale_data.get("stageId")),
                 custom_fields,
-                clean_text(sale_data.get("fileId"))
+                clean_text(sale_data.get("fileId")),
+                clean_text(sale_data.get("url"))
             ))
 
             pd = data.get("property", {})
@@ -799,7 +800,8 @@ def process_sale_batch(sales_batch, worker_id):
             commercialLease,
             stageId,
             customFields,
-            fileid
+            fileid,
+            url
         ) VALUES %s
         ON CONFLICT (saleGuid) DO UPDATE SET
             transaction_type = EXCLUDED.transaction_type,
@@ -834,7 +836,8 @@ def process_sale_batch(sales_batch, worker_id):
             commercialLease = EXCLUDED.commercialLease,
             stageId = EXCLUDED.stageId,
             customFields = EXCLUDED.customFields,
-            fileid = EXCLUDED.fileid
+            fileid = EXCLUDED.fileid,
+            url = EXCLUDED.url
         """, sales_rows_dedup)
 
         if file_creator_rows_dedup:
