@@ -646,17 +646,33 @@ def get_total_record_count(conn):
         """)
         row = cur.fetchone()
         return row["total_record_count"] if row else 0
+    
+def get_brokerage_engine_status_filters(conn):
+    query = """
+        SELECT DISTINCT be.transaction_status
+        FROM brokerage_engine be
+        WHERE be.transaction_status IS NOT NULL
+          AND TRIM(be.transaction_status) <> ''
+        ORDER BY be.transaction_status;
+    """
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(query)
+        rows = cur.fetchall()
+
+    return [row["transaction_status"] for row in rows]
 
 
 @router.get("/reconciliation/summary")
 def get_reconciliation_summary(conn=Depends(get_db)):
     total_record_count = get_total_record_count(conn)
     no_skyslope_counts = get_no_skyslope_counts(conn)
+    status_filters = get_brokerage_engine_status_filters(conn)
 
     return {
         "total_record_count": total_record_count,
         "saleincome_no_skyslopefileid": no_skyslope_counts["saleincome_no_skyslopefileid"],
         "otherincome_no_skyslopefileid": no_skyslope_counts["otherincome_no_skyslopefileid"],
+        "status_filters": status_filters,
     }
 
 
