@@ -3,25 +3,26 @@ import logging
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
-import os
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import psycopg2
 from psycopg2.extras import execute_values
-from fastapi import APIRouter, Depends
-from db import get_conn, get_db
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
+from fastapi import APIRouter
+from db import get_conn
 from services.session import get_session_token
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 SALES_BASE_URL = "https://api.skyslope.com/api/files"
 SALES_FILTER_TYPE = "sale"
-DEFAULT_SYNC_DATE = "2026-05-05"  # Fallback date if no record exists in DB yet
+DEFAULT_SYNC_DATE = "2024-01-01"
 
 REQUEST_TIMEOUT = 300
 MAX_RETRIES = 3
@@ -29,23 +30,19 @@ BACKOFF_FACTOR = 2
 DEFAULT_NUM_WORKERS = 10
 BATCH_SIZE = 100
 
+DEBUG_SAMPLE_LIMIT = 10
 
-from datetime import datetime
+progress_lock = Lock()
+processed_count = 0
+error_count_global = 0
+saved_count_global = 0
 
-def get_last_sync_date(conn=None) -> str:
-    """
-    Returns latest sync date (YYYY-MM-DD).
-    If not present, returns DEFAULT_SYNC_DATE.
-    """
 
-    passed_conn = conn is not None
-    cur = None
+def get_last_sync_date() -> str:
     try:
-        if not passed_conn:
-            conn = get_conn()
+        conn = get_conn()
         cur = conn.cursor()
 
-        # ensure table exists
         cur.execute("""
             CREATE TABLE IF NOT EXISTS skyslope_sync (
                 id serial PRIMARY KEY,
@@ -56,7 +53,6 @@ def get_last_sync_date(conn=None) -> str:
             )
         """)
 
-        # get most recently inserted row
         cur.execute("""
             SELECT sync_date
             FROM skyslope_sync
@@ -65,47 +61,28 @@ def get_last_sync_date(conn=None) -> str:
         """)
 
         row = cur.fetchone()
-
         cur.close()
-        cur = None
-        if not passed_conn:
-            conn.close()
+        conn.close()
 
         if row and row[0]:
-            sync_date = row[0]
-
-            date_str = sync_date.strftime("%Y-%m-%d")
-
+            date_str = row[0].strftime("%Y-%m-%d")
             logger.info(f"Last sync date loaded from DB: {date_str}")
             return date_str
 
     except Exception as e:
         logger.warning(f"Could not read sync date from DB, using default: {e}")
-        if cur:
-            try:
-                cur.close()
-            except Exception:
-                pass
-        if not passed_conn and conn:
-            try:
-                conn.close()
-            except Exception:
-                pass
 
     logger.info(f"No sync date found in DB. Using default: {DEFAULT_SYNC_DATE}")
     return DEFAULT_SYNC_DATE
 
 
-def update_sync_date(conn=None):
+def update_sync_date():
     now = datetime.now()
-    passed_conn = conn is not None
-    cur = None
+
     try:
-        if not passed_conn:
-            conn = get_conn()
+        conn = get_conn()
         cur = conn.cursor()
 
-        # insert new row instead of update
         cur.execute("""
             INSERT INTO skyslope_sync (
                 sync_date,
@@ -116,26 +93,13 @@ def update_sync_date(conn=None):
         """, (now.date(), "success"))
 
         conn.commit()
-
         cur.close()
-        cur = None
-        if not passed_conn:
-            conn.close()
+        conn.close()
 
         logger.info(f"Sync date inserted into DB: {now.date()}")
 
     except Exception as e:
         logger.error(f"Failed to insert sync date into DB: {e}")
-        if cur:
-            try:
-                cur.close()
-            except Exception:
-                pass
-        if not passed_conn and conn:
-            try:
-                conn.close()
-            except Exception:
-                pass
 
 
 def build_session():
@@ -155,12 +119,9 @@ def build_session():
     })
     return session
 
+
 HTTP_SESSION = build_session()
 
-progress_lock = Lock()
-processed_count = 0
-error_count_global = 0
-saved_count_global = 0
 
 def normalize_date(value):
     if value is None:
@@ -188,6 +149,7 @@ def normalize_date(value):
             return None
     return None
 
+
 def to_json_text(value):
     if value is None:
         return None
@@ -200,6 +162,7 @@ def to_json_text(value):
             return str(value)
     return value
 
+
 def clean_text(value):
     if value is None:
         return None
@@ -208,6 +171,7 @@ def clean_text(value):
         value = value.strip()
         return value if value else None
     return str(value).strip() if str(value).strip() else None
+
 
 def clean_int(value):
     if value is None:
@@ -227,6 +191,7 @@ def clean_int(value):
     except (ValueError, TypeError):
         return None
 
+
 def clean_decimal(value):
     if value is None:
         return None
@@ -245,6 +210,7 @@ def clean_decimal(value):
     except (ValueError, TypeError):
         return None
 
+
 def clean_bool(value):
     if value is None:
         return None
@@ -258,12 +224,16 @@ def clean_bool(value):
         return bool(value)
     return None
 
+
 def clean_guid(value):
     if value is None:
         return None
     if isinstance(value, str):
-        return value.strip().rstrip(":")
-    return str(value).strip().rstrip(":")
+        value = value.strip().rstrip(":")
+        return value or None
+    value = str(value).strip().rstrip(":")
+    return value or None
+
 
 def fetch_api(url):
     try:
@@ -281,11 +251,11 @@ def fetch_api(url):
         logger.error(f"JSON decode error: {e}")
         return None
 
-def fetch_sales(conn=None):
+
+def fetch_sales():
     sales = []
 
-    # Build the filter URL dynamically using the stored sync date
-    sync_date = get_last_sync_date(conn)
+    sync_date = get_last_sync_date()
     modified_after = f"{sync_date}T00:00:00"
     url = f"{SALES_BASE_URL}?modifiedAfter={modified_after}&type={SALES_FILTER_TYPE}"
     logger.info(f"Fetching sales modified after: {modified_after}")
@@ -314,6 +284,7 @@ def fetch_sales(conn=None):
     logger.info(f"Found {len(sales)} sales in total.")
     return sales
 
+
 def collect_contacts(sale_item):
     contact_roles = [
         ("seller", "sellers"),
@@ -334,11 +305,13 @@ def collect_contacts(sale_item):
         if not entries:
             if entries is None or entries == [] or entries == {}:
                 continue
+
         if isinstance(entries, dict):
             if entries:
                 entries = [entries]
             else:
                 continue
+
         if isinstance(entries, list):
             for contact in entries:
                 if not contact:
@@ -348,6 +321,7 @@ def collect_contacts(sale_item):
                 all_contacts.append(contact)
 
     return all_contacts
+
 
 def process_sale(sale_item):
     sale_guid = sale_item.get("saleGuid")
@@ -373,6 +347,7 @@ def process_sale(sale_item):
 
     property_data = sale_data.get("property", {}) or {}
     commission_data = sale_data.get("commission", {}) or {}
+    file_creator_data = sale_data.get("fileCreator", {}) or {}
     contacts_data = collect_contacts(sale_data)
     breakdown_data = sale_data.get("commissionBreakdowns", []) or []
 
@@ -383,7 +358,6 @@ def process_sale(sale_item):
             co_agents_raw = [a.get("guid") for a in co_agents_alt if a.get("guid")]
 
     co_agents_data = [{"coAgentGuid": g} for g in co_agents_raw] if co_agents_raw else []
-
     coordinators_data = sale_data.get("transactionCoordinators", []) or []
     splits_data = sale_data.get("commissionSplits", []) or []
     referral_data = sale_data.get("commissionReferral", {}) or {}
@@ -433,6 +407,7 @@ def process_sale(sale_item):
         "sale": sale_data,
         "property": property_data,
         "commission": commission_data,
+        "file_creator": file_creator_data,
         "contacts": contacts_data,
         "breakdown": breakdown_data,
         "co_agents": co_agents_data,
@@ -446,6 +421,7 @@ def process_sale(sale_item):
         "comments": all_comments,
     }
 
+
 def deduplicate_rows(rows, key_indices):
     seen = set()
     unique = []
@@ -456,23 +432,40 @@ def deduplicate_rows(rows, key_indices):
             unique.append(r)
     return unique[::-1]
 
+
+def log_dedup_stats(worker_id, table_name, original_rows, deduped_rows):
+    dropped = len(original_rows) - len(deduped_rows)
+    if dropped > 0:
+        logger.info(
+            f"[WORKER-{worker_id}] {table_name}: before={len(original_rows)}, "
+            f"after={len(deduped_rows)}, dedup_dropped={dropped}"
+        )
+
+
 def process_sale_batch(sales_batch, worker_id):
     global processed_count, saved_count_global, error_count_global
 
     conn = get_conn()
+    cur = None
+
+    skipped_no_guid = 0
+    skipped_process_sale = 0
+    sample_no_guid = []
+    sample_process_sale_none = []
+
     try:
         cur = conn.cursor()
-        
+
         users_to_ensure = set()
         offices_to_ensure = {}
         checklists_to_ensure = {}
-        
+
         sale_guids_in_batch = set()
-        
-        # Table data accumulators
+
         sales_rows = []
         property_rows = []
         commission_rows = []
+        file_creator_rows = []
         contact_rows = []
         breakdown_rows = []
         co_agent_rows = []
@@ -486,65 +479,98 @@ def process_sale_batch(sales_batch, worker_id):
         comment_rows = []
 
         batch_saved = 0
-        
-        for sale_item in sales_batch:
-            sale_guid = clean_guid(sale_item.get("saleGuid"))
+
+        for idx, sale_item in enumerate(sales_batch):
+            raw_sale_guid = sale_item.get("saleGuid")
+            sale_guid = clean_guid(raw_sale_guid)
+
             if not sale_guid:
+                skipped_no_guid += 1
+                if len(sample_no_guid) < DEBUG_SAMPLE_LIMIT:
+                    sample_no_guid.append(raw_sale_guid)
                 continue
-                
+
             data = process_sale(sale_item)
             if not data:
+                skipped_process_sale += 1
+                if len(sample_process_sale_none) < DEBUG_SAMPLE_LIMIT:
+                    sample_process_sale_none.append(sale_guid)
                 continue
 
             sale_data = data["sale"]
             sale_guids_in_batch.add(sale_guid)
-            
-            # Users
+
             for field in ("createdByGuid", "agentGuid", "reviewerGuid"):
                 u = clean_text(sale_data.get(field))
-                if u: users_to_ensure.add(u)
+                if u:
+                    users_to_ensure.add(u)
+
             for row in data.get("co_agents", []):
                 u = clean_text(row.get("coAgentGuid") or row.get("userGuid"))
-                if u: users_to_ensure.add(u)
+                if u:
+                    users_to_ensure.add(u)
+
             for row in data.get("splits", []):
                 u = clean_text(row.get("agentGuid") or row.get("userGuid"))
-                if u: users_to_ensure.add(u)
-                
-            # Checklist & Office
+                if u:
+                    users_to_ensure.add(u)
+
+            fc = data.get("file_creator", {}) or {}
+            fc_guid = clean_text(fc.get("guid"))
+            if fc_guid:
+                users_to_ensure.add(fc_guid)
+
             chk_id = clean_int(sale_data.get("checklistTypeId"))
             chk_name = clean_text(sale_data.get("checklistType"))
             if chk_id is not None:
                 checklists_to_ensure[chk_id] = chk_name
-                
+
             off_guid = clean_text(sale_data.get("officeGuid"))
             off_name = clean_text(sale_data.get("officeName"))
             if off_guid:
                 offices_to_ensure[off_guid] = off_name
-                
-            # Sale
+
             custom_fields = to_json_text(sale_data.get("customFields"))
             if isinstance(custom_fields, str):
                 custom_fields = custom_fields.strip() or None
 
             sales_rows.append((
-                sale_guid, clean_text(sale_data.get("listingGuid")), clean_text(sale_data.get("agentGuid")),
-                clean_text(sale_data.get("createdByGuid")), clean_text(sale_data.get("mlsNumber")),
-                clean_text(sale_data.get("portalEmail") or sale_data.get("email")), clean_int(sale_data.get("statusId")),
-                clean_text(sale_data.get("status")), clean_text(sale_data.get("officeGuid")),
-                clean_int(sale_data.get("checklistTypeId")), clean_text(sale_data.get("escrowNumber")),
-                normalize_date(sale_data.get("escrowClosingDate")), normalize_date(sale_data.get("actualClosingDate")),
-                normalize_date(sale_data.get("contractAcceptanceDate")), normalize_date(sale_data.get("createdOn")),
-                normalize_date(sale_data.get("checklistModifiedOn")), normalize_date(sale_data.get("deadDate")),
-                clean_text(sale_data.get("reviewerGuid")), clean_int(sale_data.get("sourceId")),
-                clean_text(sale_data.get("source")), clean_text(sale_data.get("otherSource")),
-                clean_text(sale_data.get("dealType")), clean_int(sale_data.get("saleTypeId")),
-                clean_decimal(sale_data.get("listingPrice")), clean_decimal(sale_data.get("salePrice")),
-                clean_bool(sale_data.get("isOfficeLead")), clean_text(sale_data.get("coBrokerCompany")),
-                clean_text(sale_data.get("realPropertyType")), clean_text(sale_data.get("realPropertySubtype")),
-                clean_text(sale_data.get("commercialLease")), clean_int(sale_data.get("stageId")), custom_fields
+                clean_text(sale_data.get("objectType")),
+                sale_guid,
+                clean_text(sale_data.get("listingGuid")),
+                clean_text(sale_data.get("agentGuid")),
+                clean_text(sale_data.get("createdByGuid")),
+                clean_text(sale_data.get("mlsNumber")),
+                clean_text(sale_data.get("portalEmail") or sale_data.get("email")),
+                clean_int(sale_data.get("statusId")),
+                clean_text(sale_data.get("status")),
+                clean_text(sale_data.get("officeGuid")),
+                clean_int(sale_data.get("checklistTypeId")),
+                clean_text(sale_data.get("escrowNumber")),
+                normalize_date(sale_data.get("escrowClosingDate")),
+                normalize_date(sale_data.get("actualClosingDate")),
+                normalize_date(sale_data.get("contractAcceptanceDate")),
+                normalize_date(sale_data.get("createdOn")),
+                normalize_date(sale_data.get("checklistModifiedOn")),
+                normalize_date(sale_data.get("deadDate")),
+                clean_text(sale_data.get("reviewerGuid")),
+                clean_int(sale_data.get("sourceId")),
+                clean_text(sale_data.get("source")),
+                clean_text(sale_data.get("otherSource")),
+                clean_text(sale_data.get("dealType")),
+                clean_int(sale_data.get("saleTypeId")),
+                clean_decimal(sale_data.get("listingPrice")),
+                clean_decimal(sale_data.get("salePrice")),
+                clean_bool(sale_data.get("isOfficeLead")),
+                clean_text(sale_data.get("coBrokerCompany")),
+                clean_text(sale_data.get("realPropertyType")),
+                clean_text(sale_data.get("realPropertySubtype")),
+                clean_text(sale_data.get("commercialLease")),
+                clean_int(sale_data.get("stageId")),
+                custom_fields,
+                clean_text(sale_data.get("fileId"))
             ))
-            
-            # Property
+
             pd = data.get("property", {})
             if pd:
                 property_rows.append((
@@ -555,7 +581,6 @@ def process_sale_batch(sales_batch, worker_id):
                     clean_int(pd.get("realPropertySubtypeId"))
                 ))
 
-            # Commission
             cd = data.get("commission", {})
             if cd:
                 commission_rows.append((
@@ -568,7 +593,16 @@ def process_sale_batch(sales_batch, worker_id):
                     clean_decimal(cd.get("officeGrossCommissionOnSale"))
                 ))
 
-            # Contacts
+            if fc_guid:
+                file_creator_rows.append((
+                    sale_guid,
+                    fc_guid,
+                    clean_text(fc.get("firstName")),
+                    clean_text(fc.get("lastName")),
+                    clean_text(fc.get("email")),
+                    clean_text(fc.get("alternateEmail"))
+                ))
+
             for contact in data.get("contacts", []):
                 c_guid = clean_text(contact.get("contactGuid"))
                 role = clean_text(contact.get("role"))
@@ -582,20 +616,17 @@ def process_sale_batch(sales_batch, worker_id):
                         clean_bool(contact.get("isCashDeal")), clean_int(contact.get("loanTypeId")), clean_text(contact.get("loanType")),
                         clean_decimal(contact.get("loanAmount")), clean_int(contact.get("brokerTaxId")), clean_text(contact.get("miscContactType"))
                     ))
-                    
-            # Breakdown
+
             for i in data.get("breakdown", []):
                 name = clean_text(i.get("name"))
                 if name:
                     breakdown_rows.append((sale_guid, name, clean_text(i.get("details")), clean_decimal(i.get("amount"))))
 
-            # Co Agents
             for i in data.get("co_agents", []):
                 cg = clean_text(i.get("coAgentGuid") or i.get("userGuid"))
                 if cg:
                     co_agent_rows.append((sale_guid, cg))
 
-            # Transaction Coordinators
             for i in data.get("coordinators", []):
                 cg = clean_text(i.get("contactGuid"))
                 if cg:
@@ -605,13 +636,11 @@ def process_sale_batch(sales_batch, worker_id):
                         clean_text(i.get("notes")), clean_decimal(i.get("fee")), clean_bool(i.get("hasAccess"))
                     ))
 
-            # Commission Splits
             for i in data.get("splits", []):
                 ag = clean_text(i.get("agentGuid") or i.get("userGuid"))
                 if ag:
                     split_rows.append((sale_guid, ag, clean_decimal(i.get("amount")), clean_decimal(i.get("percentage"))))
 
-            # Referral
             rd = data.get("referral", {})
             if rd:
                 t_obj = rd.get("type", {}) or {}
@@ -624,7 +653,6 @@ def process_sale_batch(sales_batch, worker_id):
                     clean_text(rd.get("brokerageName")), clean_decimal(rd.get("amount"))
                 ))
 
-            # EMD
             emd = data.get("emd", {})
             if emd:
                 emd_rows.append((
@@ -634,7 +662,6 @@ def process_sale_batch(sales_batch, worker_id):
                     normalize_date(emd.get("additionalDepositDueDate"))
                 ))
 
-            # Activities
             for item in data.get("activities", []):
                 aid = clean_text(item.get("activityId"))
                 if aid:
@@ -644,7 +671,6 @@ def process_sale_batch(sales_batch, worker_id):
                         clean_text(item.get("status")), clean_text(item.get("help")), normalize_date(item.get("modifiedOn"))
                     ))
 
-            # Docs
             for item in data.get("docs", []):
                 did = clean_text(item.get("docId"))
                 if did:
@@ -655,91 +681,180 @@ def process_sale_batch(sales_batch, worker_id):
                         clean_decimal(item.get("fileSize")), clean_int(item.get("pages"))
                     ))
 
-            # Activity Docs
             for i in data.get("activity_docs", []):
                 aid = clean_text(i.get("activityId"))
                 fn = clean_text(i.get("fileName"))
                 if aid and fn:
                     activity_doc_rows.append((sale_guid, aid, fn))
 
-            # Comments
             for i in data.get("comments", []):
                 aid = clean_text(i.get("activityId"))
                 if aid:
                     comment_rows.append((
                         aid, sale_guid, clean_text(i.get("comment")), normalize_date(i.get("createdOn")), clean_text(i.get("createdBy"))
                     ))
-            
+
             batch_saved += 1
-            
+
+        if sample_no_guid:
+            logger.info(f"[WORKER-{worker_id}] sample skipped_no_guid: {sample_no_guid}")
+
+        if sample_process_sale_none:
+            logger.info(f"[WORKER-{worker_id}] sample skipped_process_sale: {sample_process_sale_none}")
+
         if not sales_rows:
+            logger.warning(
+                f"[WORKER-{worker_id}] No sales_rows built. "
+                f"batch_size={len(sales_batch)}, skipped_no_guid={skipped_no_guid}, skipped_process_sale={skipped_process_sale}"
+            )
             return
 
-        # Insert meta tables directly into main tables (users, checklist, office)
+        sales_rows_dedup = deduplicate_rows(sales_rows, [1])
+        property_rows_dedup = deduplicate_rows(property_rows, [0]) if property_rows else []
+        commission_rows_dedup = deduplicate_rows(commission_rows, [0]) if commission_rows else []
+        file_creator_rows_dedup = deduplicate_rows(file_creator_rows, [0, 1]) if file_creator_rows else []
+        contact_rows_dedup = deduplicate_rows(contact_rows, [0, 1, 2]) if contact_rows else []
+        co_agent_rows_dedup = deduplicate_rows(co_agent_rows, [0, 1]) if co_agent_rows else []
+        coordinator_rows_dedup = deduplicate_rows(coordinator_rows, [0, 1]) if coordinator_rows else []
+        split_rows_dedup = deduplicate_rows(split_rows, [0, 1]) if split_rows else []
+        referral_rows_dedup = deduplicate_rows(referral_rows, [0]) if referral_rows else []
+        emd_rows_dedup = deduplicate_rows(emd_rows, [0]) if emd_rows else []
+        activity_rows_dedup = deduplicate_rows(activity_rows, [0, 1]) if activity_rows else []
+        doc_rows_dedup = deduplicate_rows(doc_rows, [2, 0]) if doc_rows else []
+        activity_doc_rows_dedup = deduplicate_rows(activity_doc_rows, [0, 1, 2]) if activity_doc_rows else []
+
+        log_dedup_stats(worker_id, "sale", sales_rows, sales_rows_dedup)
+        log_dedup_stats(worker_id, "sale_property", property_rows, property_rows_dedup)
+        log_dedup_stats(worker_id, "sale_commission", commission_rows, commission_rows_dedup)
+        log_dedup_stats(worker_id, "sale_file_creator", file_creator_rows, file_creator_rows_dedup)
+        log_dedup_stats(worker_id, "sale_contact", contact_rows, contact_rows_dedup)
+        log_dedup_stats(worker_id, "sale_co_agent", co_agent_rows, co_agent_rows_dedup)
+        log_dedup_stats(worker_id, "sale_transaction_coordinator", coordinator_rows, coordinator_rows_dedup)
+        log_dedup_stats(worker_id, "sale_commission_split", split_rows, split_rows_dedup)
+        log_dedup_stats(worker_id, "sale_commission_referral", referral_rows, referral_rows_dedup)
+        log_dedup_stats(worker_id, "sale_earnest_money_deposit", emd_rows, emd_rows_dedup)
+        log_dedup_stats(worker_id, "sale_checklist_activity", activity_rows, activity_rows_dedup)
+        log_dedup_stats(worker_id, "sale_checklist_doc", doc_rows, doc_rows_dedup)
+        log_dedup_stats(worker_id, "sale_checklist_activity_docs", activity_doc_rows, activity_doc_rows_dedup)
+
         if users_to_ensure:
             try:
                 cur.execute("SAVEPOINT ensure_user_sp")
-                execute_values(cur, "INSERT INTO users (userGuid) VALUES %s ON CONFLICT (userGuid) DO NOTHING", [(u,) for u in users_to_ensure])
+                execute_values(
+                    cur,
+                    "INSERT INTO users (userGuid) VALUES %s ON CONFLICT (userGuid) DO NOTHING",
+                    [(u,) for u in users_to_ensure]
+                )
                 cur.execute("RELEASE SAVEPOINT ensure_user_sp")
-            except psycopg2.Error:
+            except psycopg2.Error as e:
                 cur.execute("ROLLBACK TO SAVEPOINT ensure_user_sp")
+                logger.warning(f"[WORKER-{worker_id}] users ensure skipped due to error: {e}")
 
         if checklists_to_ensure:
-            execute_values(cur, "INSERT INTO checklist (typeId, typeName) VALUES %s ON CONFLICT (typeId) DO NOTHING", list(checklists_to_ensure.items()))
+            execute_values(
+                cur,
+                "INSERT INTO checklist (typeId, typeName) VALUES %s ON CONFLICT (typeId) DO NOTHING",
+                list(checklists_to_ensure.items())
+            )
 
         if offices_to_ensure:
-            execute_values(cur, "INSERT INTO office (officeGuid, officeName) VALUES %s ON CONFLICT (officeGuid) DO NOTHING", list(offices_to_ensure.items()))
+            execute_values(
+                cur,
+                "INSERT INTO office (officeGuid, officeName) VALUES %s ON CONFLICT (officeGuid) DO NOTHING",
+                list(offices_to_ensure.items())
+            )
 
-        # Direct upsert into main tables (no staging/copy tables)
+        execute_values(cur, """
+        INSERT INTO sale (
+            transaction_type,
+            saleGuid,
+            listingGuid,
+            agentGuid,
+            createdByGuid,
+            mlsNumber,
+            Email,
+            statusId,
+            status,
+            officeGuid,
+            checklistTypeId,
+            escrowNumber,
+            escrowClosingDate,
+            actualClosingDate,
+            contractAcceptanceDate,
+            createdOn,
+            checklistModifiedOn,
+            deadDate,
+            reviewerGuid,
+            sourceId,
+            source,
+            otherSource,
+            dealType,
+            saleTypeId,
+            listingPrice,
+            salePrice,
+            isOfficeLead,
+            coBrokerCompany,
+            realPropertyType,
+            realPropertySubtype,
+            commercialLease,
+            stageId,
+            customFields,
+            fileid
+        ) VALUES %s
+        ON CONFLICT (saleGuid) DO UPDATE SET
+            transaction_type = EXCLUDED.transaction_type,
+            listingGuid = EXCLUDED.listingGuid,
+            agentGuid = EXCLUDED.agentGuid,
+            createdByGuid = EXCLUDED.createdByGuid,
+            mlsNumber = EXCLUDED.mlsNumber,
+            Email = EXCLUDED.Email,
+            statusId = EXCLUDED.statusId,
+            status = EXCLUDED.status,
+            officeGuid = EXCLUDED.officeGuid,
+            checklistTypeId = EXCLUDED.checklistTypeId,
+            escrowNumber = EXCLUDED.escrowNumber,
+            escrowClosingDate = EXCLUDED.escrowClosingDate,
+            actualClosingDate = EXCLUDED.actualClosingDate,
+            contractAcceptanceDate = EXCLUDED.contractAcceptanceDate,
+            createdOn = EXCLUDED.createdOn,
+            checklistModifiedOn = EXCLUDED.checklistModifiedOn,
+            deadDate = EXCLUDED.deadDate,
+            reviewerGuid = EXCLUDED.reviewerGuid,
+            sourceId = EXCLUDED.sourceId,
+            source = EXCLUDED.source,
+            otherSource = EXCLUDED.otherSource,
+            dealType = EXCLUDED.dealType,
+            saleTypeId = EXCLUDED.saleTypeId,
+            listingPrice = EXCLUDED.listingPrice,
+            salePrice = EXCLUDED.salePrice,
+            isOfficeLead = EXCLUDED.isOfficeLead,
+            coBrokerCompany = EXCLUDED.coBrokerCompany,
+            realPropertyType = EXCLUDED.realPropertyType,
+            realPropertySubtype = EXCLUDED.realPropertySubtype,
+            commercialLease = EXCLUDED.commercialLease,
+            stageId = EXCLUDED.stageId,
+            customFields = EXCLUDED.customFields,
+            fileid = EXCLUDED.fileid
+        """, sales_rows_dedup)
 
-        if sales_rows:
+        if file_creator_rows_dedup:
             execute_values(cur, """
-            INSERT INTO sale (
-                saleGuid, listingGuid, agentGuid, createdByGuid,
-                mlsNumber, portalEmail, statusId, status,
-                officeGuid, checklistTypeId, escrowNumber,
-                escrowClosingDate, actualClosingDate, contractAcceptanceDate,
-                createdOn, checklistModifiedOn, deadDate,
-                reviewerGuid, sourceId, source, otherSource,
-                dealType, saleTypeId, listingPrice, salePrice,
-                isOfficeLead, coBrokerCompany, realPropertyType, realPropertySubtype,
-                commercialLease, stageId, customFields
+            INSERT INTO sale_file_creator (
+                saleguid,
+                guid,
+                firstname,
+                lastname,
+                email,
+                alternateemail
             ) VALUES %s
-            ON CONFLICT (saleGuid) DO UPDATE SET
-                listingGuid = EXCLUDED.listingGuid,
-                agentGuid = EXCLUDED.agentGuid,
-                createdByGuid = EXCLUDED.createdByGuid,
-                mlsNumber = EXCLUDED.mlsNumber,
-                portalEmail = EXCLUDED.portalEmail,
-                statusId = EXCLUDED.statusId,
-                status = EXCLUDED.status,
-                officeGuid = EXCLUDED.officeGuid,
-                checklistTypeId = EXCLUDED.checklistTypeId,
-                escrowNumber = EXCLUDED.escrowNumber,
-                escrowClosingDate = EXCLUDED.escrowClosingDate,
-                actualClosingDate = EXCLUDED.actualClosingDate,
-                contractAcceptanceDate = EXCLUDED.contractAcceptanceDate,
-                createdOn = EXCLUDED.createdOn,
-                checklistModifiedOn = EXCLUDED.checklistModifiedOn,
-                deadDate = EXCLUDED.deadDate,
-                reviewerGuid = EXCLUDED.reviewerGuid,
-                sourceId = EXCLUDED.sourceId,
-                source = EXCLUDED.source,
-                otherSource = EXCLUDED.otherSource,
-                dealType = EXCLUDED.dealType,
-                saleTypeId = EXCLUDED.saleTypeId,
-                listingPrice = EXCLUDED.listingPrice,
-                salePrice = EXCLUDED.salePrice,
-                isOfficeLead = EXCLUDED.isOfficeLead,
-                coBrokerCompany = EXCLUDED.coBrokerCompany,
-                realPropertyType = EXCLUDED.realPropertyType,
-                realPropertySubtype = EXCLUDED.realPropertySubtype,
-                commercialLease = EXCLUDED.commercialLease,
-                stageId = EXCLUDED.stageId,
-                customFields = EXCLUDED.customFields
-            """, deduplicate_rows(sales_rows, [0]))
+            ON CONFLICT (saleguid, guid) DO UPDATE SET
+                firstname = EXCLUDED.firstname,
+                lastname = EXCLUDED.lastname,
+                email = EXCLUDED.email,
+                alternateemail = EXCLUDED.alternateemail
+            """, file_creator_rows_dedup)
 
-        if property_rows:
+        if property_rows_dedup:
             execute_values(cur, """
             INSERT INTO sale_property (
                 saleGuid, streetNumber, streetAddress, unit, direction,
@@ -758,9 +873,9 @@ def process_sale_batch(sales_batch, worker_id):
                 yearBuilt = EXCLUDED.yearBuilt,
                 realPropertyTypeId = EXCLUDED.realPropertyTypeId,
                 realPropertySubtypeId = EXCLUDED.realPropertySubtypeId
-            """, deduplicate_rows(property_rows, [0]))
+            """, property_rows_dedup)
 
-        if commission_rows:
+        if commission_rows_dedup:
             execute_values(cur, """
             INSERT INTO sale_commission (
                 saleGuid, transactionCoordinatorName, transactionCoordinatorFee,
@@ -784,9 +899,9 @@ def process_sale_batch(sales_batch, worker_id):
                 personalDeal = EXCLUDED.personalDeal,
                 commissionBreakdownDetails = EXCLUDED.commissionBreakdownDetails,
                 officeGrossCommissionOnSale = EXCLUDED.officeGrossCommissionOnSale
-            """, deduplicate_rows(commission_rows, [0]))
+            """, commission_rows_dedup)
 
-        if contact_rows:
+        if contact_rows_dedup:
             execute_values(cur, """
             INSERT INTO sale_contact (
                 saleGuid, contactGuid, role, firstName, lastName,
@@ -816,15 +931,15 @@ def process_sale_batch(sales_batch, worker_id):
                 loanAmount = EXCLUDED.loanAmount,
                 brokerTaxId = EXCLUDED.brokerTaxId,
                 miscContactType = EXCLUDED.miscContactType
-            """, deduplicate_rows(contact_rows, [0, 1, 2]))
+            """, contact_rows_dedup)
 
-        if co_agent_rows:
+        if co_agent_rows_dedup:
             execute_values(cur, """
             INSERT INTO sale_co_agent (saleGuid, coAgentGuid) VALUES %s
             ON CONFLICT (saleGuid, coAgentGuid) DO NOTHING
-            """, deduplicate_rows(co_agent_rows, [0, 1]))
+            """, co_agent_rows_dedup)
 
-        if coordinator_rows:
+        if coordinator_rows_dedup:
             execute_values(cur, """
             INSERT INTO sale_transaction_coordinator (
                 saleGuid, contactGuid, firstName, lastName, fullName,
@@ -839,18 +954,18 @@ def process_sale_batch(sales_batch, worker_id):
                 notes = EXCLUDED.notes,
                 fee = EXCLUDED.fee,
                 hasAccess = EXCLUDED.hasAccess
-            """, deduplicate_rows(coordinator_rows, [0, 1]))
+            """, coordinator_rows_dedup)
 
-        if split_rows:
+        if split_rows_dedup:
             execute_values(cur, """
             INSERT INTO sale_commission_split (saleGuid, agentGuid, amount, percentage)
             VALUES %s
             ON CONFLICT (saleGuid, agentGuid) DO UPDATE SET
                 amount = EXCLUDED.amount,
                 percentage = EXCLUDED.percentage
-            """, deduplicate_rows(split_rows, [0, 1]))
+            """, split_rows_dedup)
 
-        if referral_rows:
+        if referral_rows_dedup:
             execute_values(cur, """
             INSERT INTO sale_commission_referral (
                 saleGuid, typeId, typeName, contactGuid,
@@ -867,9 +982,9 @@ def process_sale_batch(sales_batch, worker_id):
                 contactPhoneNumber = EXCLUDED.contactPhoneNumber,
                 brokerageName = EXCLUDED.brokerageName,
                 amount = EXCLUDED.amount
-            """, deduplicate_rows(referral_rows, [0]))
+            """, referral_rows_dedup)
 
-        if emd_rows:
+        if emd_rows_dedup:
             execute_values(cur, """
             INSERT INTO sale_earnest_money_deposit (
                 saleGuid, isEarnestMoneyHeld, depositAmount, depositDueDate,
@@ -883,9 +998,9 @@ def process_sale_batch(sales_batch, worker_id):
                 dateOfCheck = EXCLUDED.dateOfCheck,
                 additionalDepositAmount = EXCLUDED.additionalDepositAmount,
                 additionalDepositDueDate = EXCLUDED.additionalDepositDueDate
-            """, deduplicate_rows(emd_rows, [0]))
+            """, emd_rows_dedup)
 
-        if activity_rows:
+        if activity_rows_dedup:
             execute_values(cur, """
             INSERT INTO sale_checklist_activity (
                 saleGuid, activityId, "order", activityName, dateAssigned,
@@ -900,9 +1015,9 @@ def process_sale_batch(sales_batch, worker_id):
                 status = EXCLUDED.status,
                 help = EXCLUDED.help,
                 modifiedOn = EXCLUDED.modifiedOn
-            """, deduplicate_rows(activity_rows, [0, 1]))
+            """, activity_rows_dedup)
 
-        if doc_rows:
+        if doc_rows_dedup:
             execute_values(cur, """
             INSERT INTO sale_checklist_doc (
                 saleGuid, activityId, docId, name, url,
@@ -920,16 +1035,15 @@ def process_sale_batch(sales_batch, worker_id):
                 extension = EXCLUDED.extension,
                 fileSize = EXCLUDED.fileSize,
                 pages = EXCLUDED.pages
-            """, deduplicate_rows(doc_rows, [2, 0]))
+            """, doc_rows_dedup)
 
-        if activity_doc_rows:
+        if activity_doc_rows_dedup:
             execute_values(cur, """
             INSERT INTO sale_checklist_activity_docs (saleGuid, activityId, fileName)
             VALUES %s
             ON CONFLICT (saleGuid, activityId, fileName) DO NOTHING
-            """, deduplicate_rows(activity_doc_rows, [0, 1, 2]))
+            """, activity_doc_rows_dedup)
 
-        # For tables with serial PKs, delete existing rows for this batch then re-insert
         if sale_guids_in_batch:
             guid_list = list(sale_guids_in_batch)
             cur.execute("DELETE FROM sale_commission_breakdown WHERE saleGuid = ANY(%s::uuid[])", (guid_list,))
@@ -938,15 +1052,24 @@ def process_sale_batch(sales_batch, worker_id):
         if breakdown_rows:
             execute_values(cur, """
             INSERT INTO sale_commission_breakdown (saleGuid, name, details, amount)
-            VALUES %s""", breakdown_rows)
+            VALUES %s
+            """, breakdown_rows)
 
         if comment_rows:
             execute_values(cur, """
             INSERT INTO sale_checklist_comment (activityId, saleGuid, comment, createdOn, createdBy)
-            VALUES %s""", comment_rows)
+            VALUES %s
+            """, comment_rows)
 
         conn.commit()
-        
+
+        logger.info(
+            f"[WORKER-{worker_id}] batch summary: "
+            f"input={len(sales_batch)}, valid_sales={batch_saved}, skipped_no_guid={skipped_no_guid}, "
+            f"skipped_process_sale={skipped_process_sale}, sale_rows={len(sales_rows)}, "
+            f"sale_rows_after_dedup={len(sales_rows_dedup)}"
+        )
+
         with progress_lock:
             saved_count_global += batch_saved
             processed_count += len(sales_batch)
@@ -957,8 +1080,8 @@ def process_sale_batch(sales_batch, worker_id):
         conn.rollback()
         with progress_lock:
             error_count_global += len(sales_batch)
-        logger.error(f"  [WORKER-{worker_id} BATCH ERROR] {e}")
-        
+        logger.error(f"[WORKER-{worker_id} BATCH ERROR] {e}", exc_info=True)
+
     finally:
         if cur:
             cur.close()
@@ -966,14 +1089,14 @@ def process_sale_batch(sales_batch, worker_id):
 
 
 @router.post("/sync/skyslope-sales")
-def trigger_sales_sync(conn=Depends(get_db)):
+def trigger_sales_sync():
     global processed_count, saved_count_global, error_count_global
     processed_count = 0
     saved_count_global = 0
     error_count_global = 0
 
     logger.info("Starting sync job...")
-    sales = fetch_sales(conn)
+    sales = fetch_sales()
     if not sales:
         logger.info("No sales found to sync.")
         return {"message": "No sales found to sync.", "saved": 0, "errors": 0}
@@ -992,12 +1115,14 @@ def trigger_sales_sync(conn=Depends(get_db)):
             try:
                 future.result()
             except Exception as e:
-                logger.error(f"Batch processing error: {e}")
+                logger.error(f"Batch processing error: {e}", exc_info=True)
 
-    logger.info(f"Sync completed! Saved: {saved_count_global}, Errors: {error_count_global}")
+    logger.info(
+        f"Sync completed! total_fetched={total_sales}, "
+        f"saved={saved_count_global}, errors={error_count_global}"
+    )
 
-    # Update the sync date to today so the next run only fetches new/changed records
-    update_sync_date(conn)
+    update_sync_date()
 
     return {
         "message": "Sync completed successfully.",
