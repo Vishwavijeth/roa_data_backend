@@ -70,6 +70,7 @@ SELECT
     cs.source_table,
     cs.skyslopefileid,
     s.saleguid,
+    s.url AS skyslope_url,
     cs.transactionid,
     cs.propertyaddress,
     cs.transaction_status AS be_status,
@@ -788,6 +789,7 @@ def get_reconciliation_transactions(
         results.append({
             "transactionid": row["transactionid"],
             "saleguid": row["saleguid"],
+            "skyslope_url": row.get("skyslope_url"),
             "propertyaddress": row["propertyaddress"],
             "source_table": source_table_label,
             "skyslope_stage": row.get("skyslope_stage"),
