@@ -1,7 +1,13 @@
 from typing import Optional, List
-from fastapi import APIRouter, Query, Depends, HTTPException
+from fastapi import APIRouter, Query, Depends, HTTPException, Response
 from psycopg2.extras import RealDictCursor
 from db import get_db
+from openpyxl.styles import Font, Alignment
+from openpyxl.utils import get_column_letter
+import pandas as pd
+import io
+import datetime
+from decimal import Decimal
 
 router = APIRouter()
 
@@ -562,3 +568,219 @@ def get_reconciliation_transaction_details(
         "skyslope_status": row.get("skyslope_status"),
         "parameters": detailed_parameters,
     }
+
+@router.get("/recon-data/download")
+def download_recon_data(conn=Depends(get_db)):
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+    data_query = """
+        SELECT
+            rd.transactionid,
+            rd.be_source_table,
+            rd.saleguid,
+            rd.property_address,
+            rd.be_transaction_specialist,
+            rd.skyslope_reviewer,
+
+            rd.be_gross_commission,
+            rd.skyslope_gross_commission,
+            rd.gross_commission_match,
+
+            rd.be_close_date_value,
+            rd.skyslope_close_date_value,
+            rd.close_date_match,
+
+            rd.be_status_value,
+            rd.skyslope_status_value,
+            rd.status_match,
+
+            rd.be_sale_price,
+            rd.skyslope_sale_price,
+            rd.sale_price_match,
+
+            rd.be_listing_price,
+            rd.skyslope_listing_price,
+            rd.listing_price_match,
+
+            rd.be_contract_date,
+            rd.skyslope_contract_date,
+            rd.contract_date_match,
+
+            rd.be_buyer_name,
+            rd.skyslope_buyer_name,
+            rd.buyer_name_match,
+
+            rd.be_seller_name,
+            rd.skyslope_seller_name,
+            rd.seller_name_match,
+
+            rd.be_buying_agent_name,
+            rd.skyslope_buying_agent_name,
+            rd.buying_agent_match,
+
+            rd.be_title_company,
+            rd.skyslope_title_company,
+            rd.title_company_match
+        FROM reconciliation_data rd
+        ORDER BY rd.transactionid
+    """
+
+    cursor.execute(data_query)
+    data = cursor.fetchall()
+
+    columns_map = {
+        "transactionid": "Transaction ID",
+        "be_source_table": "Source Table",
+        "saleguid": "Sale GUID",
+        "property_address": "Property Address",
+        "be_transaction_specialist": "Transaction Specialist",
+        "skyslope_reviewer": "Skyslope Reviewer",
+
+        "be_gross_commission": "BE Gross Commission",
+        "skyslope_gross_commission": "Skyslope Gross Commission",
+        "gross_commission_match": "Gross Commission Match",
+
+        "be_close_date_value": "BE Close Date",
+        "skyslope_close_date_value": "Skyslope Close Date",
+        "close_date_match": "Close Date Match",
+
+        "be_status_value": "BE Status",
+        "skyslope_status_value": "Skyslope Status",
+        "status_match": "Status Match",
+
+        "be_sale_price": "BE Sale Price",
+        "skyslope_sale_price": "Skyslope Sale Price",
+        "sale_price_match": "Sale Price Match",
+
+        "be_listing_price": "BE Listing Price",
+        "skyslope_listing_price": "Skyslope Listing Price",
+        "listing_price_match": "Listing Price Match",
+
+        "be_contract_date": "BE Contract Date",
+        "skyslope_contract_date": "Skyslope Contract Date",
+        "contract_date_match": "Contract Date Match",
+
+        "be_buyer_name": "BE Buyer Name",
+        "skyslope_buyer_name": "Skyslope Buyer Name",
+        "buyer_name_match": "Buyer Name Match",
+
+        "be_seller_name": "BE Seller Name",
+        "skyslope_seller_name": "Skyslope Seller Name",
+        "seller_name_match": "Seller Name Match",
+
+        "be_buying_agent_name": "BE Buying Agent Name",
+        "skyslope_buying_agent_name": "Skyslope Buying Agent Name",
+        "buying_agent_match": "Buying Agent Match",
+
+        "be_title_company": "BE Title Company",
+        "skyslope_title_company": "Skyslope Title Company",
+        "title_company_match": "Title Company Match",
+    }
+
+    rows_to_export = []
+    for record in data:
+        row_dict = {}
+        for key, header in columns_map.items():
+            val = record.get(key)
+
+            if isinstance(val, Decimal):
+                val = float(val)
+            elif isinstance(val, (datetime.date, datetime.datetime)):
+                val = val.strftime("%Y-%m-%d")
+            elif isinstance(val, bool):
+                val = "Yes" if val else "No"
+            elif val is None:
+                val = ""
+
+            row_dict[header] = val
+
+        rows_to_export.append(row_dict)
+
+    df = pd.DataFrame(rows_to_export)
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="Recon Data", index=False)
+
+        worksheet = writer.sheets["Recon Data"]
+        worksheet.freeze_panes = "A2"
+
+        font_header = Font(name="Segoe UI", size=11, bold=True)
+        align_header = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        font_body = Font(name="Segoe UI", size=10)
+
+        worksheet.row_dimensions[1].height = 28
+        for col_num in range(1, len(df.columns) + 1):
+            cell = worksheet.cell(row=1, column=col_num)
+            cell.font = font_header
+            cell.alignment = align_header
+
+        currency_cols = []
+        date_cols = []
+        center_cols = []
+
+        currency_keywords = ["gross commission", "sale price", "listing price"]
+        date_keywords = ["date"]
+        center_keywords = [
+            "transaction id",
+            "source table",
+            "sale guid",
+            "match",
+        ]
+
+        for idx, col_name in enumerate(df.columns):
+            col_name_lower = col_name.lower()
+            if any(kw in col_name_lower for kw in currency_keywords):
+                currency_cols.append(idx + 1)
+            elif any(kw in col_name_lower for kw in date_keywords):
+                date_cols.append(idx + 1)
+            elif any(kw in col_name_lower for kw in center_keywords):
+                center_cols.append(idx + 1)
+
+        for row_num in range(2, len(df) + 2):
+            worksheet.row_dimensions[row_num].height = 20
+
+            for col_num in range(1, len(df.columns) + 1):
+                cell = worksheet.cell(row=row_num, column=col_num)
+                cell.font = font_body
+                val = cell.value
+
+                if col_num in currency_cols:
+                    cell.alignment = Alignment(horizontal="right", vertical="center")
+                    if isinstance(val, (int, float)):
+                        cell.number_format = '$#,##0.00'
+                elif col_num in date_cols:
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                elif col_num in center_cols:
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                else:
+                    cell.alignment = Alignment(horizontal="left", vertical="center")
+
+        for col in worksheet.columns:
+            max_len = 0
+            col_letter = get_column_letter(col[0].column)
+
+            for cell in col:
+                val = cell.value
+                if val is not None:
+                    if cell.column in currency_cols and isinstance(val, (int, float)):
+                        val_len = len(f"${val:,.2f}")
+                    else:
+                        val_len = len(str(val))
+                    if val_len > max_len:
+                        max_len = val_len
+
+            worksheet.column_dimensions[col_letter].width = max(max_len + 3, 12)
+
+    output.seek(0)
+
+    filename = "reconciliation_data_report.xlsx"
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"'
+    }
+
+    return Response(
+        content=output.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers=headers
+    )
