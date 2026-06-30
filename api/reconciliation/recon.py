@@ -2,7 +2,6 @@ from typing import Optional, List
 from fastapi import APIRouter, Query, Depends, HTTPException
 from psycopg2.extras import RealDictCursor
 from db import get_db
-from services.recon_data_population import evaluate_row
 
 router = APIRouter()
 
@@ -24,6 +23,8 @@ SELECT
     rd.property_address AS propertyaddress,
     rd.be_close_date,
     rd.be_status,
+    rd.be_transaction_specialist,
+    rd.skyslope_reviewer,
     rd.gross_commission_match,
     rd.close_date_match,
     rd.status_match,
@@ -113,6 +114,17 @@ def parse_source_table_params(source_table: Optional[List[str]]) -> List[str]:
     return parsed
 
 
+def parse_text_list_params(values: Optional[List[str]]) -> List[str]:
+    parsed = []
+    if values:
+        for value in values:
+            for part in value.split(","):
+                normalized = part.strip().lower()
+                if normalized:
+                    parsed.append(normalized)
+    return parsed
+
+
 def build_where_clause(
     search: Optional[str],
     parsed_mismatch_params: List[str],
@@ -122,6 +134,8 @@ def build_where_clause(
     status: Optional[List[str]] = None,
     skyslope_stage: Optional[List[str]] = None,
     review_status: Optional[List[str]] = None,
+    specialist: Optional[List[str]] = None,
+    reviewer: Optional[List[str]] = None,
     saleincome_no_skyslopefileid: Optional[bool] = None,
     otherincome_no_skyslopefileid: Optional[bool] = None,
 ):
@@ -177,6 +191,40 @@ def build_where_clause(
 
         if review_conditions:
             conditions.append(f"({' OR '.join(review_conditions)})")
+
+    parsed_specialists = parse_text_list_params(specialist)
+    if parsed_specialists:
+        if "unassigned" in parsed_specialists:
+            non_unassigned_specialists = [s for s in parsed_specialists if s != "unassigned"]
+            specialist_conditions = [
+                "COALESCE(NULLIF(LOWER(TRIM(cs.be_transaction_specialist)), ''), 'unassigned') = 'unassigned'"
+            ]
+            if non_unassigned_specialists:
+                specialist_conditions.append(
+                    "LOWER(TRIM(cs.be_transaction_specialist)) = ANY(%s)"
+                )
+                params.append(non_unassigned_specialists)
+            conditions.append(f"({' OR '.join(specialist_conditions)})")
+        else:
+            conditions.append("LOWER(TRIM(cs.be_transaction_specialist)) = ANY(%s)")
+            params.append(parsed_specialists)
+
+    parsed_reviewers = parse_text_list_params(reviewer)
+    if parsed_reviewers:
+        if "unassigned" in parsed_reviewers:
+            non_unassigned_reviewers = [r for r in parsed_reviewers if r != "unassigned"]
+            reviewer_conditions = [
+                "COALESCE(NULLIF(LOWER(TRIM(cs.skyslope_reviewer)), ''), 'unassigned') = 'unassigned'"
+            ]
+            if non_unassigned_reviewers:
+                reviewer_conditions.append(
+                    "LOWER(TRIM(cs.skyslope_reviewer)) = ANY(%s)"
+                )
+                params.append(non_unassigned_reviewers)
+            conditions.append(f"({' OR '.join(reviewer_conditions)})")
+        else:
+            conditions.append("LOWER(TRIM(cs.skyslope_reviewer)) = ANY(%s)")
+            params.append(parsed_reviewers)
 
     if parsed_mismatch_params:
         active_filters = [
@@ -258,6 +306,34 @@ def get_status_filters(conn):
     return [row["status"] for row in rows]
 
 
+def get_specialist_filters(conn):
+    query = """
+        SELECT DISTINCT
+            COALESCE(NULLIF(TRIM(be_transaction_specialist), ''), 'unassigned') AS specialist
+        FROM reconciliation_data
+        ORDER BY specialist
+    """
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(query)
+        rows = cur.fetchall()
+
+    return [row["specialist"] for row in rows]
+
+
+def get_reviewer_filters(conn):
+    query = """
+        SELECT DISTINCT
+            COALESCE(NULLIF(TRIM(skyslope_reviewer), ''), 'unassigned') AS reviewer
+        FROM reconciliation_data
+        ORDER BY reviewer
+    """
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(query)
+        rows = cur.fetchall()
+
+    return [row["reviewer"] for row in rows]
+
+
 @router.get("/reconciliation/transactions")
 def get_reconciliation_transactions(
     page: int = Query(default=1, ge=1),
@@ -270,6 +346,8 @@ def get_reconciliation_transactions(
     status: Optional[List[str]] = Query(None),
     skyslope_stage: Optional[List[str]] = Query(None),
     review_status: Optional[List[str]] = Query(None),
+    specialist: Optional[List[str]] = Query(None),
+    reviewer: Optional[List[str]] = Query(None),
     saleincome_no_skyslopefileid: Optional[bool] = Query(None),
     otherincome_no_skyslopefileid: Optional[bool] = Query(None),
     conn=Depends(get_db),
@@ -286,6 +364,8 @@ def get_reconciliation_transactions(
         status=status,
         skyslope_stage=skyslope_stage,
         review_status=review_status,
+        specialist=specialist,
+        reviewer=reviewer,
         saleincome_no_skyslopefileid=saleincome_no_skyslopefileid,
         otherincome_no_skyslopefileid=otherincome_no_skyslopefileid,
     )
@@ -309,6 +389,8 @@ def get_reconciliation_transactions(
     total_count = rows[0]["_total_count"] if rows else 0
     summary = get_summary_counts(conn)
     status_filters = get_status_filters(conn)
+    specialist_filters = get_specialist_filters(conn)
+    reviewer_filters = get_reviewer_filters(conn)
 
     results = []
     for row in rows:
@@ -349,6 +431,8 @@ def get_reconciliation_transactions(
             "source_table": ["sale income", "other income"],
             "review_status": ["in_review", "review_done", "not_a_mismatch"],
             "status": status_filters,
+            "specialist": specialist_filters,
+            "reviewer": reviewer_filters,
         },
         "data": results,
     }
