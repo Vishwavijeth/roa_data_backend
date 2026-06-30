@@ -173,9 +173,7 @@ def build_where_clause(
             review_conditions.append("LOWER(cs.review_status) = 'review_done'")
 
         if "not_a_mismatch" in normalized_review_filters:
-            review_conditions.append(
-                "(cs.review_status IS NULL OR LOWER(cs.review_status) = 'not_a_mismatch')"
-            )
+            review_conditions.append("LOWER(cs.review_status) = 'not_a_mismatch'")
 
         if review_conditions:
             conditions.append(f"({' OR '.join(review_conditions)})")
