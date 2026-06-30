@@ -32,6 +32,8 @@ from api.reconciliation.other_income import router as other_income_router
 from api.reconciliation.recon_track import router as recon_track_router
 from api.reconciliation.recon import router as recon_router
 from api.reconciliation.recon_review import router as recon_review_router
+from api.reconciliation.recon_analytics import router as recon_analytics_router
+from api.reconciliation.recon_data_population import router as recon_data_populate_router
 from api.cron import router as cron_router
 from api.listing.brokerhold import router as broker_hold_router
 
@@ -77,5 +79,7 @@ app.include_router(other_income_router)
 app.include_router(recon_track_router)
 app.include_router(recon_router)
 app.include_router(recon_review_router)
+app.include_router(recon_analytics_router)
+app.include_router(recon_data_populate_router)
 app.include_router(cron_router)
 app.include_router(broker_hold_router)
