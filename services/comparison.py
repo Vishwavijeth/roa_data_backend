@@ -18,111 +18,113 @@ def compare_values(sale_val, be_val):
 
     return 'match' if str(sale_val) == str(be_val) else 'mismatch'
 
-NULL_NAME_STRINGS = {'na', 'n/a', 'na na', '-', '--', '---'}
-
-def compare_buying_agent(be_value, skyslope_value):
-    be_value = normalize_value(be_value)
-    skyslope_value = normalize_value(skyslope_value)
-
-    if be_value is None or skyslope_value is None:
-        return 'null'
-
-    be_clean = canonical_name(be_value)
-    skyslope_clean = canonical_name(skyslope_value)
-
-    # extract full name patterns
-    name_pattern = r'[a-z]+(?:\s+[a-z]+)+'
-
-    be_names = re.findall(name_pattern, be_clean)
-    skyslope_names = re.findall(name_pattern, skyslope_clean)
-
-    if not be_names or not skyslope_names:
-        return 'null'
-
-    # SIMPLE RULE:
-    # if ANY skyslope full name exists inside BE string → match
-    for sk_name in skyslope_names:
-        if sk_name in be_clean:
-            return 'match'
-
-    return 'mismatch'
-
-def is_null_name(val):
-    if val is None:
-        return True
-
-    val = str(val).strip().lower()
-
-    if val in NULL_NAME_STRINGS:
-        return True
-
-    tokens = re.sub(r'\s+', ' ', val).split()
-    if tokens and all(t in NULL_NAME_STRINGS for t in tokens):
-        return True
-
-    return False
-
-def canonical_name(val):
+def normalize_value(val):
     if val is None:
         return None
 
-    val = str(val)
+    if isinstance(val, str):
+        val = re.sub(r'[\u200B-\u200D\uFEFF]', '', val)
+        val = val.replace('\u00A0', ' ')
+        val = re.sub(r'\s+', ' ', val).strip()
+        return val if val != '' else None
 
-    # remove invisible chars
-    val = re.sub(r'[\u200B-\u200D\uFEFF]', '', val)
+    return val
 
-    # normalize whitespace
-    val = re.sub(r'\s+', ' ', val)
 
-    val = val.replace('\u00A0', ' ')
-
-    return val.strip().lower()
-
-def split_names(val):
+def split_names_for_compare(val):
     """
-    Works for BOTH sale and BE:
-    - comma separated full names
-    - ANY NA invalidates entire field
+    Split raw value by comma.
+    Only lowercase and strip each split piece for comparison.
+    No null-name-string checks.
     """
-
-    if val is None or str(val).strip() == '':
+    if val is None:
         return None
 
-    parts = [p.strip() for p in str(val).split(',')]
+    raw = str(val).strip()
+    if raw == '':
+        return None
 
-    cleaned = []
-
-    for p in parts:
-        if is_null_name(p):
-            return None  # strict rule
-
-        cleaned.append(canonical_name(p))
-
-    return cleaned if cleaned else None
+    parts = [p.strip().lower() for p in raw.split(',')]
+    return parts if parts else None
 
 
 def compare_names(sale_name, be_name):
     """
-    FINAL RULE:
-    - BOTH sides become lists of full names
-    - match if ANY overlap exists
+    Compare raw name data from both systems.
+    - split both sides by comma
+    - lowercase only
+    - if any name matches -> match
     - otherwise mismatch
-    - if invalid/NA → null
     """
 
-    sale_list = split_names(sale_name)
-    be_list = split_names(be_name)
+    sale_list = split_names_for_compare(sale_name)
+    be_list = split_names_for_compare(be_name)
 
     if sale_list is None or be_list is None:
-        return 'null'
+        return 'mismatch'
 
-    sale_set = set(sale_list)
-    be_set = set(be_list)
-
-    if sale_set.intersection(be_set):
-        return 'match'
+    for sale_item in sale_list:
+        for be_item in be_list:
+            if sale_item == be_item:
+                return 'match'
 
     return 'mismatch'
+
+
+def compare_names_fast(be_val, ss_val):
+    if be_val is None or ss_val is None:
+        return "mismatch"
+
+    be_clean = str(be_val).strip().lower()
+    ss_clean = str(ss_val).strip().lower()
+
+    if be_clean == "" or ss_clean == "":
+        return "mismatch"
+
+    if be_clean == ss_clean:
+        return "match"
+
+    return compare_names(be_val, ss_val)
+
+
+def compare_buying_agent(be_value, skyslope_value):
+    """
+    Compare raw buying-agent data from both systems.
+    - split both sides by comma
+    - lowercase only
+    - if any name matches -> match
+    - otherwise mismatch
+    """
+
+    be_list = split_names_for_compare(be_value)
+    skyslope_list = split_names_for_compare(skyslope_value)
+
+    if be_list is None or skyslope_list is None:
+        return 'mismatch'
+
+    for be_item in be_list:
+        for ss_item in skyslope_list:
+            if be_item == ss_item:
+                return 'match'
+
+    return 'mismatch'
+
+
+def compare_buying_agent_fast(be_val, ss_val):
+    if be_val is None or ss_val is None:
+        return "mismatch"
+
+    be_clean = str(be_val).strip().lower()
+    ss_clean = str(ss_val).strip().lower()
+
+    if be_clean == "" or ss_clean == "":
+        return "mismatch"
+
+    if be_clean == ss_clean:
+        return "match"
+
+    return compare_buying_agent(be_val, ss_val)
+
 
 def compare_listing_price(be_price, ss_price):
     """
