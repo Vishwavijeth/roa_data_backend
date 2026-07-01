@@ -2,7 +2,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends
 from psycopg2.extras import RealDictCursor, execute_values
 from db import get_db
-from services.recon_data_population import evaluate_row
+from services.recon_data_population import evaluate_row, get_skyslope_gross_commission
 
 router = APIRouter()
 
@@ -116,6 +116,17 @@ SELECT
     cs.tags,
 
     cs.be_gross_commission,
+    CASE
+        WHEN scn.officeGrossCommissionOnSale IS NULL
+             AND scn.adminbrokeragecomp IS NULL
+            THEN NULL
+        WHEN scn.officeGrossCommissionOnSale IS NULL
+            THEN scn.adminbrokeragecomp
+        WHEN scn.adminbrokeragecomp IS NULL
+            THEN scn.officeGrossCommissionOnSale
+        ELSE scn.officeGrossCommissionOnSale + scn.adminbrokeragecomp
+    END::numeric AS skyslope_gross_commission,
+
     cs.be_close_date AS be_close_date_value,
     s.escrowclosingdate::date AS skyslope_close_date,
     s.escrowclosingdate::date AS skyslope_close_date_value,
@@ -146,6 +157,7 @@ SELECT
     COALESCE(tc.skyslope_title_company, '')::varchar AS skyslope_title_company,
 
     scn.officeGrossCommissionOnSale::numeric AS officegrosscommissiononsale,
+    scn.adminbrokeragecomp::numeric AS adminbrokeragecomp,
     scn.listingcommissionamount::numeric AS listingcommissionamount,
     scn.salecommissionamount::numeric AS salecommissionamount
 FROM combined_source cs
@@ -205,21 +217,6 @@ INSERT_COLUMNS = [
 EXPECTED_COLS = len(INSERT_COLUMNS)
 
 
-def get_skyslope_gross_commission(row: dict):
-    tags = (row.get("tags") or "").lower()
-    office_gci = row.get("officegrosscommissiononsale")
-    listing_comm = row.get("listingcommissionamount")
-    sale_comm = row.get("salecommissionamount")
-
-    if "listingside" in tags and "sellingside" in tags:
-        return office_gci
-    if "listingside" in tags:
-        return listing_comm if listing_comm is not None else office_gci
-    if "sellingside" in tags:
-        return sale_comm if sale_comm is not None else office_gci
-    return sale_comm if sale_comm is not None else office_gci
-
-
 def get_contract_date_match(row: dict):
     saleguid = row.get("saleguid")
     be_status = row.get("be_status")
@@ -246,9 +243,9 @@ def get_contract_date_match(row: dict):
     return "match" if be_contract_date == skyslope_contract_date else "mismatch"
 
 
+
 def build_reconciliation_data_row(row: dict) -> tuple:
     eval_result = evaluate_row(row)
-    skyslope_gross_commission = get_skyslope_gross_commission(row)
     contract_date_match = get_contract_date_match(row)
     evaluated_at = datetime.utcnow()
 
@@ -263,7 +260,7 @@ def build_reconciliation_data_row(row: dict) -> tuple:
         row.get("skyslope_reviewer"),
 
         eval_result["gross_commission"]["be_value"],
-        skyslope_gross_commission,
+        eval_result["gross_commission"]["skyslope_value"],
         eval_result["gross_commission"]["match_result"],
 
         row.get("be_close_date_value"),
