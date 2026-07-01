@@ -1,6 +1,6 @@
 def get_skyslope_gross_commission(row: dict):
     office_gci = row.get("officegrosscommissiononsale")
-    admin_brokeage = row.get("adminbrokeagecomp")
+    admin_brokeage = row.get("adminbrokeragecomp")
 
     if office_gci is None and admin_brokeage is None:
         return None
