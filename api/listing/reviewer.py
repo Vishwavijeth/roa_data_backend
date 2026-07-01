@@ -4,9 +4,10 @@ import datetime
 import pandas as pd
 from fastapi.responses import Response
 from db import get_db
+from services.state_office_mapping import STATE_OFFICES_MAP
 from psycopg2.extras import RealDictCursor
 from decimal import Decimal
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.styles import Font, Alignment
 from openpyxl.utils import get_column_letter
 
 router = APIRouter()
@@ -36,16 +37,18 @@ def reviewer_listing(
             ON s.reviewerguid = r.userguid
         LEFT JOIN stage st
             ON s.stageid = st.stageid
+        LEFT JOIN office o
+            ON s.officeguid = o.officeguid
         WHERE 1=1
     """
 
     params = []
 
     if stage_name:
-        stage_name = [x for x in stage_name if x]
-        if stage_name:
+        cleaned_stage_names = [x.strip() for x in stage_name if x and x.strip()]
+        if cleaned_stage_names:
             base_query += " AND st.name = ANY(%s)"
-            params.append(stage_name)
+            params.append(cleaned_stage_names)
 
     if from_close_date:
         base_query += " AND s.escrowclosingdate >= %s"
@@ -56,22 +59,45 @@ def reviewer_listing(
         params.append(to_close_date)
 
     if state:
-        state = [x for x in state if x]
-        if state:
-            base_query += " AND sp.state = ANY(%s)"
-            params.append(state)
+        cleaned_states = list({
+            x.strip().upper()
+            for x in state
+            if x and x.strip()
+        })
+
+        if cleaned_states:
+            mapped_offices = []
+            for state_code in cleaned_states:
+                mapped_offices.extend(STATE_OFFICES_MAP.get(state_code, []))
+
+            mapped_offices = list({
+                office_name.strip()
+                for office_name in mapped_offices
+                if office_name and office_name.strip()
+            })
+
+            state_conditions = []
+
+            state_conditions.append("UPPER(TRIM(COALESCE(sp.state, ''))) = ANY(%s)")
+            params.append(cleaned_states)
+
+            if mapped_offices:
+                state_conditions.append("TRIM(COALESCE(o.officename, '')) = ANY(%s)")
+                params.append(mapped_offices)
+
+            base_query += " AND (" + " OR ".join(state_conditions) + ")"
 
     if status:
-        status = [x for x in status if x]
-        if status:
+        cleaned_status = [x.strip() for x in status if x and x.strip()]
+        if cleaned_status:
             base_query += " AND s.status = ANY(%s)"
-            params.append(status)
+            params.append(cleaned_status)
 
     if reviewer:
-        reviewer = [x for x in reviewer if x]
-        if reviewer:
-            non_unassigned_reviewers = [x for x in reviewer if x != "Unassigned"]
-            has_unassigned = "Unassigned" in reviewer
+        cleaned_reviewers = [x.strip() for x in reviewer if x and x.strip()]
+        if cleaned_reviewers:
+            non_unassigned_reviewers = [x for x in cleaned_reviewers if x != "Unassigned"]
+            has_unassigned = "Unassigned" in cleaned_reviewers
 
             reviewer_conditions = []
 
@@ -88,10 +114,10 @@ def reviewer_listing(
                 base_query += " AND (" + " OR ".join(reviewer_conditions) + ")"
 
     if type_of_sale:
-        type_of_sale = [x for x in type_of_sale if x]
-        if type_of_sale:
+        cleaned_type_of_sale = [x.strip() for x in type_of_sale if x and x.strip()]
+        if cleaned_type_of_sale:
             base_query += " AND s.dealtype = ANY(%s)"
-            params.append(type_of_sale)
+            params.append(cleaned_type_of_sale)
 
     count_query = "SELECT COUNT(*) AS total_count " + base_query
     cursor.execute(count_query, params)
@@ -116,7 +142,7 @@ def reviewer_listing(
                 ELSE COALESCE(NULLIF(TRIM(CONCAT_WS(' ', r.firstname, r.lastname)), ''), 'Unassigned')
             END AS reviewer_name,
             sp.state AS state,
-            s.dealtype AS type_of_sale          -- ← NEW
+            s.dealtype AS type_of_sale
     """ + base_query
 
     data_query += " ORDER BY s.saleguid"
@@ -127,20 +153,19 @@ def reviewer_listing(
     cursor.execute(data_query, data_params)
     rows = cursor.fetchall()
 
-    # ── existing filter dropdowns ──────────────────────────────────────────
     stage_query = """
         SELECT DISTINCT name
         FROM stage
-        WHERE name IS NOT NULL
+        WHERE name IS NOT NULL AND TRIM(name) <> ''
         ORDER BY name
     """
     cursor.execute(stage_query)
     stage_list = [row["name"] for row in cursor.fetchall()]
 
     state_query = """
-        SELECT DISTINCT state
+        SELECT DISTINCT UPPER(TRIM(state)) AS state
         FROM sale_property
-        WHERE state IS NOT NULL AND state <> ''
+        WHERE state IS NOT NULL AND TRIM(state) <> ''
         ORDER BY state
     """
     cursor.execute(state_query)
@@ -149,7 +174,7 @@ def reviewer_listing(
     status_query = """
         SELECT DISTINCT status
         FROM sale
-        WHERE status IS NOT NULL AND status <> ''
+        WHERE status IS NOT NULL AND TRIM(status) <> ''
         ORDER BY status
     """
     cursor.execute(status_query)
@@ -172,16 +197,14 @@ def reviewer_listing(
     cursor.execute(reviewer_query)
     reviewer_list = [row["reviewer_name"] for row in cursor.fetchall()]
 
-    # ─── NEW: distinct dealtype values for the filter dropdown ─────────────
     type_of_sale_query = """
         SELECT DISTINCT dealtype
         FROM sale
-        WHERE dealtype IS NOT NULL AND dealtype <> ''
+        WHERE dealtype IS NOT NULL AND TRIM(dealtype) <> ''
         ORDER BY dealtype
     """
     cursor.execute(type_of_sale_query)
     type_of_sale_list = [row["dealtype"] for row in cursor.fetchall()]
-    # ────────────────────────────────────────────────────────────────────────
 
     return {
         "total_count": total_count,
@@ -190,7 +213,7 @@ def reviewer_listing(
             "state_list": state_list,
             "status_list": status_list,
             "reviewer_list": reviewer_list,
-            "type_of_sale_list": type_of_sale_list,   # ← NEW
+            "type_of_sale_list": type_of_sale_list,
         },
         "data": rows
     }
@@ -203,7 +226,7 @@ def download_reviewer_listing(
     state: list[str] | None = Query(default=None),
     status: list[str] | None = Query(default=None),
     reviewer: list[str] | None = Query(default=None),
-    type_of_sale: list[str] | None = Query(default=None),   # ← NEW
+    type_of_sale: list[str] | None = Query(default=None),
     conn=Depends(get_db)
 ):
     cursor = conn.cursor(cursor_factory=RealDictCursor)
@@ -216,16 +239,18 @@ def download_reviewer_listing(
             ON s.reviewerguid = r.userguid
         LEFT JOIN stage st
             ON s.stageid = st.stageid
+        LEFT JOIN office o
+            ON s.officeguid = o.officeguid
         WHERE 1=1
     """
 
     params = []
 
     if stage_name:
-        stage_name = [x for x in stage_name if x]
-        if stage_name:
+        cleaned_stage_names = [x.strip() for x in stage_name if x and x.strip()]
+        if cleaned_stage_names:
             base_query += " AND st.name = ANY(%s)"
-            params.append(stage_name)
+            params.append(cleaned_stage_names)
 
     if from_close_date:
         base_query += " AND s.escrowclosingdate >= %s"
@@ -236,22 +261,45 @@ def download_reviewer_listing(
         params.append(to_close_date)
 
     if state:
-        state = [x for x in state if x]
-        if state:
-            base_query += " AND sp.state = ANY(%s)"
-            params.append(state)
+        cleaned_states = list({
+            x.strip().upper()
+            for x in state
+            if x and x.strip()
+        })
+
+        if cleaned_states:
+            mapped_offices = []
+            for state_code in cleaned_states:
+                mapped_offices.extend(STATE_OFFICES_MAP.get(state_code, []))
+
+            mapped_offices = list({
+                office_name.strip()
+                for office_name in mapped_offices
+                if office_name and office_name.strip()
+            })
+
+            state_conditions = []
+
+            state_conditions.append("UPPER(TRIM(COALESCE(sp.state, ''))) = ANY(%s)")
+            params.append(cleaned_states)
+
+            if mapped_offices:
+                state_conditions.append("TRIM(COALESCE(o.officename, '')) = ANY(%s)")
+                params.append(mapped_offices)
+
+            base_query += " AND (" + " OR ".join(state_conditions) + ")"
 
     if status:
-        status = [x for x in status if x]
-        if status:
+        cleaned_status = [x.strip() for x in status if x and x.strip()]
+        if cleaned_status:
             base_query += " AND s.status = ANY(%s)"
-            params.append(status)
+            params.append(cleaned_status)
 
     if reviewer:
-        reviewer = [x for x in reviewer if x]
-        if reviewer:
-            non_unassigned_reviewers = [x for x in reviewer if x != "Unassigned"]
-            has_unassigned = "Unassigned" in reviewer
+        cleaned_reviewers = [x.strip() for x in reviewer if x and x.strip()]
+        if cleaned_reviewers:
+            non_unassigned_reviewers = [x for x in cleaned_reviewers if x != "Unassigned"]
+            has_unassigned = "Unassigned" in cleaned_reviewers
 
             reviewer_conditions = []
 
@@ -267,13 +315,11 @@ def download_reviewer_listing(
             if reviewer_conditions:
                 base_query += " AND (" + " OR ".join(reviewer_conditions) + ")"
 
-    # ─── NEW: type_of_sale filter ───────────────────────────────────────────
     if type_of_sale:
-        type_of_sale = [x for x in type_of_sale if x]
-        if type_of_sale:
+        cleaned_type_of_sale = [x.strip() for x in type_of_sale if x and x.strip()]
+        if cleaned_type_of_sale:
             base_query += " AND s.dealtype = ANY(%s)"
-            params.append(type_of_sale)
-    # ────────────────────────────────────────────────────────────────────────
+            params.append(cleaned_type_of_sale)
 
     data_query = """
         SELECT
@@ -294,7 +340,7 @@ def download_reviewer_listing(
                 ELSE COALESCE(NULLIF(TRIM(CONCAT_WS(' ', r.firstname, r.lastname)), ''), 'Unassigned')
             END AS reviewer_name,
             sp.state AS state,
-            s.dealtype AS type_of_sale          -- ← NEW
+            s.dealtype AS type_of_sale
     """ + base_query + """
         ORDER BY s.saleguid
     """
@@ -312,7 +358,7 @@ def download_reviewer_listing(
         "stage_name": "Stage Name",
         "reviewer_name": "Reviewer Name",
         "state": "State",
-        "type_of_sale": "Type of Sale",           # ← NEW
+        "type_of_sale": "Type of Sale",
     }
 
     rows_to_export = []
@@ -344,10 +390,8 @@ def download_reviewer_listing(
 
         worksheet.freeze_panes = "A2"
 
-        # ── Bold header row only, no colors ────────────────────────────────
         font_header = Font(name="Segoe UI", size=11, bold=True)
         align_header = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
         font_body = Font(name="Segoe UI", size=10)
 
         worksheet.row_dimensions[1].height = 28
@@ -355,7 +399,6 @@ def download_reviewer_listing(
             cell = worksheet.cell(row=1, column=col_num)
             cell.font = font_header
             cell.alignment = align_header
-        # ───────────────────────────────────────────────────────────────────
 
         currency_cols = []
         date_cols = []

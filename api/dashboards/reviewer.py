@@ -1,14 +1,10 @@
 from fastapi import APIRouter, Query, Depends
 from typing import Optional, List
 from db import get_db
+from services.state_office_mapping import STATE_OFFICES_MAP
 from psycopg2.extras import RealDictCursor
 
 router = APIRouter()
-
-from typing import Optional, List
-from fastapi import Query, Depends
-from psycopg2.extras import RealDictCursor
-
 
 @router.get("/reviewer_dashboard")
 def reviewer_dashboard(
@@ -27,6 +23,18 @@ def reviewer_dashboard(
             COALESCE(NULLIF(TRIM(CONCAT_WS(' ', r.firstname, r.lastname)), ''), 'Unassigned') AS reviewer_full_name,
 
             COUNT(*) FILTER (
+                WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'expired'
+            ) AS transactions_expired,
+
+            COUNT(*) FILTER (
+                WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'pending'
+            ) AS transactions_pending,
+
+            COUNT(*) FILTER (
+                WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'closed'
+            ) AS transactions_closed,
+
+            COUNT(*) FILTER (
                 WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'archived'
             ) AS transactions_archived,
 
@@ -35,20 +43,8 @@ def reviewer_dashboard(
             ) AS transactions_canceled,
 
             COUNT(*) FILTER (
-                WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'closed'
-            ) AS transactions_closed,
-
-            COUNT(*) FILTER (
-                WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'expired'
-            ) AS transactions_expired,
-
-            COUNT(*) FILTER (
                 WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'incomplete'
             ) AS transactions_incomplete,
-
-            COUNT(*) FILTER (
-                WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'pending'
-            ) AS transactions_pending,
 
             COUNT(*) FILTER (
                 WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'pre-contract'
@@ -74,6 +70,8 @@ def reviewer_dashboard(
             ON s.saleguid = sp.saleguid
         LEFT JOIN stage st
             ON s.stageid = st.stageid
+        LEFT JOIN office o
+            ON s.officeguid = o.officeguid
         WHERE 1=1
         """
 
@@ -88,28 +86,51 @@ def reviewer_dashboard(
             params.append(to_date)
 
         if state:
-            cleaned_states = [x.strip() for x in state if x and x.strip()]
+            cleaned_states = list({
+                x.strip().upper()
+                for x in state
+                if x and x.strip()
+            })
+
             if cleaned_states:
-                query += " AND sp.state = ANY(%s)"
+                mapped_offices = []
+                for state_code in cleaned_states:
+                    mapped_offices.extend(STATE_OFFICES_MAP.get(state_code, []))
+
+                mapped_offices = list({
+                    office_name.strip()
+                    for office_name in mapped_offices
+                    if office_name and office_name.strip()
+                })
+
+                state_conditions = []
+
+                state_conditions.append("UPPER(TRIM(COALESCE(sp.state, ''))) = ANY(%s)")
                 params.append(cleaned_states)
 
+                if mapped_offices:
+                    state_conditions.append("TRIM(COALESCE(o.officename, '')) = ANY(%s)")
+                    params.append(mapped_offices)
+
+                query += " AND (" + " OR ".join(state_conditions) + ")"
+
         if stage_name:
-            stage_name = [x for x in stage_name if x]
-            if stage_name:
+            cleaned_stage_names = [x.strip() for x in stage_name if x and x.strip()]
+            if cleaned_stage_names:
                 query += " AND st.name = ANY(%s)"
-                params.append(stage_name)
+                params.append(cleaned_stage_names)
 
         if status:
-            status = [x for x in status if x]
-            if status:
+            cleaned_status = [x.strip() for x in status if x and x.strip()]
+            if cleaned_status:
                 query += " AND s.status = ANY(%s)"
-                params.append(status)
+                params.append(cleaned_status)
 
         if reviewer:
-            reviewer = [x for x in reviewer if x]
-            if reviewer:
-                non_unassigned_reviewers = [x for x in reviewer if x != "Unassigned"]
-                has_unassigned = "Unassigned" in reviewer
+            cleaned_reviewers = [x.strip() for x in reviewer if x and x.strip()]
+            if cleaned_reviewers:
+                non_unassigned_reviewers = [x for x in cleaned_reviewers if x != "Unassigned"]
+                has_unassigned = "Unassigned" in cleaned_reviewers
 
                 reviewer_conditions = []
 
@@ -126,10 +147,10 @@ def reviewer_dashboard(
                     query += " AND (" + " OR ".join(reviewer_conditions) + ")"
 
         if type_of_sale:
-            type_of_sale = [x for x in type_of_sale if x]
-            if type_of_sale:
+            cleaned_type_of_sale = [x.strip() for x in type_of_sale if x and x.strip()]
+            if cleaned_type_of_sale:
                 query += " AND s.dealtype = ANY(%s)"
-                params.append(type_of_sale)
+                params.append(cleaned_type_of_sale)
 
         query += """
         GROUP BY reviewer_full_name
@@ -139,21 +160,21 @@ def reviewer_dashboard(
         stage_query = """
             SELECT DISTINCT name
             FROM stage
-            WHERE name IS NOT NULL
+            WHERE name IS NOT NULL AND TRIM(name) <> ''
             ORDER BY name
         """
 
         state_query = """
-            SELECT DISTINCT state
+            SELECT DISTINCT UPPER(TRIM(state)) AS state
             FROM sale_property
-            WHERE state IS NOT NULL AND state <> ''
+            WHERE state IS NOT NULL AND TRIM(state) <> ''
             ORDER BY state
         """
 
         status_query = """
             SELECT DISTINCT status
             FROM sale
-            WHERE status IS NOT NULL AND status <> ''
+            WHERE status IS NOT NULL AND TRIM(status) <> ''
             ORDER BY status
         """
 
@@ -175,7 +196,7 @@ def reviewer_dashboard(
         type_of_sale_query = """
             SELECT DISTINCT dealtype
             FROM sale
-            WHERE dealtype IS NOT NULL AND dealtype <> ''
+            WHERE dealtype IS NOT NULL AND TRIM(dealtype) <> ''
             ORDER BY dealtype
         """
 
@@ -198,8 +219,22 @@ def reviewer_dashboard(
             cur.execute(type_of_sale_query)
             type_of_sale_list = [row["dealtype"] for row in cur.fetchall()]
 
-        return {
+        summary = {
             "count": len(rows),
+            "outstanding_transactions": sum(
+                (row.get("transactions_pending", 0) or 0) +
+                (row.get("transactions_expired", 0) or 0)
+                for row in rows
+            ),
+            "closed_transactions": sum(
+                (row.get("transactions_closed", 0) or 0) +
+                (row.get("transactions_archived", 0) or 0)
+                for row in rows
+            )
+        }
+
+        return {
+            "summary": summary,
             "filters": {
                 "stage_list": stage_list,
                 "state_list": state_list,
