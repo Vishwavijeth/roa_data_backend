@@ -1,22 +1,23 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from api.auth import router as auth_router
+from api.dashboards.transaction_specialist import router as trans_dash_router
+from api.dashboards.reviewer import router as review_dash_router
+from api.dashboards.checklist_typeofsale_mapping import router as checklist_mapping_router
 from api.listing.brokerage_engine import router as brokerage_router
 from api.listing.otherincome_transactions import router as other_income_listing_router
 from api.listing.skyslope import router as skyslope_router
 from api.listing.transaction_specialist import router as transaction_specialist_router
 from api.listing.reviewer import router as reviewer_router
-from api.dashboards.transaction_specialist import router as trans_dash_router
 from api.listing.brokeage_engine_sync import router as brokerage_sync_router
 from api.listing.other_income_sync import router as other_income_sync_router
 from api.listing.skyslope_sync import router as skyslope_sync_router
 from api.listing.skyslope_sync_logs import router as skyslope_sync_logs_router
-from api.dashboards.reviewer import router as review_dash_router
 from api.listing.cda_sent import router as cda_sent_router
 from api.listing.pre_cda import router as pre_cda_router
 from api.listing.quickbooks import router as quickbooks_router
-from api.qb_customerid_population import router as qb_customerid_population_router
 from api.listing.month_closing import router as month_closing_router
+from api.listing.brokerhold import router as broker_hold_router
 from api.reconciliation.sale_price import router as sale_price_router
 from api.reconciliation.close_date import router as close_date_router
 from api.reconciliation.gross_commission import router as gci_router
@@ -35,8 +36,8 @@ from api.reconciliation.recon_review import router as recon_review_router
 from api.reconciliation.recon_analytics import router as recon_analytics_router
 from api.reconciliation.recon_data_population import router as recon_data_populate_router
 from api.reconciliation.data_sync import router as data_sync_router
+from api.qb_customerid_population import router as qb_customerid_population_router
 from api.cron import router as cron_router
-from api.listing.brokerhold import router as broker_hold_router
 
 app = FastAPI()
 
@@ -56,6 +57,7 @@ app.include_router(transaction_specialist_router)
 app.include_router(reviewer_router)
 app.include_router(trans_dash_router)
 app.include_router(review_dash_router)
+app.include_router(checklist_mapping_router)
 app.include_router(brokerage_sync_router)
 app.include_router(other_income_sync_router)
 app.include_router(skyslope_sync_router)
