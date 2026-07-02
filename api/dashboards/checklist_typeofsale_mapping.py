@@ -114,6 +114,7 @@ def checklist_type_validation(
         data_query = f"""
             SELECT
                 s.saleguid,
+                s.url AS url,
                 {property_address_expr} AS propertyaddress,
                 s.dealtype AS type_of_sale,
                 c.typename AS checklist_type_name,
