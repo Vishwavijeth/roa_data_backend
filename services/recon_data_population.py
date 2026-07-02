@@ -190,7 +190,7 @@ def evaluate_row(row):
     )
 
     be_gci = row.get("be_gross_commission")
-    ss_gci = get_skyslope_gross_commission(row)
+    ss_gci = row.get("skyslope_gross_commission")
 
     if saleguid is None:
         gci_result = "no_skyslope_record"

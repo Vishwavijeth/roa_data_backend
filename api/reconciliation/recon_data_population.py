@@ -117,14 +117,14 @@ SELECT
 
     cs.be_gross_commission,
     CASE
-        WHEN scn.officeGrossCommissionOnSale IS NULL
+        WHEN scn.officegrosscommissiononsale IS NULL
              AND scn.adminbrokeragecomp IS NULL
             THEN NULL
-        WHEN scn.officeGrossCommissionOnSale IS NULL
+        WHEN scn.officegrosscommissiononsale IS NULL
             THEN scn.adminbrokeragecomp
         WHEN scn.adminbrokeragecomp IS NULL
-            THEN scn.officeGrossCommissionOnSale
-        ELSE scn.officeGrossCommissionOnSale + scn.adminbrokeragecomp
+            THEN scn.officegrosscommissiononsale
+        ELSE scn.officegrosscommissiononsale + scn.adminbrokeragecomp
     END::numeric AS skyslope_gross_commission,
 
     cs.be_close_date AS be_close_date_value,
@@ -156,7 +156,7 @@ SELECT
     cs.be_title_company,
     COALESCE(tc.skyslope_title_company, '')::varchar AS skyslope_title_company,
 
-    scn.officeGrossCommissionOnSale::numeric AS officegrosscommissiononsale,
+    scn.officegrosscommissiononsale::numeric AS officegrosscommissiononsale,
     scn.adminbrokeragecomp::numeric AS adminbrokeragecomp,
     scn.listingcommissionamount::numeric AS listingcommissionamount,
     scn.salecommissionamount::numeric AS salecommissionamount
