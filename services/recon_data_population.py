@@ -153,18 +153,15 @@ def compare_gci_and_saleprice(value1, value2, treat_zero_as_mismatch=False):
     return "match" if round(n1, 2) == round(n2, 2) else "mismatch"
 
 
-def compare_status(be_status, skyslope_status, is_cancelled=False):
-    if be_status is None and skyslope_status is None:
-        return None
+def compare_status(be_status, skyslope_status, saleguid):
+    if saleguid is None:
+        return "no_skyslope_record"
 
-    if is_cancelled:
+    be = (be_status or "").lower()
+    ss = (skyslope_status or "").lower()
+
+    if be == "cancelled" and ss in ["canceled/app", "canceled/pend"]:
         return "match"
-
-    if be_status is None or skyslope_status is None:
-        return "mismatch"
-
-    be = be_status.lower()
-    ss = skyslope_status.lower()
 
     if be == "closed" and ss in ["archived", "closed"]:
         return "match"
@@ -173,7 +170,7 @@ def compare_status(be_status, skyslope_status, is_cancelled=False):
         return "match"
 
     if be == "pending" and ss == "expired":
-        return "mismatch"
+        return None
 
     return "mismatch"
 
@@ -183,6 +180,7 @@ def evaluate_row(row):
     saleguid = row.get("saleguid")
     be_status = row.get("be_status")
     skyslope_status = row.get("skyslope_status")
+
 
     is_cancelled = (
         be_status
@@ -211,10 +209,7 @@ def evaluate_row(row):
     else:
         close_result = compare_close_date(be_close, ss_close)
 
-    if saleguid is None:
-        status_result = "no_skyslope_record"
-    else:
-        status_result = compare_status(be_status, skyslope_status, is_cancelled=is_cancelled)
+    status_result = compare_status(be_status, skyslope_status, saleguid)
 
     be_sale = row.get("be_sale_price")
     ss_sale = row.get("skyslope_sale_price")
