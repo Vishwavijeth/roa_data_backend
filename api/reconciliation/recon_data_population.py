@@ -2,7 +2,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends
 from psycopg2.extras import RealDictCursor, execute_values
 from db import get_db
-from services.recon_data_population import evaluate_row, get_skyslope_gross_commission
+from services.recon_data_population import evaluate_row
 
 router = APIRouter()
 

@@ -1,3 +1,5 @@
+import re
+
 def get_skyslope_gross_commission(row: dict):
     office_gci = row.get("officegrosscommissiononsale")
     admin_brokeage = row.get("adminbrokeragecomp")
@@ -11,154 +13,132 @@ def get_skyslope_gross_commission(row: dict):
     return office_gci + admin_brokeage
 
 
-def normalize_text(value):
-    if value is None:
+NULL_NAME_STRINGS = {'na', 'n/a', 'na na', '-', '--', '---'}
+
+# precompiled patterns
+INVISIBLE_CHARS_RE = re.compile(r'[\u200B-\u200D\uFEFF]')
+WHITESPACE_RE = re.compile(r'\s+')
+NAME_PATTERN_RE = re.compile(r'[a-z]+(?:\s+[a-z]+)+')  # full-name pattern
+
+
+def is_null_name(val):
+    """Return True if the value represents an invalid/NA name."""
+    if val is None:
+        return True
+
+    val = str(val).strip().lower()
+    if val in NULL_NAME_STRINGS:
+        return True
+
+    tokens = WHITESPACE_RE.sub(' ', val).split()
+    return bool(tokens) and all(t in NULL_NAME_STRINGS for t in tokens)
+
+
+def canonical_name(val):
+    """Normalize name string: remove invisible chars, normalize spaces, lowercase."""
+    if val is None:
         return None
 
-    value = str(value).replace("\xa0", " ").strip()
-    if not value:
+    val = str(val)
+    val = INVISIBLE_CHARS_RE.sub('', val)
+    val = WHITESPACE_RE.sub(' ', val)
+    val = val.replace('\u00A0', ' ')
+    return val.strip().lower()
+
+
+def split_names(val):
+    if val is None:
         return None
 
-    value = " ".join(value.split())
-    return value.lower()
-
-
-def normalize_buying_agent(value):
-    if value is None:
+    raw = str(val).strip()
+    if not raw:
         return None
 
-    value = str(value).replace("[T]", "").replace("\xa0", " ").strip()
-    if not value:
-        return None
+    parts = [p.strip() for p in raw.split(',')]
+    cleaned = []
 
-    value = " ".join(value.split())
-    return value.lower()
+    for p in parts:
+        if is_null_name(p):
+            return None  # strict rule: any NA invalidates
+        cleaned.append(canonical_name(p))
 
-
-def expand_ampersand_name(name):
-    name = normalize_text(name)
-    if not name:
-        return []
-
-    if " & " not in name:
-        return [name]
-
-    parts = [part.strip() for part in name.split("&") if part.strip()]
-    if len(parts) != 2:
-        return [name]
-
-    left_words = parts[0].split()
-    right_words = parts[1].split()
-
-    if len(left_words) >= 2 and len(right_words) >= 2:
-        return [" ".join(left_words), " ".join(right_words)]
-
-    if len(left_words) == 1 and len(right_words) >= 2:
-        last_name = right_words[-1]
-        return [f"{left_words[0]} {last_name}", " ".join(right_words)]
-
-    if len(left_words) >= 2 and len(right_words) == 1:
-        last_name = left_words[-1]
-        return [" ".join(left_words), f"{right_words[0]} {last_name}"]
-
-    return [name]
+    return cleaned if cleaned else None
 
 
-def split_names(value):
-    value = normalize_text(value)
-    if not value:
-        return set()
+def compare_names(sale_name, be_name):
+    sale_list = split_names(sale_name)
+    be_list = split_names(be_name)
 
-    result = set()
-    for chunk in value.split(","):
-        chunk = chunk.strip()
-        if not chunk:
-            continue
-        for item in expand_ampersand_name(chunk):
-            if item:
-                result.add(item)
-    return result
+    if sale_list is None or be_list is None:
+        return 'null'
+
+    sale_set = set(sale_list)
+    be_set = set(be_list)
+
+    return 'match' if sale_set & be_set else 'mismatch'
 
 
-def split_buying_agent_names(value):
-    value = normalize_buying_agent(value)
-    if not value:
-        return set()
+def compare_buying_agent(be_value, skyslope_value):
+    be_clean = canonical_name(be_value)
+    skyslope_clean = canonical_name(skyslope_value)
 
-    result = set()
-    for chunk in value.split(","):
-        chunk = chunk.strip()
-        if not chunk:
-            continue
+    if be_clean is None or skyslope_clean is None:
+        return 'null'
 
-        chunk = normalize_buying_agent(chunk)
-        if not chunk:
-            continue
+    be_names = NAME_PATTERN_RE.findall(be_clean)
+    skyslope_names = NAME_PATTERN_RE.findall(skyslope_clean)
 
-        if " & " not in chunk:
-            result.add(chunk)
-            continue
+    if not be_names or not skyslope_names:
+        return 'null'
 
-        parts = [part.strip() for part in chunk.split("&") if part.strip()]
-        if len(parts) != 2:
-            result.add(chunk)
-            continue
+    for sk_name in skyslope_names:
+        if sk_name in be_clean:
+            return 'match'
 
-        left_words = parts[0].split()
-        right_words = parts[1].split()
-
-        if len(left_words) >= 2 and len(right_words) >= 2:
-            result.add(" ".join(left_words))
-            result.add(" ".join(right_words))
-        elif len(left_words) == 1 and len(right_words) >= 2:
-            last_name = right_words[-1]
-            result.add(f"{left_words[0]} {last_name}")
-            result.add(" ".join(right_words))
-        elif len(left_words) >= 2 and len(right_words) == 1:
-            last_name = left_words[-1]
-            result.add(" ".join(left_words))
-            result.add(f"{right_words[0]} {last_name}")
-        else:
-            result.add(chunk)
-
-    return result
+    return 'mismatch'
 
 
-def compare_names(value1, value2):
-    if value1 is None and value2 is None:
-        return None
-
-    names1 = split_names(value1)
-    names2 = split_names(value2)
-
-    if not names1 or not names2:
-        return "mismatch"
-
-    return "match" if names1.intersection(names2) else "mismatch"
-
-
-def compare_buying_agent(value1, value2):
-    if value1 is None and value2 is None:
-        return None
-
-    names1 = split_buying_agent_names(value1)
-    names2 = split_buying_agent_names(value2)
-
-    if not names1 or not names2:
-        return "mismatch"
-
-    return "match" if names1.intersection(names2) else "mismatch"
-
-
-def compare_dates(value1, value2):
+def compare_close_date(value1, value2):
     if value1 is None and value2 is None:
         return None
     if value1 is None or value2 is None:
         return "mismatch"
     return "match" if value1 == value2 else "mismatch"
 
+def compare_listing_price(be_listing_price, ss_listing_price):
+    if be_listing_price is None or ss_listing_price is None:
+        return None
 
-def compare_numbers(value1, value2, treat_zero_as_mismatch=False):
+    be_val = float(be_listing_price)
+    ss_val = float(ss_listing_price)
+
+    if be_val == 0 or ss_val == 0:
+        return None
+
+    return "match" if round(be_val, 2) == round(ss_val, 2) else "mismatch"
+
+def compare_contract_date(be_contract_date, ss_contract_date):
+    if be_contract_date is None and ss_contract_date is None:
+        return "match"
+
+    if be_contract_date is None or ss_contract_date is None:
+        return "mismatch"
+
+    be_val = (
+        be_contract_date.isoformat()
+        if hasattr(be_contract_date, "isoformat")
+        else str(be_contract_date)
+    )
+    ss_val = (
+        ss_contract_date.isoformat()
+        if hasattr(ss_contract_date, "isoformat")
+        else str(ss_contract_date)
+    )
+
+    return "match" if be_val == ss_val else "mismatch"
+
+
+def compare_gci_and_saleprice(value1, value2, treat_zero_as_mismatch=False):
     if value1 is None and value2 is None:
         return None
     if value1 is None or value2 is None:
@@ -198,28 +178,6 @@ def compare_status(be_status, skyslope_status, is_cancelled=False):
     return "mismatch"
 
 
-def get_contract_date_match(row: dict):
-    saleguid = row.get("saleguid")
-    be_status = row.get("be_status")
-    skyslope_status = row.get("skyslope_status")
-
-    is_cancelled = (
-        be_status
-        and be_status.lower() == "cancelled"
-        and skyslope_status
-        and skyslope_status.lower() in ["canceled/pend", "canceled/app"]
-    )
-
-    be_contract = row.get("be_contract_date")
-    ss_contract = row.get("skyslope_contract_date")
-
-    if saleguid is None:
-        return "no_skyslope_record"
-    if is_cancelled:
-        return None
-    return compare_dates(be_contract, ss_contract)
-
-
 def evaluate_row(row):
     source_table = row.get("source_table")
     saleguid = row.get("saleguid")
@@ -241,7 +199,7 @@ def evaluate_row(row):
     elif is_cancelled:
         gci_result = None
     else:
-        gci_result = compare_numbers(be_gci, ss_gci, treat_zero_as_mismatch=True)
+        gci_result = compare_gci_and_saleprice(be_gci, ss_gci, treat_zero_as_mismatch=True)
 
     be_close = row.get("be_close_date")
     ss_close = row.get("skyslope_close_date")
@@ -251,7 +209,7 @@ def evaluate_row(row):
     elif is_cancelled:
         close_result = None
     else:
-        close_result = compare_dates(be_close, ss_close)
+        close_result = compare_close_date(be_close, ss_close)
 
     if saleguid is None:
         status_result = "no_skyslope_record"
@@ -266,7 +224,7 @@ def evaluate_row(row):
     elif is_cancelled:
         sale_price_result = None
     else:
-        sale_price_result = compare_numbers(be_sale, ss_sale)
+        sale_price_result = compare_gci_and_saleprice(be_sale, ss_sale)
 
     if source_table == "otherincome_transactions":
         listing_price_result = None
@@ -285,6 +243,8 @@ def evaluate_row(row):
         ss_agent = None
         be_title = None
         ss_title = None
+        be_contract_date = None
+        ss_contract_date = None
     else:
         be_list = row.get("be_listing_price")
         ss_list = row.get("skyslope_listing_price")
@@ -294,7 +254,7 @@ def evaluate_row(row):
         elif is_cancelled:
             listing_price_result = None
         else:
-            listing_price_result = compare_numbers(be_list, ss_list, treat_zero_as_mismatch=True)
+            listing_price_result = compare_listing_price(be_list, ss_list)
 
         be_list_val = float(be_list) if be_list is not None else None
         ss_list_val = float(ss_list) if ss_list is not None else None
@@ -335,6 +295,18 @@ def evaluate_row(row):
         else:
             title_company_result = compare_names(be_title, ss_title)
 
+        be_contract_date = row.get("be_contract_date")
+        ss_contract_date = row.get("skyslope_contract_acceptance_date")
+        if saleguid is None:
+            contract_date_result = "no_skyslope_record"
+        elif is_cancelled:
+            contract_date_result = None
+        else:
+            contract_date_result = compare_contract_date(
+                be_contract_date,
+                ss_contract_date,
+            )
+
     return {
         "gross_commission": {
             "be_value": float(be_gci) if be_gci is not None else None,
@@ -360,6 +332,19 @@ def evaluate_row(row):
             "be_value": be_list_val,
             "skyslope_value": ss_list_val,
             "match_result": listing_price_result,
+        },
+        "contract_date": {
+            "be_value": (
+                be_contract_date.isoformat()
+                if hasattr(be_contract_date, "isoformat")
+                else be_contract_date
+            ),
+            "skyslope_value": (
+                ss_contract_date.isoformat()
+                if hasattr(ss_contract_date, "isoformat")
+                else ss_contract_date
+            ),
+            "match_result": contract_date_result,
         },
         "buyer_name": {
             "be_value": be_buyer,
