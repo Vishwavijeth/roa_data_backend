@@ -28,7 +28,7 @@ def build_analytics_where_clause(
         values = [s.strip().lower() for s in transaction_specialist if s and s.strip()]
         if values:
             conditions.append(
-                "LOWER(COALESCE(NULLIF(TRIM(rd.be_transaction_specialist), ''), 'Unassigned')) = ANY(%s)"
+                "LOWER(COALESCE(NULLIF(TRIM(rd.be_transaction_specialist), ''), 'unassigned')) = ANY(%s)"
             )
             params.append(values)
 
@@ -36,7 +36,7 @@ def build_analytics_where_clause(
         values = [r.strip().lower() for r in reviewer if r and r.strip()]
         if values:
             conditions.append(
-                "LOWER(COALESCE(NULLIF(TRIM(rd.skyslope_reviewer), ''), 'Unassigned')) = ANY(%s)"
+                "LOWER(COALESCE(NULLIF(TRIM(rd.skyslope_reviewer), ''), 'unassigned')) = ANY(%s)"
             )
             params.append(values)
 
@@ -44,7 +44,7 @@ def build_analytics_where_clause(
         values = [s.strip().lower() for s in status if s and s.strip()]
         if values:
             conditions.append(
-                "LOWER(COALESCE(NULLIF(TRIM(rd.be_status), ''), 'Unassigned')) = ANY(%s)"
+                "LOWER(COALESCE(NULLIF(TRIM(rd.be_status), ''), 'unassigned')) = ANY(%s)"
             )
             params.append(values)
 
@@ -69,175 +69,130 @@ def get_reconciliation_analytics(
         status=status,
     )
 
-    analytics_query = f"""
+    base_cte = f"""
         WITH filtered_data AS (
-            SELECT *
+            SELECT
+                rd.transactionid,
+                rd.be_source_table,
+                COALESCE(NULLIF(TRIM(rd.be_status), ''), 'Unassigned') AS be_status,
+                (
+                    CASE WHEN rd.gross_commission_match = 'mismatch' THEN 1 ELSE 0 END +
+                    CASE WHEN rd.close_date_match = 'mismatch' THEN 1 ELSE 0 END +
+                    CASE WHEN rd.status_match = 'mismatch' THEN 1 ELSE 0 END +
+                    CASE WHEN rd.sale_price_match = 'mismatch' THEN 1 ELSE 0 END +
+                    CASE WHEN rd.listing_price_match = 'mismatch' THEN 1 ELSE 0 END +
+                    CASE WHEN rd.contract_date_match = 'mismatch' THEN 1 ELSE 0 END +
+                    CASE WHEN rd.buyer_name_match = 'mismatch' THEN 1 ELSE 0 END +
+                    CASE WHEN rd.seller_name_match = 'mismatch' THEN 1 ELSE 0 END +
+                    CASE WHEN rd.buying_agent_match = 'mismatch' THEN 1 ELSE 0 END +
+                    CASE WHEN rd.title_company_match = 'mismatch' THEN 1 ELSE 0 END
+                ) AS mismatch_parameter_count,
+                rd.gross_commission_match,
+                rd.close_date_match,
+                rd.status_match,
+                rd.sale_price_match,
+                rd.listing_price_match,
+                rd.contract_date_match,
+                rd.buyer_name_match,
+                rd.seller_name_match,
+                rd.buying_agent_match,
+                rd.title_company_match
             FROM reconciliation_data rd
             {where_clause}
-        ),
-        mismatch_counts AS (
-            SELECT
-                *,
-                (
-                    CASE WHEN gross_commission_match = 'mismatch' THEN 1 ELSE 0 END +
-                    CASE WHEN close_date_match = 'mismatch' THEN 1 ELSE 0 END +
-                    CASE WHEN status_match = 'mismatch' THEN 1 ELSE 0 END +
-                    CASE WHEN sale_price_match = 'mismatch' THEN 1 ELSE 0 END +
-                    CASE WHEN listing_price_match = 'mismatch' THEN 1 ELSE 0 END +
-                    CASE WHEN buyer_name_match = 'mismatch' THEN 1 ELSE 0 END +
-                    CASE WHEN seller_name_match = 'mismatch' THEN 1 ELSE 0 END +
-                    CASE WHEN buying_agent_match = 'mismatch' THEN 1 ELSE 0 END +
-                    CASE WHEN title_company_match = 'mismatch' THEN 1 ELSE 0 END
-                ) AS mismatch_parameter_count
-            FROM filtered_data
         )
+    """
+
+    overview_query = base_cte + """
         SELECT
             COUNT(*) AS total_records,
-
             COUNT(*) FILTER (
-                WHERE be_source_table = 'sale income'
+                WHERE LOWER(be_source_table) = 'sale income'
             ) AS total_sale_income,
-
             COUNT(*) FILTER (
-                WHERE be_source_table = 'other income'
+                WHERE LOWER(be_source_table) = 'other income'
             ) AS total_other_income,
+            COUNT(*) FILTER (
+                WHERE mismatch_parameter_count >= 1
+            ) AS mismatched_transactions
+        FROM filtered_data
+    """
 
+    status_distribution_query = base_cte + """
+        SELECT
+            LOWER(be_status) AS status,
+            COUNT(*) AS count
+        FROM filtered_data
+        WHERE mismatch_parameter_count >= 1
+        GROUP BY LOWER(be_status)
+        ORDER BY count DESC, status ASC
+    """
+
+    parameter_breakdown_query = base_cte + """
+        SELECT
             COUNT(*) FILTER (
                 WHERE gross_commission_match = 'mismatch'
             ) AS gross_commission,
-
             COUNT(*) FILTER (
                 WHERE close_date_match = 'mismatch'
             ) AS close_date,
-
             COUNT(*) FILTER (
                 WHERE status_match = 'mismatch'
             ) AS status,
-
             COUNT(*) FILTER (
                 WHERE sale_price_match = 'mismatch'
             ) AS sale_price,
-
             COUNT(*) FILTER (
                 WHERE listing_price_match = 'mismatch'
             ) AS listing_price,
-
+            COUNT(*) FILTER (
+                WHERE contract_date_match = 'mismatch'
+            ) AS contract_date,
             COUNT(*) FILTER (
                 WHERE buyer_name_match = 'mismatch'
             ) AS buyer_name,
-
             COUNT(*) FILTER (
                 WHERE seller_name_match = 'mismatch'
             ) AS seller_name,
-
             COUNT(*) FILTER (
                 WHERE buying_agent_match = 'mismatch'
             ) AS buying_agent_name,
-
             COUNT(*) FILTER (
                 WHERE title_company_match = 'mismatch'
-            ) AS title_company,
-
-            COUNT(*) FILTER (
-                WHERE mismatch_parameter_count > 2
-            ) AS transactions_with_more_than_2_mismatches
-        FROM mismatch_counts
-    """
-
-    specialist_query = f"""
-        WITH filtered_data AS (
-            SELECT *
-            FROM reconciliation_data rd
-            {where_clause}
-        ),
-        mismatch_counts AS (
-            SELECT
-                COALESCE(NULLIF(TRIM(be_transaction_specialist), ''), 'Unassigned') AS specialist_name,
-                (
-                    CASE WHEN gross_commission_match = 'mismatch' THEN 1 ELSE 0 END +
-                    CASE WHEN close_date_match = 'mismatch' THEN 1 ELSE 0 END +
-                    CASE WHEN status_match = 'mismatch' THEN 1 ELSE 0 END +
-                    CASE WHEN sale_price_match = 'mismatch' THEN 1 ELSE 0 END +
-                    CASE WHEN listing_price_match = 'mismatch' THEN 1 ELSE 0 END +
-                    CASE WHEN buyer_name_match = 'mismatch' THEN 1 ELSE 0 END +
-                    CASE WHEN seller_name_match = 'mismatch' THEN 1 ELSE 0 END +
-                    CASE WHEN buying_agent_match = 'mismatch' THEN 1 ELSE 0 END +
-                    CASE WHEN title_company_match = 'mismatch' THEN 1 ELSE 0 END
-                ) AS mismatch_parameter_count
-            FROM filtered_data
-        )
-        SELECT
-            specialist_name,
-            COUNT(*) FILTER (WHERE mismatch_parameter_count >= 1) AS mismatch_transactions,
-            COUNT(*) FILTER (WHERE mismatch_parameter_count > 2) AS mismatch_transactions_gt_2
-        FROM mismatch_counts
-        GROUP BY specialist_name
-        ORDER BY mismatch_transactions DESC, specialist_name ASC
-        LIMIT 1
-    """
-
-    reviewer_query = f"""
-        WITH filtered_data AS (
-            SELECT *
-            FROM reconciliation_data rd
-            {where_clause}
-        ),
-        mismatch_counts AS (
-            SELECT
-                COALESCE(NULLIF(TRIM(skyslope_reviewer), ''), 'Unassigned') AS reviewer_name,
-                (
-                    CASE WHEN gross_commission_match = 'mismatch' THEN 1 ELSE 0 END +
-                    CASE WHEN close_date_match = 'mismatch' THEN 1 ELSE 0 END +
-                    CASE WHEN status_match = 'mismatch' THEN 1 ELSE 0 END +
-                    CASE WHEN sale_price_match = 'mismatch' THEN 1 ELSE 0 END +
-                    CASE WHEN listing_price_match = 'mismatch' THEN 1 ELSE 0 END +
-                    CASE WHEN buyer_name_match = 'mismatch' THEN 1 ELSE 0 END +
-                    CASE WHEN seller_name_match = 'mismatch' THEN 1 ELSE 0 END +
-                    CASE WHEN buying_agent_match = 'mismatch' THEN 1 ELSE 0 END +
-                    CASE WHEN title_company_match = 'mismatch' THEN 1 ELSE 0 END
-                ) AS mismatch_parameter_count
-            FROM filtered_data
-        )
-        SELECT
-            reviewer_name,
-            COUNT(*) FILTER (WHERE mismatch_parameter_count >= 1) AS mismatch_transactions,
-            COUNT(*) FILTER (WHERE mismatch_parameter_count > 2) AS mismatch_transactions_gt_2
-        FROM mismatch_counts
-        GROUP BY reviewer_name
-        ORDER BY mismatch_transactions DESC, reviewer_name ASC
-        LIMIT 1
+            ) AS title_company
+        FROM filtered_data
+        WHERE mismatch_parameter_count >= 1
     """
 
     specialist_filters_query = """
         SELECT DISTINCT
-            COALESCE(NULLIF(TRIM(be_transaction_specialist), ''), 'Unassigned') AS transaction_specialist
+            COALESCE(NULLIF(TRIM(be_transaction_specialist), ''), 'unassigned') AS transaction_specialist
         FROM reconciliation_data
         ORDER BY transaction_specialist
     """
 
     reviewer_filters_query = """
         SELECT DISTINCT
-            COALESCE(NULLIF(TRIM(skyslope_reviewer), ''), 'Unassigned') AS reviewer
+            COALESCE(NULLIF(TRIM(skyslope_reviewer), ''), 'unassigned') AS reviewer
         FROM reconciliation_data
         ORDER BY reviewer
     """
 
     status_filters_query = """
         SELECT DISTINCT
-            COALESCE(NULLIF(TRIM(be_status), ''), 'Unassigned') AS status
+            COALESCE(NULLIF(TRIM(be_status), ''), 'unassigned') AS status
         FROM reconciliation_data
         ORDER BY status
     """
 
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(analytics_query, params)
-        main_row = cur.fetchone()
+        cur.execute(overview_query, params)
+        overview_row = cur.fetchone()
 
-        cur.execute(specialist_query, params)
-        specialist_row = cur.fetchone()
+        cur.execute(status_distribution_query, params)
+        status_distribution_rows = cur.fetchall()
 
-        cur.execute(reviewer_query, params)
-        reviewer_row = cur.fetchone()
+        cur.execute(parameter_breakdown_query, params)
+        parameter_row = cur.fetchone()
 
         cur.execute(specialist_filters_query)
         specialist_filters_rows = cur.fetchall()
@@ -252,39 +207,43 @@ def get_reconciliation_analytics(
     reviewer_filters = [row["reviewer"] for row in reviewer_filters_rows]
     status_filters = [row["status"] for row in status_filters_rows]
 
+    status_distribution = [
+        {
+            "status": row["status"],
+            "count": row["count"] or 0,
+        }
+        for row in status_distribution_rows
+    ]
+
+    parameter_breakdown = {
+        "gross_commission": parameter_row["gross_commission"] or 0,
+        "close_date": parameter_row["close_date"] or 0,
+        "status": parameter_row["status"] or 0,
+        "sale_price": parameter_row["sale_price"] or 0,
+        "listing_price": parameter_row["listing_price"] or 0,
+        "contract_date": parameter_row["contract_date"] or 0,
+        "buyer_name": parameter_row["buyer_name"] or 0,
+        "seller_name": parameter_row["seller_name"] or 0,
+        "buying_agent_name": parameter_row["buying_agent_name"] or 0,
+        "title_company": parameter_row["title_company"] or 0,
+    }
+
     result: Dict[str, Any] = {
         "filters": {
             "transaction_specialist": specialist_filters,
             "reviewer": reviewer_filters,
             "status": status_filters,
         },
-        "data": {
-            "total_records": main_row["total_records"] or 0,
-            "total_sale_income": main_row["total_sale_income"] or 0,
-            "total_other_income": main_row["total_other_income"] or 0,
-
-            "gross_commission": main_row["gross_commission"] or 0,
-            "close_date": main_row["close_date"] or 0,
-            "status": main_row["status"] or 0,
-            "sale_price": main_row["sale_price"] or 0,
-            "listing_price": main_row["listing_price"] or 0,
-            "buyer_name": main_row["buyer_name"] or 0,
-            "seller_name": main_row["seller_name"] or 0,
-            "buying_agent_name": main_row["buying_agent_name"] or 0,
-            "title_company": main_row["title_company"] or 0,
-            "transactions_with_more_than_2_mismatches": main_row["transactions_with_more_than_2_mismatches"] or 0,
-
-            "top_transaction_specialist": {
-                "name": specialist_row["specialist_name"] if specialist_row else "Unassigned",
-                "mismatch_transactions": specialist_row["mismatch_transactions"] if specialist_row else 0,
-                "mismatch_transactions_gt_2": specialist_row["mismatch_transactions_gt_2"] if specialist_row else 0,
-            },
-
-            "top_reviewer": {
-                "name": reviewer_row["reviewer_name"] if reviewer_row else "Unassigned",
-                "mismatch_transactions": reviewer_row["mismatch_transactions"] if reviewer_row else 0,
-                "mismatch_transactions_gt_2": reviewer_row["mismatch_transactions_gt_2"] if reviewer_row else 0,
-            },
+        "overview": {
+            "total_records": overview_row["total_records"] or 0,
+            "total_sale_income": overview_row["total_sale_income"] or 0,
+            "total_other_income": overview_row["total_other_income"] or 0,
+            "mismatched_transactions": overview_row["mismatched_transactions"] or 0,
+        },
+        "status_distribution": status_distribution,
+        "parameter_breakdown": {
+            "note": "A transaction can appear in multiple parameter categories.",
+            "data": parameter_breakdown,
         },
     }
 
