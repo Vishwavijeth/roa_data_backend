@@ -6,7 +6,6 @@ from services.recon_data_population import evaluate_row
 
 router = APIRouter()
 
-
 RECONCILIATION_DATA_BASE_QUERY = """
 WITH brokerage_base AS (
     SELECT
@@ -20,6 +19,7 @@ WITH brokerage_base AS (
         be.seller_name::varchar AS be_seller_name,
         be.buying_agent_name::varchar AS be_buying_agent_name,
         be.da_title_company::varchar AS be_title_company,
+        be.state::varchar AS be_state,
         be.sale_price::numeric AS be_sale_price,
         be.listing_price::numeric AS be_listing_price,
         be.closed_date::date AS be_close_date,
@@ -48,6 +48,7 @@ other_income_base AS (
         NULL::varchar AS be_seller_name,
         NULL::varchar AS be_buying_agent_name,
         NULL::varchar AS be_title_company,
+        NULL::varchar AS be_state,
         oit.income_received::numeric AS be_sale_price,
         NULL::numeric AS be_listing_price,
         oit.income_received_date::date AS be_close_date,
@@ -116,16 +117,8 @@ SELECT
     cs.tags,
 
     cs.be_gross_commission,
-    CASE
-        WHEN scn.officegrosscommissiononsale IS NULL
-             AND scn.adminbrokeragecomp IS NULL
-            THEN NULL
-        WHEN scn.officegrosscommissiononsale IS NULL
-            THEN scn.adminbrokeragecomp
-        WHEN scn.adminbrokeragecomp IS NULL
-            THEN scn.officegrosscommissiononsale
-        ELSE scn.officegrosscommissiononsale + scn.adminbrokeragecomp
-    END::numeric AS skyslope_gross_commission,
+
+    scn.officegrosscommissiononsale::numeric AS skyslope_gross_commission,
 
     cs.be_close_date AS be_close_date_value,
     s.escrowclosingdate::date AS skyslope_close_date,
