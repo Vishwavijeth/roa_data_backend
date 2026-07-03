@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, Query
 from psycopg2.extras import RealDictCursor
+from services.state_office_mapping import STATE_OFFICES_MAP
 from db import get_db
 
 router = APIRouter()
@@ -7,6 +8,9 @@ router = APIRouter()
 @router.get("/checklist-type-validation")
 def checklist_type_validation(
     page: int = Query(default=1, ge=1),
+    state: list[str] | None = Query(default=None),
+    stage_name: list[str] | None = Query(default=None),
+    status: list[str] | None = Query(default=None),
     type_of_sale: list[str] | None = Query(default=None),
     search: str | None = Query(default=None),
     conn=Depends(get_db)
@@ -73,7 +77,6 @@ def checklist_type_validation(
                     END
 
                 WHEN s.dealtype IN ('Purchase', 'Other') THEN NULL
-
                 ELSE NULL
             END
         """
@@ -93,8 +96,53 @@ def checklist_type_validation(
                 ON s.saleguid = sp.saleguid
             LEFT JOIN checklist c
                 ON s.checklisttypeid = c.typeid
+            LEFT JOIN stage st
+                ON s.stageid = st.stageid
+            LEFT JOIN office o
+                ON s.officeguid = o.officeguid
             WHERE ({validation_case}) = 'mismatch'
         """
+
+        if state:
+            cleaned_states = list({
+                x.strip().upper()
+                for x in state
+                if x and x.strip()
+            })
+
+            if cleaned_states:
+                mapped_offices = []
+                for state_code in cleaned_states:
+                    mapped_offices.extend(STATE_OFFICES_MAP.get(state_code, []))
+
+                mapped_offices = list({
+                    office_name.strip()
+                    for office_name in mapped_offices
+                    if office_name and office_name.strip()
+                })
+
+                state_conditions = []
+
+                state_conditions.append("UPPER(TRIM(COALESCE(sp.state, ''))) = ANY(%s)")
+                params.append(cleaned_states)
+
+                if mapped_offices:
+                    state_conditions.append("TRIM(COALESCE(o.officename, '')) = ANY(%s)")
+                    params.append(mapped_offices)
+
+                base_query += " AND (" + " OR ".join(state_conditions) + ")"
+
+        if stage_name:
+            cleaned_stage_names = [x.strip() for x in stage_name if x and x.strip()]
+            if cleaned_stage_names:
+                base_query += " AND st.name = ANY(%s)"
+                params.append(cleaned_stage_names)
+
+        if status:
+            cleaned_status = [x.strip() for x in status if x and x.strip()]
+            if cleaned_status:
+                base_query += " AND s.status = ANY(%s)"
+                params.append(cleaned_status)
 
         if type_of_sale:
             cleaned_type_of_sale = [x.strip() for x in type_of_sale if x and x.strip()]
@@ -116,6 +164,8 @@ def checklist_type_validation(
                 s.saleguid,
                 s.url AS url,
                 {property_address_expr} AS propertyaddress,
+                o.officename AS office_name,
+                s.status,
                 s.dealtype AS type_of_sale,
                 c.typename AS checklist_type_name,
                 ({validation_case}) AS match_result
@@ -133,6 +183,27 @@ def checklist_type_validation(
             ORDER BY dealtype
         """
 
+        state_query = """
+            SELECT DISTINCT UPPER(TRIM(state)) AS state
+            FROM sale_property
+            WHERE state IS NOT NULL AND TRIM(state) <> ''
+            ORDER BY state
+        """
+
+        status_query = """
+            SELECT DISTINCT status
+            FROM sale
+            WHERE status IS NOT NULL AND TRIM(status) <> ''
+            ORDER BY status
+        """
+
+        stage_query = """
+            SELECT DISTINCT name
+            FROM stage
+            WHERE name IS NOT NULL AND TRIM(name) <> ''
+            ORDER BY name
+        """
+
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(count_query, params)
             total_count = cur.fetchone()["total_count"]
@@ -143,12 +214,24 @@ def checklist_type_validation(
             cur.execute(type_of_sale_query)
             type_of_sale_list = [row["dealtype"] for row in cur.fetchall()]
 
+            cur.execute(state_query)
+            state_list = [row["state"] for row in cur.fetchall()]
+
+            cur.execute(status_query)
+            status_list = [row["status"] for row in cur.fetchall()]
+
+            cur.execute(stage_query)
+            stage_list = [row["name"] for row in cur.fetchall()]
+
         return {
             "total_count": total_count,
             "page": page,
             "page_size": limit,
             "filters": {
-                "type_of_sale": type_of_sale_list
+                "type_of_sale": type_of_sale_list,
+                "state": state_list,
+                "status": status_list,
+                "stage_name": stage_list
             },
             "data": rows
         }
