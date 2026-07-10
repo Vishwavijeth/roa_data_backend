@@ -703,58 +703,9 @@ def download_recon_data(conn=Depends(get_db)):
         df.to_excel(writer, sheet_name="Recon Data", index=False)
 
         worksheet = writer.sheets["Recon Data"]
-        worksheet.freeze_panes = "A2"
 
-        font_header = Font(name="Segoe UI", size=11, bold=True)
-        align_header = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        font_body = Font(name="Segoe UI", size=10)
-
-        worksheet.row_dimensions[1].height = 28
-        for col_num in range(1, len(df.columns) + 1):
-            cell = worksheet.cell(row=1, column=col_num)
-            cell.font = font_header
-            cell.alignment = align_header
-
-        currency_cols = []
-        date_cols = []
-        center_cols = []
-
-        currency_keywords = ["gross commission", "sale price", "listing price"]
-        date_keywords = ["date"]
-        center_keywords = [
-            "transaction id",
-            "source table",
-            "sale guid",
-            "match",
-        ]
-
-        for idx, col_name in enumerate(df.columns):
-            col_name_lower = col_name.lower()
-            if any(kw in col_name_lower for kw in currency_keywords):
-                currency_cols.append(idx + 1)
-            elif any(kw in col_name_lower for kw in date_keywords):
-                date_cols.append(idx + 1)
-            elif any(kw in col_name_lower for kw in center_keywords):
-                center_cols.append(idx + 1)
-
-        for row_num in range(2, len(df) + 2):
-            worksheet.row_dimensions[row_num].height = 20
-
-            for col_num in range(1, len(df.columns) + 1):
-                cell = worksheet.cell(row=row_num, column=col_num)
-                cell.font = font_body
-                val = cell.value
-
-                if col_num in currency_cols:
-                    cell.alignment = Alignment(horizontal="right", vertical="center")
-                    if isinstance(val, (int, float)):
-                        cell.number_format = '$#,##0.00'
-                elif col_num in date_cols:
-                    cell.alignment = Alignment(horizontal="center", vertical="center")
-                elif col_num in center_cols:
-                    cell.alignment = Alignment(horizontal="center", vertical="center")
-                else:
-                    cell.alignment = Alignment(horizontal="left", vertical="center")
+        for cell in worksheet[1]:
+            cell.font = Font(bold=True)
 
         for col in worksheet.columns:
             max_len = 0
@@ -763,14 +714,9 @@ def download_recon_data(conn=Depends(get_db)):
             for cell in col:
                 val = cell.value
                 if val is not None:
-                    if cell.column in currency_cols and isinstance(val, (int, float)):
-                        val_len = len(f"${val:,.2f}")
-                    else:
-                        val_len = len(str(val))
-                    if val_len > max_len:
-                        max_len = val_len
+                    max_len = max(max_len, len(str(val)))
 
-            worksheet.column_dimensions[col_letter].width = max(max_len + 3, 12)
+            worksheet.column_dimensions[col_letter].width = max(max_len + 2, 12)
 
     output.seek(0)
 
