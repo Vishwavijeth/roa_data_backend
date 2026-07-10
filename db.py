@@ -1,27 +1,57 @@
+import logging
 import os
-import psycopg2
-from psycopg2.pool import ThreadedConnectionPool
+import threading
+from psycopg2.pool import PoolError, ThreadedConnectionPool
 from dotenv import load_dotenv
 
-load_dotenv()  # loads .env locally
+load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 _pool = None
+_pool_lock = threading.Lock()
+
 
 def get_pool():
     global _pool
+
     if _pool is None:
-        minconn = int(os.getenv("DB_MIN_CONN", "1"))
-        maxconn = int(os.getenv("DB_MAX_CONN", "20"))
-        _pool = ThreadedConnectionPool(
-            minconn,
-            maxconn,
-            dbname=os.getenv("DB_NAME"),
-            user=os.getenv("DB_USER"),
-            password=os.getenv("DB_PASSWORD"),
-            host=os.getenv("DB_HOST"),
-            port=os.getenv("DB_PORT"),
-        )
+        with _pool_lock:
+            if _pool is None:
+                _pool = ThreadedConnectionPool(
+                    minconn=int(os.getenv("DB_MIN_CONN", "2")),
+                    maxconn=int(os.getenv("DB_MAX_CONN", "20")),
+                    host=os.getenv("DB_HOST"),
+                    port=os.getenv("DB_PORT"),
+                    dbname=os.getenv("DB_NAME"),
+                    user=os.getenv("DB_USER"),
+                    password=os.getenv("DB_PASSWORD"),
+                    connect_timeout=10,
+                )
+
+                logger.info("Database connection pool initialized.")
+
     return _pool
+
+
+def close_pool():
+    global _pool
+
+    if _pool:
+        logger.info("Closing database connection pool...")
+        _pool.closeall()
+        _pool = None
+
+
+def _is_connection_alive(conn):
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+        return True
+    except Exception:
+        return False
+
 
 class ConnectionWrapper:
     def __init__(self, conn, pool):
@@ -29,63 +59,81 @@ class ConnectionWrapper:
         self._pool = pool
         self._closed = False
 
-    def __getattr__(self, name):
-        return getattr(self._conn, name)
-
-    @property
-    def closed(self):
-        if self._closed:
-            return 1
-        try:
-            return self._conn.closed
-        except Exception:
-            return 1
+    def __getattr__(self, item):
+        return getattr(self._conn, item)
 
     def close(self):
-        if not self._closed:
-            is_dead = False
-            try:
-                if self._conn.closed != 0:
-                    is_dead = True
-                else:
+        if self._closed:
+            return
+
+        try:
+            if not self._conn.closed:
+                try:
                     self._conn.rollback()
+                except Exception:
+                    pass
+
+                self._pool.putconn(self._conn)
+
+            else:
+                self._pool.putconn(self._conn, close=True)
+
+        except Exception:
+            logger.exception("Failed returning DB connection to pool.")
+
+            try:
+                self._pool.putconn(self._conn, close=True)
             except Exception:
-                is_dead = True
-            
-            self._pool.putconn(self._conn, close=is_dead)
+                pass
+
+        finally:
             self._closed = True
 
     def __enter__(self):
-        self._conn.__enter__()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        return self._conn.__exit__(exc_type, exc_val, exc_tb)
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            if exc_type:
+                self._conn.rollback()
+            else:
+                self._conn.commit()
+        finally:
+            self.close()
+
 
 def get_conn():
     pool = get_pool()
-    conn = pool.getconn()
-    
-    # Check if connection is closed or dead
+
     try:
-        if conn.closed != 0:
-            pool.putconn(conn, close=True)
-            conn = pool.getconn()
-    except Exception:
+        conn = pool.getconn()
+
+    except PoolError:
+        logger.exception("Database connection pool exhausted.")
+        raise
+
+    if conn.closed or not _is_connection_alive(conn):
+        logger.warning("Discarding dead database connection.")
+
         try:
             pool.putconn(conn, close=True)
         except Exception:
             pass
+
         conn = pool.getconn()
-        
+
     return ConnectionWrapper(conn, pool)
+
 
 def get_db():
     conn = get_conn()
+
     try:
         yield conn
+
     finally:
         conn.close()
+
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
@@ -93,4 +141,4 @@ DB_CONFIG = {
     "dbname": os.getenv("DB_NAME"),
     "user": os.getenv("DB_USER"),
     "password": os.getenv("DB_PASSWORD"),
-}
+}
