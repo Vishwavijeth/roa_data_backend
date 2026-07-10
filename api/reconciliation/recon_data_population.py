@@ -49,7 +49,7 @@ other_income_base AS (
         NULL::varchar AS be_buying_agent_name,
         NULL::varchar AS be_title_company,
         NULL::varchar AS be_state,
-        oit.income_received::numeric AS be_sale_price,
+        NULL::numeric AS be_sale_price,
         NULL::numeric AS be_listing_price,
         oit.income_received_date::date AS be_close_date,
         NULL::date AS be_contract_date,
