@@ -227,6 +227,9 @@ def evaluate_row(row):
         seller_name_result = None
         buying_agent_result = None
         title_company_result = None
+        sale_price_result = None
+        be_sale = None
+        ss_sale = None
 
         be_list_val = None
         ss_list_val = None
