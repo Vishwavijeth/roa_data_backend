@@ -10,7 +10,7 @@ def build_checklist_validation_query(
     stage_name: list[str] | None = None,
     status: list[str] | None = None,
     type_of_sale: list[str] | None = None,
-    checklist: list[str] | None = None,
+    checklist_type: list[str] | None = None,
     search: str | None = None,
 ):
     params = []
@@ -19,54 +19,54 @@ def build_checklist_validation_query(
         CASE
             WHEN s.dealtype = 'Listing' THEN
                 CASE
-                    WHEN LOWER(COALESCE(c.typename, '')) LIKE '%%listing%%'
-                         OR LOWER(COALESCE(c.typename, '')) LIKE '%%seller%%'
+                    WHEN LOWER(TRIM(COALESCE(c.typename, ''))) LIKE '%%listing%%'
+                         OR LOWER(TRIM(COALESCE(c.typename, ''))) LIKE '%%seller%%'
                     THEN 'match'
                     ELSE 'mismatch'
                 END
 
             WHEN s.dealtype = 'Both Purchase & Listing' THEN
                 CASE
-                    WHEN LOWER(COALESCE(c.typename, '')) LIKE '%%dual%%'
-                         OR LOWER(COALESCE(c.typename, '')) LIKE '%%intermediary%%'
+                    WHEN LOWER(TRIM(COALESCE(c.typename, ''))) LIKE '%%dual%%'
+                         OR LOWER(TRIM(COALESCE(c.typename, ''))) LIKE '%%intermediary%%'
                     THEN 'match'
                     ELSE 'mismatch'
                 END
 
             WHEN s.dealtype = 'Lease Tenant' THEN
                 CASE
-                    WHEN LOWER(COALESCE(c.typename, '')) LIKE '%%lease%%'
-                         OR LOWER(COALESCE(c.typename, '')) LIKE '%%tenant%%'
-                         OR LOWER(COALESCE(c.typename, '')) LIKE '%%rental%%'
-                         OR LOWER(COALESCE(c.typename, '')) LIKE '%%apartment%%'
+                    WHEN LOWER(TRIM(COALESCE(c.typename, ''))) LIKE '%%lease%%'
+                         OR LOWER(TRIM(COALESCE(c.typename, ''))) LIKE '%%tenant%%'
+                         OR LOWER(TRIM(COALESCE(c.typename, ''))) LIKE '%%rental%%'
+                         OR LOWER(TRIM(COALESCE(c.typename, ''))) LIKE '%%apartment%%'
                     THEN 'match'
                     ELSE 'mismatch'
                 END
 
             WHEN s.dealtype = 'Lease Landlord' THEN
                 CASE
-                    WHEN LOWER(COALESCE(c.typename, '')) LIKE '%%landlord%%'
+                    WHEN LOWER(TRIM(COALESCE(c.typename, ''))) LIKE '%%landlord%%'
                     THEN 'match'
                     ELSE 'mismatch'
                 END
 
             WHEN s.dealtype = 'Referral' THEN
                 CASE
-                    WHEN LOWER(COALESCE(c.typename, '')) LIKE '%%referral%%'
+                    WHEN LOWER(TRIM(COALESCE(c.typename, ''))) LIKE '%%referral%%'
                     THEN 'match'
                     ELSE 'mismatch'
                 END
 
             WHEN s.dealtype = 'BPO' THEN
                 CASE
-                    WHEN LOWER(COALESCE(c.typename, '')) LIKE '%%bpo%%'
+                    WHEN LOWER(TRIM(COALESCE(c.typename, ''))) LIKE '%%bpo%%'
                     THEN 'match'
                     ELSE 'mismatch'
                 END
 
             WHEN s.dealtype = 'Both Lease Tenant & Landlord' THEN
                 CASE
-                    WHEN LOWER(COALESCE(c.typename, '')) LIKE '%%tx | lease intermediary%%'
+                    WHEN LOWER(TRIM(COALESCE(c.typename, ''))) LIKE '%%tx | lease intermediary%%'
                     THEN 'match'
                     ELSE 'mismatch'
                 END
@@ -99,7 +99,7 @@ def build_checklist_validation_query(
     """
 
     if state:
-        cleaned_states = list({
+        cleaned_states = sorted({
             x.strip().upper()
             for x in state
             if x and x.strip()
@@ -116,39 +116,39 @@ def build_checklist_validation_query(
                 if office_name and office_name.strip()
             })
 
-            state_conditions = []
-            state_conditions.append("UPPER(TRIM(COALESCE(sp.state, ''))) = ANY(%s)")
-            params.append(cleaned_states)
-
             if mapped_offices:
-                state_conditions.append("TRIM(COALESCE(o.officename, '')) = ANY(%s)")
+                base_query += " AND TRIM(COALESCE(o.officename, '')) = ANY(%s)"
                 params.append(mapped_offices)
-
-            base_query += " AND (" + " OR ".join(state_conditions) + ")"
+            else:
+                base_query += " AND 1=0"
 
     if stage_name:
         cleaned_stage_names = [x.strip() for x in stage_name if x and x.strip()]
         if cleaned_stage_names:
-            base_query += " AND st.name = ANY(%s)"
+            base_query += " AND TRIM(COALESCE(st.name, '')) = ANY(%s)"
             params.append(cleaned_stage_names)
 
     if status:
         cleaned_status = [x.strip() for x in status if x and x.strip()]
         if cleaned_status:
-            base_query += " AND s.status = ANY(%s)"
+            base_query += " AND TRIM(COALESCE(s.status, '')) = ANY(%s)"
             params.append(cleaned_status)
 
     if type_of_sale:
         cleaned_type_of_sale = [x.strip() for x in type_of_sale if x and x.strip()]
         if cleaned_type_of_sale:
-            base_query += " AND s.dealtype = ANY(%s)"
+            base_query += " AND TRIM(COALESCE(s.dealtype, '')) = ANY(%s)"
             params.append(cleaned_type_of_sale)
 
-    if checklist:
-        cleaned_checklist_type = [x.strip() for x in checklist if x and x.strip()]
-        if cleaned_checklist_type:
-            base_query += " AND c.typename = ANY(%s)"
-            params.append(cleaned_checklist_type)
+    if checklist_type:
+        cleaned_checklist_types = list({
+            x.strip().lower()
+            for x in checklist_type
+            if x and x.strip()
+        })
+        if cleaned_checklist_types:
+            base_query += " AND LOWER(TRIM(COALESCE(c.typename, ''))) = ANY(%s)"
+            params.append(cleaned_checklist_types)
 
     if search and search.strip():
         base_query += f" AND {property_address_expr} ILIKE %s"
@@ -161,7 +161,7 @@ def build_checklist_validation_query(
 def checklist_type_validation_filters(conn=Depends(get_db)):
     try:
         type_of_sale_query = """
-            SELECT DISTINCT dealtype
+            SELECT DISTINCT TRIM(dealtype) AS dealtype
             FROM sale
             WHERE dealtype IS NOT NULL AND TRIM(dealtype) <> ''
             ORDER BY dealtype
@@ -175,21 +175,21 @@ def checklist_type_validation_filters(conn=Depends(get_db)):
         """
 
         status_query = """
-            SELECT DISTINCT status
+            SELECT DISTINCT TRIM(status) AS status
             FROM sale
             WHERE status IS NOT NULL AND TRIM(status) <> ''
             ORDER BY status
         """
 
         stage_query = """
-            SELECT DISTINCT name
+            SELECT DISTINCT TRIM(name) AS name
             FROM stage
             WHERE name IS NOT NULL AND TRIM(name) <> ''
             ORDER BY name
         """
 
         checklist_query = """
-            SELECT DISTINCT typename
+            SELECT DISTINCT TRIM(typename) AS typename
             FROM checklist
             WHERE typename IS NOT NULL AND TRIM(typename) <> ''
             ORDER BY typename
@@ -232,7 +232,7 @@ def checklist_type_validation_data(
     stage_name: list[str] | None = Query(default=None),
     status: list[str] | None = Query(default=None),
     type_of_sale: list[str] | None = Query(default=None),
-    checklist: list[str] | None = Query(default=None),
+    checklist_type: list[str] | None = Query(default=None),
     search: str | None = Query(default=None),
     conn=Depends(get_db)
 ):
@@ -245,7 +245,7 @@ def checklist_type_validation_data(
             stage_name=stage_name,
             status=status,
             type_of_sale=type_of_sale,
-            checklist=checklist,
+            checklist_type=checklist_type,
             search=search,
         )
 
@@ -259,10 +259,10 @@ def checklist_type_validation_data(
                 s.saleguid,
                 s.url AS url,
                 {property_address_expr} AS propertyaddress,
-                o.officename AS office_name,
-                s.status,
-                s.dealtype AS type_of_sale,
-                c.typename AS checklist_type_name,
+                TRIM(COALESCE(o.officename, '')) AS office_name,
+                TRIM(COALESCE(s.status, '')) AS status,
+                TRIM(COALESCE(s.dealtype, '')) AS type_of_sale,
+                TRIM(COALESCE(c.typename, '')) AS checklist_type_name,
                 ({validation_case}) AS match_result
             {base_query}
             ORDER BY s.saleguid
@@ -282,6 +282,14 @@ def checklist_type_validation_data(
             "total_count": total_count,
             "page": page,
             "page_size": limit,
+            "applied_filters": {
+                "state": state,
+                "stage_name": stage_name,
+                "status": status,
+                "type_of_sale": type_of_sale,
+                "checklist_type": checklist_type,
+                "search": search,
+            },
             "data": rows
         }
 
