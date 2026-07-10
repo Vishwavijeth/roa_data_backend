@@ -100,7 +100,7 @@ def reviewer_listing(
         "data": rows
     }
 
-@router.get("/reviewer_listing/download")
+@router.get("/reviewer-listing/download")
 def download_reviewer_listing(
     stage_name: list[str] | None = Query(default=None),
     from_close_date: str = Query(default=None),
@@ -129,15 +129,16 @@ def download_reviewer_listing(
     params = []
 
     base_query, params = apply_common_filters(
-        base_query,
-        params,
-        stage_name,
-        from_close_date,
-        to_close_date,
-        state,
-        status,
-        reviewer,
-        type_of_sale,
+        query=base_query,
+        params=params,
+        from_date=from_close_date,
+        to_date=to_close_date,
+        state=state,
+        stage_name=stage_name,
+        status=status,
+        reviewer=reviewer,
+        type_of_sale=type_of_sale,
+        date_field="s.escrowclosingdate",
     )
 
     data_query = """
@@ -196,6 +197,7 @@ def download_reviewer_listing(
                 val = ""
 
             row_dict[header] = val
+
         rows_to_export.append(row_dict)
 
     df = pd.DataFrame(rows_to_export)
@@ -274,7 +276,7 @@ def download_reviewer_listing(
 
     filename = "reviewer_listing_report.xlsx"
     headers = {
-        "Content-Disposition": f'attachment; filename=\"{filename}\"'
+        "Content-Disposition": f'attachment; filename="{filename}"'
     }
 
     return Response(
