@@ -5,6 +5,7 @@ import pandas as pd
 from fastapi.responses import Response
 from db import get_db
 from services.state_office_mapping import STATE_OFFICES_MAP
+from services.reviewer_filters import apply_common_filters
 from psycopg2.extras import RealDictCursor
 from decimal import Decimal
 from openpyxl.styles import Font, Alignment
@@ -12,91 +13,6 @@ from openpyxl.utils import get_column_letter
 
 
 router = APIRouter()
-
-
-def apply_common_filters(
-    base_query,
-    params,
-    stage_name,
-    from_close_date,
-    to_close_date,
-    state,
-    status,
-    reviewer,
-    type_of_sale,
-):
-    if stage_name:
-        cleaned_stage_names = [x.strip() for x in stage_name if x and x.strip()]
-        if cleaned_stage_names:
-            base_query += " AND st.name = ANY(%s)"
-            params.append(cleaned_stage_names)
-
-    if from_close_date:
-        base_query += " AND s.escrowclosingdate >= %s"
-        params.append(from_close_date)
-
-    if to_close_date:
-        base_query += " AND s.escrowclosingdate <= %s"
-        params.append(to_close_date)
-
-    if state:
-        cleaned_states = sorted({
-            x.strip().upper()
-            for x in state
-            if x and x.strip()
-        })
-
-        if cleaned_states:
-            mapped_offices = []
-            for state_code in cleaned_states:
-                mapped_offices.extend(STATE_OFFICES_MAP.get(state_code, []))
-
-            mapped_offices = list({
-                office_name.strip()
-                for office_name in mapped_offices
-                if office_name and office_name.strip()
-            })
-
-            if mapped_offices:
-                base_query += " AND TRIM(COALESCE(o.officename, '')) = ANY(%s)"
-                params.append(mapped_offices)
-            else:
-                base_query += " AND 1=0"
-
-    if status:
-        cleaned_status = [x.strip() for x in status if x and x.strip()]
-        if cleaned_status:
-            base_query += " AND s.status = ANY(%s)"
-            params.append(cleaned_status)
-
-    if reviewer:
-        cleaned_reviewers = [x.strip() for x in reviewer if x and x.strip()]
-        if cleaned_reviewers:
-            non_unassigned_reviewers = [x for x in cleaned_reviewers if x != "Unassigned"]
-            has_unassigned = "Unassigned" in cleaned_reviewers
-
-            reviewer_conditions = []
-
-            if non_unassigned_reviewers:
-                reviewer_conditions.append("""
-                    COALESCE(NULLIF(TRIM(CONCAT_WS(' ', r.firstname, r.lastname)), ''), 'Unassigned') = ANY(%s)
-                """)
-                params.append(non_unassigned_reviewers)
-
-            if has_unassigned:
-                reviewer_conditions.append("s.reviewerguid IS NULL")
-
-            if reviewer_conditions:
-                base_query += " AND (" + " OR ".join(reviewer_conditions) + ")"
-
-    if type_of_sale:
-        cleaned_type_of_sale = [x.strip() for x in type_of_sale if x and x.strip()]
-        if cleaned_type_of_sale:
-            base_query += " AND s.dealtype = ANY(%s)"
-            params.append(cleaned_type_of_sale)
-
-    return base_query, params
-
 
 @router.get("/reviewer-listing")
 def reviewer_listing(
@@ -131,15 +47,16 @@ def reviewer_listing(
     params = []
 
     base_query, params = apply_common_filters(
-        base_query,
-        params,
-        stage_name,
-        from_close_date,
-        to_close_date,
-        state,
-        status,
-        reviewer,
-        type_of_sale,
+        query=base_query,
+        params=params,
+        from_date=from_close_date,
+        to_date=to_close_date,
+        state=state,
+        stage_name=stage_name,
+        status=status,
+        reviewer=reviewer,
+        type_of_sale=type_of_sale,
+        date_field="s.escrowclosingdate",
     )
 
     count_query = "SELECT COUNT(*) AS total_count " + base_query
@@ -182,73 +99,6 @@ def reviewer_listing(
         "page_size": limit,
         "data": rows
     }
-
-
-@router.get("/reviewer-listing/filters")
-def reviewer_listing_filters(conn=Depends(get_db)):
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-
-    stage_query = """
-        SELECT DISTINCT name
-        FROM stage
-        WHERE name IS NOT NULL AND TRIM(name) <> ''
-        ORDER BY name
-    """
-    cursor.execute(stage_query)
-    stage_list = [row["name"] for row in cursor.fetchall()]
-
-    state_query = """
-        SELECT DISTINCT UPPER(TRIM(state)) AS state
-        FROM sale_property
-        WHERE state IS NOT NULL AND TRIM(state) <> ''
-        ORDER BY state
-    """
-    cursor.execute(state_query)
-    state_list = [row["state"] for row in cursor.fetchall()]
-
-    status_query = """
-        SELECT DISTINCT status
-        FROM sale
-        WHERE status IS NOT NULL AND TRIM(status) <> ''
-        ORDER BY status
-    """
-    cursor.execute(status_query)
-    status_list = [row["status"] for row in cursor.fetchall()]
-
-    reviewer_query = """
-        SELECT DISTINCT reviewer_name
-        FROM (
-            SELECT
-                CASE
-                    WHEN s.reviewerguid IS NULL THEN 'Unassigned'
-                    ELSE COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.firstname, u.lastname)), ''), 'Unassigned')
-                END AS reviewer_name
-            FROM sale s
-            LEFT JOIN users u
-                ON s.reviewerguid = u.userguid
-        ) x
-        ORDER BY reviewer_name
-    """
-    cursor.execute(reviewer_query)
-    reviewer_list = [row["reviewer_name"] for row in cursor.fetchall()]
-
-    type_of_sale_query = """
-        SELECT DISTINCT dealtype
-        FROM sale
-        WHERE dealtype IS NOT NULL AND TRIM(dealtype) <> ''
-        ORDER BY dealtype
-    """
-    cursor.execute(type_of_sale_query)
-    type_of_sale_list = [row["dealtype"] for row in cursor.fetchall()]
-
-    return {
-        "stage_list": stage_list,
-        "state_list": state_list,
-        "status_list": status_list,
-        "reviewer_list": reviewer_list,
-        "type_of_sale_list": type_of_sale_list,
-    }
-
 
 @router.get("/reviewer_listing/download")
 def download_reviewer_listing(
