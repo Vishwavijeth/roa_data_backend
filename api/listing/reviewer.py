@@ -10,40 +10,21 @@ from decimal import Decimal
 from openpyxl.styles import Font, Alignment
 from openpyxl.utils import get_column_letter
 
+
 router = APIRouter()
 
-@router.get("/reviewer_listing")
-def reviewer_listing(
-    stage_name: list[str] | None = Query(default=None),
-    page: int = Query(default=1, ge=1),
-    from_close_date: str = Query(default=None),
-    to_close_date: str = Query(default=None),
-    state: list[str] | None = Query(default=None),
-    status: list[str] | None = Query(default=None),
-    reviewer: list[str] | None = Query(default=None),
-    type_of_sale: list[str] | None = Query(default=None),
-    conn=Depends(get_db)
+
+def apply_common_filters(
+    base_query,
+    params,
+    stage_name,
+    from_close_date,
+    to_close_date,
+    state,
+    status,
+    reviewer,
+    type_of_sale,
 ):
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-
-    limit = 50
-    offset = (page - 1) * limit
-
-    base_query = """
-        FROM sale s
-        LEFT JOIN sale_property sp
-            ON s.saleguid = sp.saleguid
-        LEFT JOIN users r
-            ON s.reviewerguid = r.userguid
-        LEFT JOIN stage st
-            ON s.stageid = st.stageid
-        LEFT JOIN office o
-            ON s.officeguid = o.officeguid
-        WHERE 1=1
-    """
-
-    params = []
-
     if stage_name:
         cleaned_stage_names = [x.strip() for x in stage_name if x and x.strip()]
         if cleaned_stage_names:
@@ -59,7 +40,7 @@ def reviewer_listing(
         params.append(to_close_date)
 
     if state:
-        cleaned_states = list({
+        cleaned_states = sorted({
             x.strip().upper()
             for x in state
             if x and x.strip()
@@ -76,16 +57,11 @@ def reviewer_listing(
                 if office_name and office_name.strip()
             })
 
-            state_conditions = []
-
-            state_conditions.append("UPPER(TRIM(COALESCE(sp.state, ''))) = ANY(%s)")
-            params.append(cleaned_states)
-
             if mapped_offices:
-                state_conditions.append("TRIM(COALESCE(o.officename, '')) = ANY(%s)")
+                base_query += " AND TRIM(COALESCE(o.officename, '')) = ANY(%s)"
                 params.append(mapped_offices)
-
-            base_query += " AND (" + " OR ".join(state_conditions) + ")"
+            else:
+                base_query += " AND 1=0"
 
     if status:
         cleaned_status = [x.strip() for x in status if x and x.strip()]
@@ -119,6 +95,53 @@ def reviewer_listing(
             base_query += " AND s.dealtype = ANY(%s)"
             params.append(cleaned_type_of_sale)
 
+    return base_query, params
+
+
+@router.get("/reviewer-listing")
+def reviewer_listing(
+    stage_name: list[str] | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    from_close_date: str = Query(default=None),
+    to_close_date: str = Query(default=None),
+    state: list[str] | None = Query(default=None),
+    status: list[str] | None = Query(default=None),
+    reviewer: list[str] | None = Query(default=None),
+    type_of_sale: list[str] | None = Query(default=None),
+    conn=Depends(get_db)
+):
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+    limit = 50
+    offset = (page - 1) * limit
+
+    base_query = """
+        FROM sale s
+        LEFT JOIN sale_property sp
+            ON s.saleguid = sp.saleguid
+        LEFT JOIN users r
+            ON s.reviewerguid = r.userguid
+        LEFT JOIN stage st
+            ON s.stageid = st.stageid
+        LEFT JOIN office o
+            ON s.officeguid = o.officeguid
+        WHERE 1=1
+    """
+
+    params = []
+
+    base_query, params = apply_common_filters(
+        base_query,
+        params,
+        stage_name,
+        from_close_date,
+        to_close_date,
+        state,
+        status,
+        reviewer,
+        type_of_sale,
+    )
+
     count_query = "SELECT COUNT(*) AS total_count " + base_query
     cursor.execute(count_query, params)
     total_count = cursor.fetchone()["total_count"]
@@ -141,17 +164,29 @@ def reviewer_listing(
                 WHEN s.reviewerguid IS NULL THEN 'Unassigned'
                 ELSE COALESCE(NULLIF(TRIM(CONCAT_WS(' ', r.firstname, r.lastname)), ''), 'Unassigned')
             END AS reviewer_name,
-            sp.state AS state,
+            o.officename AS office,
             s.dealtype AS type_of_sale
-    """ + base_query
-
-    data_query += " ORDER BY s.saleguid"
-    data_query += " LIMIT %s OFFSET %s"
+    """ + base_query + """
+        ORDER BY s.saleguid
+        LIMIT %s OFFSET %s
+    """
 
     data_params = params + [limit, offset]
 
     cursor.execute(data_query, data_params)
     rows = cursor.fetchall()
+
+    return {
+        "total_count": total_count,
+        "page": page,
+        "page_size": limit,
+        "data": rows
+    }
+
+
+@router.get("/reviewer-listing/filters")
+def reviewer_listing_filters(conn=Depends(get_db)):
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
 
     stage_query = """
         SELECT DISTINCT name
@@ -207,16 +242,13 @@ def reviewer_listing(
     type_of_sale_list = [row["dealtype"] for row in cursor.fetchall()]
 
     return {
-        "total_count": total_count,
-        "filters": {
-            "stage_list": stage_list,
-            "state_list": state_list,
-            "status_list": status_list,
-            "reviewer_list": reviewer_list,
-            "type_of_sale_list": type_of_sale_list,
-        },
-        "data": rows
+        "stage_list": stage_list,
+        "state_list": state_list,
+        "status_list": status_list,
+        "reviewer_list": reviewer_list,
+        "type_of_sale_list": type_of_sale_list,
     }
+
 
 @router.get("/reviewer_listing/download")
 def download_reviewer_listing(
@@ -246,80 +278,17 @@ def download_reviewer_listing(
 
     params = []
 
-    if stage_name:
-        cleaned_stage_names = [x.strip() for x in stage_name if x and x.strip()]
-        if cleaned_stage_names:
-            base_query += " AND st.name = ANY(%s)"
-            params.append(cleaned_stage_names)
-
-    if from_close_date:
-        base_query += " AND s.escrowclosingdate >= %s"
-        params.append(from_close_date)
-
-    if to_close_date:
-        base_query += " AND s.escrowclosingdate <= %s"
-        params.append(to_close_date)
-
-    if state:
-        cleaned_states = list({
-            x.strip().upper()
-            for x in state
-            if x and x.strip()
-        })
-
-        if cleaned_states:
-            mapped_offices = []
-            for state_code in cleaned_states:
-                mapped_offices.extend(STATE_OFFICES_MAP.get(state_code, []))
-
-            mapped_offices = list({
-                office_name.strip()
-                for office_name in mapped_offices
-                if office_name and office_name.strip()
-            })
-
-            state_conditions = []
-
-            state_conditions.append("UPPER(TRIM(COALESCE(sp.state, ''))) = ANY(%s)")
-            params.append(cleaned_states)
-
-            if mapped_offices:
-                state_conditions.append("TRIM(COALESCE(o.officename, '')) = ANY(%s)")
-                params.append(mapped_offices)
-
-            base_query += " AND (" + " OR ".join(state_conditions) + ")"
-
-    if status:
-        cleaned_status = [x.strip() for x in status if x and x.strip()]
-        if cleaned_status:
-            base_query += " AND s.status = ANY(%s)"
-            params.append(cleaned_status)
-
-    if reviewer:
-        cleaned_reviewers = [x.strip() for x in reviewer if x and x.strip()]
-        if cleaned_reviewers:
-            non_unassigned_reviewers = [x for x in cleaned_reviewers if x != "Unassigned"]
-            has_unassigned = "Unassigned" in cleaned_reviewers
-
-            reviewer_conditions = []
-
-            if non_unassigned_reviewers:
-                reviewer_conditions.append("""
-                    COALESCE(NULLIF(TRIM(CONCAT_WS(' ', r.firstname, r.lastname)), ''), 'Unassigned') = ANY(%s)
-                """)
-                params.append(non_unassigned_reviewers)
-
-            if has_unassigned:
-                reviewer_conditions.append("s.reviewerguid IS NULL")
-
-            if reviewer_conditions:
-                base_query += " AND (" + " OR ".join(reviewer_conditions) + ")"
-
-    if type_of_sale:
-        cleaned_type_of_sale = [x.strip() for x in type_of_sale if x and x.strip()]
-        if cleaned_type_of_sale:
-            base_query += " AND s.dealtype = ANY(%s)"
-            params.append(cleaned_type_of_sale)
+    base_query, params = apply_common_filters(
+        base_query,
+        params,
+        stage_name,
+        from_close_date,
+        to_close_date,
+        state,
+        status,
+        reviewer,
+        type_of_sale,
+    )
 
     data_query = """
         SELECT
@@ -339,7 +308,7 @@ def download_reviewer_listing(
                 WHEN s.reviewerguid IS NULL THEN 'Unassigned'
                 ELSE COALESCE(NULLIF(TRIM(CONCAT_WS(' ', r.firstname, r.lastname)), ''), 'Unassigned')
             END AS reviewer_name,
-            sp.state AS state,
+            o.officename AS office,
             s.dealtype AS type_of_sale
     """ + base_query + """
         ORDER BY s.saleguid
@@ -357,7 +326,7 @@ def download_reviewer_listing(
         "ss_status": "Status",
         "stage_name": "Stage Name",
         "reviewer_name": "Reviewer Name",
-        "state": "State",
+        "office": "Office",
         "type_of_sale": "Type of Sale",
     }
 
@@ -385,9 +354,7 @@ def download_reviewer_listing(
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="Reviewer Listing", index=False)
 
-        workbook = writer.book
         worksheet = writer.sheets["Reviewer Listing"]
-
         worksheet.freeze_panes = "A2"
 
         font_header = Font(name="Segoe UI", size=11, bold=True)
@@ -406,7 +373,7 @@ def download_reviewer_listing(
 
         currency_keywords = ["sale price", "listing price"]
         date_keywords = ["date"]
-        center_keywords = ["sale guid", "status", "stage", "reviewer", "state", "type of sale"]
+        center_keywords = ["sale guid", "status", "stage", "reviewer", "office", "type of sale"]
 
         for idx, col_name in enumerate(df.columns):
             col_name_lower = col_name.lower()
@@ -457,7 +424,7 @@ def download_reviewer_listing(
 
     filename = "reviewer_listing_report.xlsx"
     headers = {
-        "Content-Disposition": f'attachment; filename="{filename}"'
+        "Content-Disposition": f'attachment; filename=\"{filename}\"'
     }
 
     return Response(
