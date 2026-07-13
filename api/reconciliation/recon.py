@@ -50,17 +50,7 @@ saleguid_group_flags AS (
         br.saleguid,
         ARRAY_AGG(DISTINCT LOWER(br.be_source_table)) AS linked_source_tables,
         BOOL_OR(LOWER(br.be_source_table) = 'sale income') AS has_sale_income,
-        BOOL_OR(LOWER(br.be_source_table) = 'other income') AS has_other_income,
-        BOOL_OR(br.gross_commission_match = 'mismatch') AS gross_commission_mismatch,
-        BOOL_OR(br.close_date_match = 'mismatch') AS close_date_mismatch,
-        BOOL_OR(br.status_match = 'mismatch') AS status_mismatch,
-        BOOL_OR(br.sale_price_match = 'mismatch') AS sale_price_mismatch,
-        BOOL_OR(br.listing_price_match = 'mismatch') AS listing_price_mismatch,
-        BOOL_OR(br.contract_date_match = 'mismatch') AS contract_date_mismatch,
-        BOOL_OR(br.buyer_name_match = 'mismatch') AS buyer_name_mismatch,
-        BOOL_OR(br.seller_name_match = 'mismatch') AS seller_name_mismatch,
-        BOOL_OR(br.buying_agent_match = 'mismatch') AS buying_agent_mismatch,
-        BOOL_OR(br.title_company_match = 'mismatch') AS title_company_mismatch
+        BOOL_OR(LOWER(br.be_source_table) = 'other income') AS has_other_income
     FROM base_reconciliation br
     GROUP BY br.saleguid
 ),
@@ -73,7 +63,17 @@ deduplicated_reconciliation AS (
         br.be_close_date,
         br.be_status,
         br.be_transaction_specialist,
-        br.skyslope_reviewer
+        br.skyslope_reviewer,
+        br.gross_commission_match,
+        br.close_date_match,
+        br.status_match,
+        br.sale_price_match,
+        br.listing_price_match,
+        br.contract_date_match,
+        br.buyer_name_match,
+        br.seller_name_match,
+        br.buying_agent_match,
+        br.title_company_match
     FROM base_reconciliation br
     ORDER BY
         br.saleguid,
@@ -93,19 +93,19 @@ SELECT
     dr.be_status,
     dr.be_transaction_specialist,
     dr.skyslope_reviewer,
+    dr.gross_commission_match,
+    dr.close_date_match,
+    dr.status_match,
+    dr.sale_price_match,
+    dr.listing_price_match,
+    dr.contract_date_match,
+    dr.buyer_name_match,
+    dr.seller_name_match,
+    dr.buying_agent_match,
+    dr.title_company_match,
     sgf.linked_source_tables,
     sgf.has_sale_income,
     sgf.has_other_income,
-    sgf.gross_commission_mismatch,
-    sgf.close_date_mismatch,
-    sgf.status_mismatch,
-    sgf.sale_price_mismatch,
-    sgf.listing_price_mismatch,
-    sgf.contract_date_mismatch,
-    sgf.buyer_name_mismatch,
-    sgf.seller_name_mismatch,
-    sgf.buying_agent_mismatch,
-    sgf.title_company_mismatch,
     st.name AS skyslope_stage,
     lr.review_status,
     lr.notes AS review_notes,
@@ -151,16 +151,16 @@ SOURCE_TABLE_FILTER_MAP = {
 
 
 MISMATCH_SQL_FILTERS = {
-    "gross_commission": "(cs.gross_commission_mismatch = TRUE)",
-    "close_date": "(cs.close_date_mismatch = TRUE)",
-    "status": "(cs.status_mismatch = TRUE)",
-    "sale_price": "(cs.sale_price_mismatch = TRUE)",
-    "listing_price": "(cs.listing_price_mismatch = TRUE)",
-    "contract_date": "(cs.contract_date_mismatch = TRUE)",
-    "buyer_name": "(cs.buyer_name_mismatch = TRUE)",
-    "seller_name": "(cs.seller_name_mismatch = TRUE)",
-    "buying_agent_name": "(cs.buying_agent_mismatch = TRUE)",
-    "title_company": "(cs.title_company_mismatch = TRUE)",
+    "gross_commission": "(cs.gross_commission_match = 'mismatch')",
+    "close_date": "(cs.close_date_match = 'mismatch')",
+    "status": "(cs.status_match = 'mismatch')",
+    "sale_price": "(cs.sale_price_match = 'mismatch')",
+    "listing_price": "(cs.listing_price_match = 'mismatch')",
+    "contract_date": "(cs.contract_date_match = 'mismatch')",
+    "buyer_name": "(cs.buyer_name_match = 'mismatch')",
+    "seller_name": "(cs.seller_name_match = 'mismatch')",
+    "buying_agent_name": "(cs.buying_agent_match = 'mismatch')",
+    "title_company": "(cs.title_company_match = 'mismatch')",
 }
 
 
@@ -329,22 +329,22 @@ def build_where_clause(
 
 def get_mismatched_parameters_from_row(row):
     parameter_to_column = {
-        "gross_commission": "gross_commission_mismatch",
-        "close_date": "close_date_mismatch",
-        "status": "status_mismatch",
-        "sale_price": "sale_price_mismatch",
-        "listing_price": "listing_price_mismatch",
-        "contract_date": "contract_date_mismatch",
-        "buyer_name": "buyer_name_mismatch",
-        "seller_name": "seller_name_mismatch",
-        "buying_agent_name": "buying_agent_mismatch",
-        "title_company": "title_company_mismatch",
+        "gross_commission": "gross_commission_match",
+        "close_date": "close_date_match",
+        "status": "status_match",
+        "sale_price": "sale_price_match",
+        "listing_price": "listing_price_match",
+        "contract_date": "contract_date_match",
+        "buyer_name": "buyer_name_match",
+        "seller_name": "seller_name_match",
+        "buying_agent_name": "buying_agent_match",
+        "title_company": "title_company_match",
     }
 
     return [
         parameter
         for parameter, column_name in parameter_to_column.items()
-        if row.get(column_name) is True
+        if row.get(column_name) == "mismatch"
     ]
 
 
@@ -465,16 +465,16 @@ def get_reconciliation_transactions(
             cs.propertyaddress,
             cs.linked_source_tables AS source_table,
             cs.skyslope_stage,
-            cs.gross_commission_mismatch,
-            cs.close_date_mismatch,
-            cs.status_mismatch,
-            cs.sale_price_mismatch,
-            cs.listing_price_mismatch,
-            cs.contract_date_mismatch,
-            cs.buyer_name_mismatch,
-            cs.seller_name_mismatch,
-            cs.buying_agent_mismatch,
-            cs.title_company_mismatch,
+            cs.gross_commission_match,
+            cs.close_date_match,
+            cs.status_match,
+            cs.sale_price_match,
+            cs.listing_price_match,
+            cs.contract_date_match,
+            cs.buyer_name_match,
+            cs.seller_name_match,
+            cs.buying_agent_match,
+            cs.title_company_match,
             cs.review_status,
             cs.review_notes,
             cs.review_updated_by,
