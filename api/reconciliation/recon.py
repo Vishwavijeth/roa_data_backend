@@ -340,14 +340,14 @@ def get_summary_counts(conn):
                     rd.transactionid
             )
             SELECT
-                COUNT(*) AS total_record,
+                (SELECT COUNT(*) FROM grouped_summary) AS total_record,
                 COUNT(*) FILTER (
-                    WHERE LOWER(be_source_table) = 'sale income'
-                ) AS saleincome_record,
+                    WHERE LOWER(rd.be_source_table) = 'sale income' AND rd.saleguid IS NULL
+                ) AS saleincome_no_skyslopefileid,
                 COUNT(*) FILTER (
-                    WHERE LOWER(be_source_table) = 'other income'
-                ) AS otherincome_record
-            FROM grouped_summary
+                    WHERE LOWER(rd.be_source_table) = 'other income' AND rd.saleguid IS NULL
+                ) AS otherincome_no_skyslopefileid
+            FROM reconciliation_data rd
         """)
         return cur.fetchone()
 
@@ -497,8 +497,8 @@ def get_reconciliation_transactions(
     return {
         "summary": {
             "total_record": summary["total_record"],
-            "saleincome_record": summary["saleincome_record"],
-            "otherincome_record": summary["otherincome_record"],
+            "saleincome_no_skyslopefileid": summary["saleincome_no_skyslopefileid"],
+            "otherincome_no_skyslopefileid": summary["otherincome_no_skyslopefileid"],
         },
         "count": total_count,
         "pagination": {
