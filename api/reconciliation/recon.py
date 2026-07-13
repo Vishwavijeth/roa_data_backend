@@ -12,7 +12,30 @@ from decimal import Decimal
 router = APIRouter()
 
 BASE_QUERY = """
-WITH latest_review AS (
+WITH base_reconciliation AS (
+    SELECT
+        rd.transactionid,
+        rd.be_source_table,
+        rd.saleguid,
+        rd.property_address,
+        rd.be_close_date,
+        rd.be_status,
+        rd.be_transaction_specialist,
+        rd.skyslope_reviewer,
+        rd.gross_commission_match,
+        rd.close_date_match,
+        rd.status_match,
+        rd.sale_price_match,
+        rd.listing_price_match,
+        rd.contract_date_match,
+        rd.buyer_name_match,
+        rd.seller_name_match,
+        rd.buying_agent_match,
+        rd.title_company_match
+    FROM reconciliation_data rd
+    WHERE rd.saleguid IS NOT NULL
+),
+latest_review AS (
     SELECT DISTINCT ON (rr.transactionid)
         rr.transactionid::uuid AS transactionid,
         rr.review_status,
@@ -22,89 +45,82 @@ WITH latest_review AS (
     FROM reconciliation_review rr
     ORDER BY rr.transactionid, rr.updated_at DESC
 ),
-saleguid_source_tables AS (
+saleguid_group_flags AS (
     SELECT
-        rd.saleguid,
-        ARRAY_AGG(DISTINCT LOWER(rd.be_source_table)) AS linked_source_tables
-    FROM reconciliation_data rd
-    WHERE rd.saleguid IS NOT NULL
-    GROUP BY rd.saleguid
-),
-grouped_mismatch_flags AS (
-    SELECT
-        rd.saleguid,
-        BOOL_OR(rd.gross_commission_match = 'mismatch') AS gross_commission_mismatch,
-        BOOL_OR(rd.close_date_match = 'mismatch') AS close_date_mismatch,
-        BOOL_OR(rd.status_match = 'mismatch') AS status_mismatch,
-        BOOL_OR(rd.sale_price_match = 'mismatch') AS sale_price_mismatch,
-        BOOL_OR(rd.listing_price_match = 'mismatch') AS listing_price_mismatch,
-        BOOL_OR(rd.contract_date_match = 'mismatch') AS contract_date_mismatch,
-        BOOL_OR(rd.buyer_name_match = 'mismatch') AS buyer_name_mismatch,
-        BOOL_OR(rd.seller_name_match = 'mismatch') AS seller_name_mismatch,
-        BOOL_OR(rd.buying_agent_match = 'mismatch') AS buying_agent_mismatch,
-        BOOL_OR(rd.title_company_match = 'mismatch') AS title_company_mismatch
-    FROM reconciliation_data rd
-    WHERE rd.saleguid IS NOT NULL
-    GROUP BY rd.saleguid
+        br.saleguid,
+        ARRAY_AGG(DISTINCT LOWER(br.be_source_table)) AS linked_source_tables,
+        BOOL_OR(LOWER(br.be_source_table) = 'sale income') AS has_sale_income,
+        BOOL_OR(LOWER(br.be_source_table) = 'other income') AS has_other_income,
+        BOOL_OR(br.gross_commission_match = 'mismatch') AS gross_commission_mismatch,
+        BOOL_OR(br.close_date_match = 'mismatch') AS close_date_mismatch,
+        BOOL_OR(br.status_match = 'mismatch') AS status_mismatch,
+        BOOL_OR(br.sale_price_match = 'mismatch') AS sale_price_mismatch,
+        BOOL_OR(br.listing_price_match = 'mismatch') AS listing_price_mismatch,
+        BOOL_OR(br.contract_date_match = 'mismatch') AS contract_date_mismatch,
+        BOOL_OR(br.buyer_name_match = 'mismatch') AS buyer_name_mismatch,
+        BOOL_OR(br.seller_name_match = 'mismatch') AS seller_name_mismatch,
+        BOOL_OR(br.buying_agent_match = 'mismatch') AS buying_agent_mismatch,
+        BOOL_OR(br.title_company_match = 'mismatch') AS title_company_mismatch
+    FROM base_reconciliation br
+    GROUP BY br.saleguid
 ),
 deduplicated_reconciliation AS (
-    SELECT DISTINCT ON (rd.saleguid)
-        rd.transactionid,
-        rd.be_source_table,
-        rd.saleguid,
-        rd.property_address,
-        rd.be_close_date,
-        rd.be_status,
-        rd.be_transaction_specialist,
-        rd.skyslope_reviewer
-    FROM reconciliation_data rd
-    WHERE rd.saleguid IS NOT NULL
+    SELECT DISTINCT ON (br.saleguid)
+        br.transactionid,
+        br.be_source_table,
+        br.saleguid,
+        br.property_address,
+        br.be_close_date,
+        br.be_status,
+        br.be_transaction_specialist,
+        br.skyslope_reviewer
+    FROM base_reconciliation br
     ORDER BY
-        rd.saleguid,
+        br.saleguid,
         CASE
-            WHEN LOWER(rd.be_source_table) = 'other income' THEN 0
-            WHEN LOWER(rd.be_source_table) = 'sale income' THEN 1
+            WHEN LOWER(br.be_source_table) = 'other income' THEN 0
+            WHEN LOWER(br.be_source_table) = 'sale income' THEN 1
             ELSE 2
         END,
-        rd.transactionid
+        br.transactionid
 )
 SELECT
-    rd.transactionid,
-    rd.be_source_table AS source_table,
-    rd.saleguid,
-    rd.property_address AS propertyaddress,
-    rd.be_close_date,
-    rd.be_status,
-    rd.be_transaction_specialist,
-    rd.skyslope_reviewer,
-    gmf.gross_commission_mismatch,
-    gmf.close_date_mismatch,
-    gmf.status_mismatch,
-    gmf.sale_price_mismatch,
-    gmf.listing_price_mismatch,
-    gmf.contract_date_mismatch,
-    gmf.buyer_name_mismatch,
-    gmf.seller_name_mismatch,
-    gmf.buying_agent_mismatch,
-    gmf.title_company_mismatch,
+    dr.transactionid,
+    dr.be_source_table AS source_table,
+    dr.saleguid,
+    dr.property_address AS propertyaddress,
+    dr.be_close_date,
+    dr.be_status,
+    dr.be_transaction_specialist,
+    dr.skyslope_reviewer,
+    sgf.linked_source_tables,
+    sgf.has_sale_income,
+    sgf.has_other_income,
+    sgf.gross_commission_mismatch,
+    sgf.close_date_mismatch,
+    sgf.status_mismatch,
+    sgf.sale_price_mismatch,
+    sgf.listing_price_mismatch,
+    sgf.contract_date_mismatch,
+    sgf.buyer_name_mismatch,
+    sgf.seller_name_mismatch,
+    sgf.buying_agent_mismatch,
+    sgf.title_company_mismatch,
     st.name AS skyslope_stage,
     lr.review_status,
     lr.notes AS review_notes,
     lr.updated_by AS review_updated_by,
     lr.updated_at AS review_updated_at,
-    s.url AS skyslope_url,
-    sst.linked_source_tables
-FROM deduplicated_reconciliation rd
+    s.url AS skyslope_url
+FROM deduplicated_reconciliation dr
+JOIN saleguid_group_flags sgf
+    ON sgf.saleguid = dr.saleguid
 LEFT JOIN sale s
-    ON s.saleguid = rd.saleguid
+    ON s.saleguid = dr.saleguid
 LEFT JOIN stage st
     ON st.stageid = s.stageid
 LEFT JOIN latest_review lr
-    ON lr.transactionid = rd.transactionid
-LEFT JOIN saleguid_source_tables sst
-    ON sst.saleguid = rd.saleguid
-LEFT JOIN grouped_mismatch_flags gmf
-    ON gmf.saleguid = rd.saleguid
+    ON lr.transactionid = dr.transactionid
 """
 
 
@@ -208,14 +224,25 @@ def build_where_clause(
         params.extend([search_term, search_term])
 
     if parsed_source_tables:
-        conditions.append("""
-            EXISTS (
-                SELECT 1
-                FROM unnest(cs.source_table) AS st
-                WHERE LOWER(st) = ANY(%s)
-            )
-        """)
-        params.append(parsed_source_tables)
+        source_table_conditions = []
+
+        if "sale income" in parsed_source_tables:
+            source_table_conditions.append("""
+                (
+                    cs.has_sale_income = TRUE
+                    AND cs.has_other_income = FALSE
+                )
+            """)
+
+        if "other income" in parsed_source_tables:
+            source_table_conditions.append("""
+                (
+                    cs.has_other_income = TRUE
+                )
+            """)
+
+        if source_table_conditions:
+            conditions.append(f"({' OR '.join(source_table_conditions)})")
 
     if from_close_date:
         conditions.append("cs.be_close_date >= CAST(%s AS DATE)")
@@ -436,7 +463,7 @@ def get_reconciliation_transactions(
             cs.saleguid,
             cs.skyslope_url,
             cs.propertyaddress,
-            COALESCE(cs.linked_source_tables, ARRAY[LOWER(cs.source_table)]) AS source_table,
+            cs.linked_source_tables AS source_table,
             cs.skyslope_stage,
             cs.gross_commission_mismatch,
             cs.close_date_mismatch,
