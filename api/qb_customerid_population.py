@@ -1,13 +1,11 @@
 from typing import Optional, Dict, Any, List, Tuple
 import logging
 import time
-
 import requests
+from db import get_db
 from fastapi import APIRouter, Depends, Query, HTTPException
 from psycopg2.extras import RealDictCursor, execute_values
-
-from db import get_db
-from services.quickbooks import get_valid_quickbooks_connection, split_emails
+from services.account_hold_helper import get_valid_quickbooks_connection, split_emails
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
