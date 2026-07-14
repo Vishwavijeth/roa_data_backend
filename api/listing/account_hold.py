@@ -1,10 +1,13 @@
 from decimal import Decimal
 from datetime import date, datetime
 from uuid import UUID
+
 from fastapi import Depends, APIRouter, HTTPException
 from psycopg2.extras import RealDictCursor
+
 from db import get_db
 from services.account_hold_helper import fetch_ar_balance
+
 
 router = APIRouter()
 
@@ -20,6 +23,9 @@ def serialize_value(value):
 
 
 def build_transaction_flags(row):
+    if row.get("saleguid") is None:
+        return ["no_skyslope_file_id"]
+
     transaction_flags = []
 
     match_mapping = {
@@ -27,12 +33,6 @@ def build_transaction_flags(row):
         "close_date_match": "close_date",
         "status_match": "status",
         "sale_price_match": "sale_price",
-        "listing_price_match": "listing_price",
-        "contract_date_match": "contract_date",
-        "buyer_name_match": "buyer_name",
-        "seller_name_match": "seller_name",
-        "buying_agent_match": "buying_agent",
-        "title_company_match": "title_company",
     }
 
     for db_field, response_flag in match_mapping.items():
@@ -41,6 +41,44 @@ def build_transaction_flags(row):
             transaction_flags.append(response_flag)
 
     return transaction_flags
+
+
+def build_mismatch_details(row, transaction_flags):
+    if row.get("saleguid") is None:
+        return {}
+
+    mismatch_field_map = {
+        "gross_commission": {
+            "be_key": "be_gross_commission",
+            "skyslope_key": "skyslope_gross_commission",
+        },
+        "close_date": {
+            "be_key": "be_close_date_value",
+            "skyslope_key": "skyslope_close_date_value",
+        },
+        "status": {
+            "be_key": "be_status_value",
+            "skyslope_key": "skyslope_status_value",
+        },
+        "sale_price": {
+            "be_key": "be_sale_price",
+            "skyslope_key": "skyslope_sale_price",
+        },
+    }
+
+    mismatch_details = {}
+
+    for flag in transaction_flags:
+        config = mismatch_field_map.get(flag)
+        if not config:
+            continue
+
+        mismatch_details[flag] = {
+            "be": serialize_value(row.get(config["be_key"])),
+            "skyslope": serialize_value(row.get(config["skyslope_key"])),
+        }
+
+    return mismatch_details
 
 
 @router.get("/account-hold")
@@ -89,17 +127,29 @@ async def get_account_hold_reconciliation(db=Depends(get_db)):
                 mt.primary_emailaddress,
                 mt.transaction_identifier_transactionid,
                 mt.property_address,
+
                 rd.be_source_table,
+                rd.saleguid,
+                rd.be_transaction_specialist,
+                rd.skyslope_reviewer,
+
+                rd.be_gross_commission,
+                rd.skyslope_gross_commission,
                 rd.gross_commission_match,
+
+                rd.be_close_date_value,
+                rd.skyslope_close_date_value,
                 rd.close_date_match,
+
+                rd.be_status_value,
+                rd.skyslope_status_value,
                 rd.status_match,
+
+                rd.be_sale_price,
+                rd.skyslope_sale_price,
                 rd.sale_price_match,
-                rd.listing_price_match,
-                rd.contract_date_match,
-                rd.buyer_name_match,
-                rd.seller_name_match,
-                rd.buying_agent_match,
-                rd.title_company_match
+
+                rd.evaluated_at
             FROM matched_transactions mt
             LEFT JOIN reconciliation_data rd
                 ON rd.transactionid = mt.transaction_identifier_transactionid
@@ -109,17 +159,29 @@ async def get_account_hold_reconciliation(db=Depends(get_db)):
             primary_emailaddress,
             transaction_identifier_transactionid,
             property_address,
+
             be_source_table,
+            saleguid,
+            be_transaction_specialist,
+            skyslope_reviewer,
+
+            be_gross_commission,
+            skyslope_gross_commission,
             gross_commission_match,
+
+            be_close_date_value,
+            skyslope_close_date_value,
             close_date_match,
+
+            be_status_value,
+            skyslope_status_value,
             status_match,
+
+            be_sale_price,
+            skyslope_sale_price,
             sale_price_match,
-            listing_price_match,
-            contract_date_match,
-            buyer_name_match,
-            seller_name_match,
-            buying_agent_match,
-            title_company_match
+
+            evaluated_at
         FROM enriched_transactions
         ORDER BY display_name, property_address
     """
@@ -139,6 +201,8 @@ async def get_account_hold_reconciliation(db=Depends(get_db)):
         if not transaction_flags:
             continue
 
+        mismatch_details = build_mismatch_details(row, transaction_flags)
+
         display_name = row["display_name"]
         primary_emailaddress = row["primary_emailaddress"]
         agent_key = f"{display_name}|{primary_emailaddress}"
@@ -154,7 +218,12 @@ async def get_account_hold_reconciliation(db=Depends(get_db)):
             "transactionid": serialize_value(row["transaction_identifier_transactionid"]),
             "property_address": row["property_address"],
             "source_table": row["be_source_table"],
-            "transaction_flags": transaction_flags
+            "saleguid": serialize_value(row["saleguid"]),
+            "be_transaction_specialist": row["be_transaction_specialist"],
+            "skyslope_reviewer": row["skyslope_reviewer"],
+            "evaluated_at": serialize_value(row["evaluated_at"]),
+            "transaction_flags": transaction_flags,
+            "mismatch_details": mismatch_details
         })
 
     agents = list(grouped_agents.values())

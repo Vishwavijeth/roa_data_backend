@@ -2,14 +2,16 @@ from typing import Optional, List
 from fastapi import APIRouter, Query, Depends, HTTPException, Response
 from psycopg2.extras import RealDictCursor
 from db import get_db
-from openpyxl.styles import Font, Alignment
+from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 import pandas as pd
 import io
 import datetime
 from decimal import Decimal
 
+
 router = APIRouter()
+
 
 BASE_QUERY = """
 WITH base_reconciliation AS (
@@ -33,7 +35,6 @@ WITH base_reconciliation AS (
         rd.buying_agent_match,
         rd.title_company_match
     FROM reconciliation_data rd
-    WHERE rd.saleguid IS NOT NULL
 ),
 latest_review AS (
     SELECT DISTINCT ON (rr.transactionid)
@@ -45,13 +46,23 @@ latest_review AS (
     FROM reconciliation_review rr
     ORDER BY rr.transactionid, rr.updated_at DESC
 ),
+non_null_base AS (
+    SELECT *
+    FROM base_reconciliation
+    WHERE saleguid IS NOT NULL
+),
+null_base AS (
+    SELECT *
+    FROM base_reconciliation
+    WHERE saleguid IS NULL
+),
 saleguid_group_flags AS (
     SELECT
         br.saleguid,
         ARRAY_AGG(DISTINCT LOWER(br.be_source_table)) AS linked_source_tables,
         BOOL_OR(LOWER(br.be_source_table) = 'sale income') AS has_sale_income,
         BOOL_OR(LOWER(br.be_source_table) = 'other income') AS has_other_income
-    FROM base_reconciliation br
+    FROM non_null_base br
     GROUP BY br.saleguid
 ),
 deduplicated_reconciliation AS (
@@ -74,7 +85,7 @@ deduplicated_reconciliation AS (
         br.seller_name_match,
         br.buying_agent_match,
         br.title_company_match
-    FROM base_reconciliation br
+    FROM non_null_base br
     ORDER BY
         br.saleguid,
         CASE
@@ -83,44 +94,99 @@ deduplicated_reconciliation AS (
             ELSE 2
         END,
         br.transactionid
+),
+grouped_rows AS (
+    SELECT
+        dr.transactionid,
+        dr.be_source_table AS source_table,
+        dr.saleguid,
+        dr.property_address AS propertyaddress,
+        dr.be_close_date,
+        dr.be_status,
+        dr.be_transaction_specialist,
+        dr.skyslope_reviewer,
+        dr.gross_commission_match,
+        dr.close_date_match,
+        dr.status_match,
+        dr.sale_price_match,
+        dr.listing_price_match,
+        dr.contract_date_match,
+        dr.buyer_name_match,
+        dr.seller_name_match,
+        dr.buying_agent_match,
+        dr.title_company_match,
+        sgf.linked_source_tables,
+        sgf.has_sale_income,
+        sgf.has_other_income
+    FROM deduplicated_reconciliation dr
+    JOIN saleguid_group_flags sgf
+        ON sgf.saleguid = dr.saleguid
+),
+null_saleguid_rows AS (
+    SELECT
+        nb.transactionid,
+        nb.be_source_table AS source_table,
+        nb.saleguid,
+        nb.property_address AS propertyaddress,
+        nb.be_close_date,
+        nb.be_status,
+        nb.be_transaction_specialist,
+        nb.skyslope_reviewer,
+        nb.gross_commission_match,
+        nb.close_date_match,
+        nb.status_match,
+        nb.sale_price_match,
+        nb.listing_price_match,
+        nb.contract_date_match,
+        nb.buyer_name_match,
+        nb.seller_name_match,
+        nb.buying_agent_match,
+        nb.title_company_match,
+        ARRAY[LOWER(nb.be_source_table)] AS linked_source_tables,
+        (LOWER(nb.be_source_table) = 'sale income') AS has_sale_income,
+        (LOWER(nb.be_source_table) = 'other income') AS has_other_income
+    FROM null_base nb
+),
+combined_source AS (
+    SELECT * FROM grouped_rows
+    UNION ALL
+    SELECT * FROM null_saleguid_rows
 )
 SELECT
-    dr.transactionid,
-    dr.be_source_table AS source_table,
-    dr.saleguid,
-    dr.property_address AS propertyaddress,
-    dr.be_close_date,
-    dr.be_status,
-    dr.be_transaction_specialist,
-    dr.skyslope_reviewer,
-    dr.gross_commission_match,
-    dr.close_date_match,
-    dr.status_match,
-    dr.sale_price_match,
-    dr.listing_price_match,
-    dr.contract_date_match,
-    dr.buyer_name_match,
-    dr.seller_name_match,
-    dr.buying_agent_match,
-    dr.title_company_match,
-    sgf.linked_source_tables,
-    sgf.has_sale_income,
-    sgf.has_other_income,
+    cs.transactionid,
+    cs.source_table,
+    cs.saleguid,
+    cs.propertyaddress,
+    cs.be_close_date,
+    cs.be_status,
+    cs.be_transaction_specialist,
+    cs.skyslope_reviewer,
+    cs.gross_commission_match,
+    cs.close_date_match,
+    cs.status_match,
+    cs.sale_price_match,
+    cs.listing_price_match,
+    cs.contract_date_match,
+    cs.buyer_name_match,
+    cs.seller_name_match,
+    cs.buying_agent_match,
+    cs.title_company_match,
+    cs.linked_source_tables,
+    cs.has_sale_income,
+    cs.has_other_income,
     st.name AS skyslope_stage,
     lr.review_status,
     lr.notes AS review_notes,
     lr.updated_by AS review_updated_by,
     lr.updated_at AS review_updated_at,
     s.url AS skyslope_url
-FROM deduplicated_reconciliation dr
-JOIN saleguid_group_flags sgf
-    ON sgf.saleguid = dr.saleguid
+FROM combined_source cs
 LEFT JOIN sale s
-    ON s.saleguid = dr.saleguid
+    ON s.saleguid = cs.saleguid
 LEFT JOIN stage st
     ON st.stageid = s.stageid
 LEFT JOIN latest_review lr
-    ON lr.transactionid = dr.transactionid
+    ON lr.transactionid = cs.transactionid
 """
 
 
@@ -209,6 +275,8 @@ def build_where_clause(
     review_status: Optional[List[str]] = None,
     specialist: Optional[List[str]] = None,
     reviewer: Optional[List[str]] = None,
+    saleincome_no_skyslopefileid: Optional[bool] = None,
+    otherincome_no_skyslopefileid: Optional[bool] = None,
 ):
     conditions = []
     params = []
@@ -323,6 +391,27 @@ def build_where_clause(
         if active_filters:
             conditions.append(f"({' OR '.join(active_filters)})")
 
+    no_skyslope_conditions = []
+
+    if saleincome_no_skyslopefileid is True:
+        no_skyslope_conditions.append("""
+            (
+                cs.saleguid IS NULL
+                AND LOWER(cs.source_table) = 'sale income'
+            )
+        """)
+
+    if otherincome_no_skyslopefileid is True:
+        no_skyslope_conditions.append("""
+            (
+                cs.saleguid IS NULL
+                AND LOWER(cs.source_table) = 'other income'
+            )
+        """)
+
+    if no_skyslope_conditions:
+        conditions.append(f"({' OR '.join(no_skyslope_conditions)})")
+
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
     return where_clause, params
 
@@ -367,7 +456,11 @@ def get_summary_counts(conn):
                     rd.transactionid
             )
             SELECT
-                (SELECT COUNT(*) FROM grouped_summary) AS total_record,
+                (
+                    (SELECT COUNT(*) FROM grouped_summary)
+                    +
+                    (SELECT COUNT(*) FROM reconciliation_data rd2 WHERE rd2.saleguid IS NULL)
+                ) AS total_record,
                 COUNT(*) FILTER (
                     WHERE LOWER(rd.be_source_table) = 'sale income' AND rd.saleguid IS NULL
                 ) AS saleincome_no_skyslopefileid,
@@ -383,8 +476,7 @@ def get_status_filters(conn):
     query = """
         SELECT DISTINCT be_status AS status
         FROM reconciliation_data
-        WHERE saleguid IS NOT NULL
-          AND be_status IS NOT NULL
+        WHERE be_status IS NOT NULL
           AND TRIM(be_status) <> ''
         ORDER BY status
     """
@@ -400,7 +492,6 @@ def get_specialist_filters(conn):
         SELECT DISTINCT
             COALESCE(NULLIF(TRIM(be_transaction_specialist), ''), 'unassigned') AS specialist
         FROM reconciliation_data
-        WHERE saleguid IS NOT NULL
         ORDER BY specialist
     """
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -415,7 +506,6 @@ def get_reviewer_filters(conn):
         SELECT DISTINCT
             COALESCE(NULLIF(TRIM(skyslope_reviewer), ''), 'unassigned') AS reviewer
         FROM reconciliation_data
-        WHERE saleguid IS NOT NULL
         ORDER BY reviewer
     """
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -439,6 +529,8 @@ def get_reconciliation_transactions(
     review_status: Optional[List[str]] = Query(None),
     specialist: Optional[List[str]] = Query(None),
     reviewer: Optional[List[str]] = Query(None),
+    saleincome_no_skyslopefileid: Optional[bool] = Query(default=None),
+    otherincome_no_skyslopefileid: Optional[bool] = Query(default=None),
     conn=Depends(get_db),
 ):
     parsed_mismatch_params = parse_mismatch_params(mismatch_parameter)
@@ -455,6 +547,8 @@ def get_reconciliation_transactions(
         review_status=review_status,
         specialist=specialist,
         reviewer=reviewer,
+        saleincome_no_skyslopefileid=saleincome_no_skyslopefileid,
+        otherincome_no_skyslopefileid=otherincome_no_skyslopefileid,
     )
 
     data_query = f"""
@@ -463,7 +557,8 @@ def get_reconciliation_transactions(
             cs.saleguid,
             cs.skyslope_url,
             cs.propertyaddress,
-            cs.linked_source_tables AS source_table,
+            cs.source_table,
+            cs.linked_source_tables,
             cs.skyslope_stage,
             cs.gross_commission_match,
             cs.close_date_match,
@@ -483,7 +578,10 @@ def get_reconciliation_transactions(
             {BASE_QUERY}
         ) cs
         {where_clause}
-        ORDER BY cs.transactionid
+        ORDER BY
+            CASE WHEN cs.saleguid IS NULL THEN 1 ELSE 0 END,
+            cs.saleguid NULLS LAST,
+            cs.transactionid
         LIMIT %s OFFSET %s;
     """
 
@@ -501,10 +599,20 @@ def get_reconciliation_transactions(
 
     results = []
     for row in rows:
-        source_table_value = [
-            SOURCE_TABLE_DISPLAY_NAMES.get((value or "").lower(), value)
-            for value in (row.get("source_table") or [])
-        ]
+        if row.get("saleguid") is None:
+            source_table_value = []
+            if row.get("source_table"):
+                source_table_value = [
+                    SOURCE_TABLE_DISPLAY_NAMES.get(
+                        (row.get("source_table") or "").lower(),
+                        row.get("source_table")
+                    )
+                ]
+        else:
+            source_table_value = [
+                SOURCE_TABLE_DISPLAY_NAMES.get((value or "").lower(), value)
+                for value in (row.get("linked_source_tables") or [])
+            ]
 
         results.append({
             "transactionid": str(row["transactionid"]) if row.get("transactionid") else None,
@@ -514,6 +622,7 @@ def get_reconciliation_transactions(
             "source_table": source_table_value,
             "skyslope_stage": row.get("skyslope_stage"),
             "mismatched_parameters": get_mismatched_parameters_from_row(row),
+            "is_unlinked": row.get("saleguid") is None,
             "review": {
                 "review_status": row.get("review_status"),
                 "notes": row.get("review_notes"),
@@ -544,6 +653,7 @@ def get_reconciliation_transactions(
         "data": results,
     }
 
+
 DETAIL_QUERY = """
 SELECT
     rd.transactionid,
@@ -573,6 +683,10 @@ SELECT
     rd.be_listing_price,
     rd.skyslope_listing_price,
     rd.listing_price_match,
+
+    rd.be_contract_date,
+    rd.skyslope_contract_date,
+    rd.contract_date_match,
 
     rd.be_buyer_name,
     rd.skyslope_buyer_name,
@@ -638,6 +752,11 @@ def get_reconciliation_transaction_details(
             "skyslope_value": serialize_numeric(row.get("skyslope_listing_price")),
             "match_result": row.get("listing_price_match"),
         },
+        "contract_date": {
+            "be_value": serialize_date(row.get("be_contract_date")),
+            "skyslope_value": serialize_date(row.get("skyslope_contract_date")),
+            "match_result": row.get("contract_date_match"),
+        },
         "buyer_name": {
             "be_value": row.get("be_buyer_name"),
             "skyslope_value": row.get("skyslope_buyer_name"),
@@ -669,6 +788,7 @@ def get_reconciliation_transaction_details(
         "skyslope_status": row.get("skyslope_status"),
         "parameters": detailed_parameters,
     }
+
 
 @router.get("/recon-data/download")
 def download_recon_data(conn=Depends(get_db)):
