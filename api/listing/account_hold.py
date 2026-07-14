@@ -8,7 +8,6 @@ from psycopg2.extras import RealDictCursor
 from db import get_db
 from services.account_hold_helper import fetch_ar_balance
 
-
 router = APIRouter()
 
 
@@ -84,106 +83,152 @@ def build_mismatch_details(row, transaction_flags):
 @router.get("/account-hold")
 async def get_account_hold_reconciliation(db=Depends(get_db)):
     query = """
-        WITH be_transactions AS (
+        WITH target_agents AS (
             SELECT
                 u.display_name,
                 u.primary_emailaddress,
+                LOWER(TRIM(u.display_name)) AS normalized_display_name
+            FROM brokerage_engine_users u
+            WHERE u.agenttags = 'AccountHold'
+        ),
+
+        unified_transactions AS (
+            SELECT
                 be.transaction_identifier_transactionid,
-                be.property_address
-            FROM brokerage_engine_users u
-            JOIN brokerage_engine be
-                ON lower(trim(u.primary_emailaddress)) = ANY(
-                    string_to_array(
-                        regexp_replace(lower(coalesce(be.buying_agent_email, '')), '\s+', '', 'g'),
-                        ','
-                    )
-                )
-            WHERE u.agenttags = 'AccountHold'
-        ),
-        oi_transactions AS (
-            SELECT
-                u.display_name,
-                u.primary_emailaddress,
-                oi.transaction_identifier_transactionid,
-                oi.property_address
-            FROM brokerage_engine_users u
-            JOIN otherincome_transactions oi
-                ON lower(trim(u.display_name)) = ANY(
-                    string_to_array(
-                        regexp_replace(lower(coalesce(oi.agents, '')), '\s*,\s*', ',', 'g'),
-                        ','
-                    )
-                )
-            WHERE u.agenttags = 'AccountHold'
-        ),
-        matched_transactions AS (
-            SELECT * FROM be_transactions
+                be.property_address,
+                be.buying_agent_name AS raw_agent_names,
+                'brokerage_engine' AS source_name
+            FROM brokerage_engine be
+
             UNION ALL
-            SELECT * FROM oi_transactions
+
+            SELECT
+                oi.transaction_identifier_transactionid,
+                oi.property_address,
+                oi.agents AS raw_agent_names,
+                'otherincome_transactions' AS source_name
+            FROM otherincome_transactions oi
         ),
+
+        split_transaction_agents AS (
+            SELECT
+                ut.transaction_identifier_transactionid,
+                ut.property_address,
+                ut.source_name,
+                LOWER(TRIM(split_name)) AS normalized_agent_name
+            FROM unified_transactions ut
+            CROSS JOIN LATERAL regexp_split_to_table(
+                COALESCE(ut.raw_agent_names, ''),
+                ','
+            ) AS split_name
+            WHERE NULLIF(TRIM(split_name), '') IS NOT NULL
+        ),
+
+        matched_transactions AS (
+            SELECT DISTINCT ON (
+                ta.display_name,
+                ta.primary_emailaddress,
+                sta.transaction_identifier_transactionid,
+                sta.source_name
+            )
+                ta.display_name,
+                ta.primary_emailaddress,
+                sta.transaction_identifier_transactionid,
+                sta.property_address,
+                sta.source_name
+            FROM target_agents ta
+            JOIN split_transaction_agents sta
+              ON sta.normalized_agent_name = ta.normalized_display_name
+            ORDER BY
+                ta.display_name,
+                ta.primary_emailaddress,
+                sta.transaction_identifier_transactionid,
+                sta.source_name,
+                sta.property_address
+        ),
+
+        latest_reconciliation_data AS (
+            SELECT DISTINCT ON (rd.transactionid)
+                rd.transactionid,
+                rd.be_source_table,
+                rd.saleguid,
+                rd.be_transaction_specialist,
+                rd.skyslope_reviewer,
+                rd.be_gross_commission,
+                rd.skyslope_gross_commission,
+                rd.gross_commission_match,
+                rd.be_close_date_value,
+                rd.skyslope_close_date_value,
+                rd.close_date_match,
+                rd.be_status_value,
+                rd.skyslope_status_value,
+                rd.status_match,
+                rd.be_sale_price,
+                rd.skyslope_sale_price,
+                rd.sale_price_match
+            FROM reconciliation_data rd
+            ORDER BY rd.transactionid, rd.evaluated_at DESC NULLS LAST
+        ),
+
         enriched_transactions AS (
             SELECT
                 mt.display_name,
                 mt.primary_emailaddress,
                 mt.transaction_identifier_transactionid,
                 mt.property_address,
-
-                rd.be_source_table,
-                rd.saleguid,
-                rd.be_transaction_specialist,
-                rd.skyslope_reviewer,
-
-                rd.be_gross_commission,
-                rd.skyslope_gross_commission,
-                rd.gross_commission_match,
-
-                rd.be_close_date_value,
-                rd.skyslope_close_date_value,
-                rd.close_date_match,
-
-                rd.be_status_value,
-                rd.skyslope_status_value,
-                rd.status_match,
-
-                rd.be_sale_price,
-                rd.skyslope_sale_price,
-                rd.sale_price_match,
-
-                rd.evaluated_at
+                lrd.be_source_table,
+                lrd.saleguid,
+                lrd.be_transaction_specialist,
+                lrd.skyslope_reviewer,
+                lrd.be_gross_commission,
+                lrd.skyslope_gross_commission,
+                lrd.gross_commission_match,
+                lrd.be_close_date_value,
+                lrd.skyslope_close_date_value,
+                lrd.close_date_match,
+                lrd.be_status_value,
+                lrd.skyslope_status_value,
+                lrd.status_match,
+                lrd.be_sale_price,
+                lrd.skyslope_sale_price,
+                lrd.sale_price_match
             FROM matched_transactions mt
-            LEFT JOIN reconciliation_data rd
-                ON rd.transactionid = mt.transaction_identifier_transactionid
+            LEFT JOIN latest_reconciliation_data lrd
+              ON lrd.transactionid = mt.transaction_identifier_transactionid
         )
+
         SELECT
             display_name,
             primary_emailaddress,
             transaction_identifier_transactionid,
             property_address,
-
             be_source_table,
             saleguid,
             be_transaction_specialist,
             skyslope_reviewer,
-
             be_gross_commission,
             skyslope_gross_commission,
             gross_commission_match,
-
             be_close_date_value,
             skyslope_close_date_value,
             close_date_match,
-
             be_status_value,
             skyslope_status_value,
             status_match,
-
             be_sale_price,
             skyslope_sale_price,
-            sale_price_match,
-
-            evaluated_at
+            sale_price_match
         FROM enriched_transactions
-        ORDER BY display_name, property_address
+        ORDER BY display_name, property_address, transaction_identifier_transactionid
+    """
+
+    agents_query = """
+        SELECT
+            display_name,
+            primary_emailaddress
+        FROM brokerage_engine_users
+        WHERE agenttags = 'AccountHold'
+        ORDER BY display_name
     """
 
     try:
@@ -193,19 +238,32 @@ async def get_account_hold_reconciliation(db=Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
 
+    try:
+        with db.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(agents_query)
+            all_account_hold_agents = cur.fetchall()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Agent query failed: {str(e)}")
+
     grouped_agents = {}
 
+    for agent in all_account_hold_agents:
+        agent_key = f"{agent['display_name']}|{agent['primary_emailaddress']}"
+        grouped_agents[agent_key] = {
+            "display_name": agent["display_name"],
+            "primary_emailaddress": agent["primary_emailaddress"],
+            "transactions": []
+        }
+
+    seen_transactions = set()
+
     for row in rows:
-        transaction_flags = build_transaction_flags(row)
-
-        if not transaction_flags:
-            continue
-
-        mismatch_details = build_mismatch_details(row, transaction_flags)
-
         display_name = row["display_name"]
         primary_emailaddress = row["primary_emailaddress"]
+        transaction_id = serialize_value(row["transaction_identifier_transactionid"])
+
         agent_key = f"{display_name}|{primary_emailaddress}"
+        seen_key = (agent_key, transaction_id)
 
         if agent_key not in grouped_agents:
             grouped_agents[agent_key] = {
@@ -214,17 +272,23 @@ async def get_account_hold_reconciliation(db=Depends(get_db)):
                 "transactions": []
             }
 
+        if seen_key in seen_transactions:
+            continue
+
+        transaction_flags = build_transaction_flags(row)
+        mismatch_details = build_mismatch_details(row, transaction_flags)
+
         grouped_agents[agent_key]["transactions"].append({
-            "transactionid": serialize_value(row["transaction_identifier_transactionid"]),
+            "transactionid": transaction_id,
             "property_address": row["property_address"],
             "source_table": row["be_source_table"],
             "saleguid": serialize_value(row["saleguid"]),
             "be_transaction_specialist": row["be_transaction_specialist"],
             "skyslope_reviewer": row["skyslope_reviewer"],
-            "evaluated_at": serialize_value(row["evaluated_at"]),
             "transaction_flags": transaction_flags,
             "mismatch_details": mismatch_details
         })
+        seen_transactions.add(seen_key)
 
     agents = list(grouped_agents.values())
 
