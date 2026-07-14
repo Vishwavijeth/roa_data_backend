@@ -43,7 +43,7 @@ def build_transaction_flags(row):
     return transaction_flags
 
 
-@router.get("/account-hold-reconciliation")
+@router.get("/account-hold")
 async def get_account_hold_reconciliation(db=Depends(get_db)):
     query = """
         WITH be_transactions AS (
