@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse
 from datetime import datetime, timezone, timedelta
 from db import get_db
-from services.quickbooks import (
+from services.account_hold_helper import (
     build_frontend_redirect,
     build_quickbooks_auth_url,
     exchange_code_for_tokens,
@@ -14,7 +14,7 @@ from services.quickbooks import (
     get_latest_quickbooks_connection
 )
 
-router = APIRouter(tags=["quickbooks-auth"])
+router = APIRouter()
 
 
 @router.get("/auth/quickbooks/login")

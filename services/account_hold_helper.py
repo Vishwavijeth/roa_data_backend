@@ -10,6 +10,7 @@ import httpx
 from fastapi import HTTPException
 from psycopg2.extras import RealDictCursor
 
+
 QB_CLIENT_ID = os.getenv("QB_CLIENT_ID")
 QB_CLIENT_SECRET = os.getenv("QB_CLIENT_SECRET")
 QB_REDIRECT_URI = os.getenv("QB_REDIRECT_URI")
@@ -402,7 +403,7 @@ async def fetch_qb_invoices_by_customer_id(
                         "doc_number": invoice.get("DocNumber"),
                         "txn_date": invoice.get("TxnDate"),
                         "due_date": invoice.get("DueDate"),
-                        "total_amt": invoice.get("TotalAmt"),
+                        "total_amt": float(invoice.get("TotalAmt") or 0),
                         "balance": balance,
                         "customer_ref": invoice.get("CustomerRef"),
                     })
@@ -426,6 +427,42 @@ async def fetch_qb_invoices_by_customer_id(
                 "open_invoices": [],
                 "error": str(exc),
             }
+
+
+def summarize_customer_invoice(invoice_data: Dict[str, Any]) -> Dict[str, Any]:
+    if not invoice_data:
+        return {
+            "invoice_count": 0,
+            "due_date": None,
+            "total_amt": None,
+            "balance": None,
+            "open_invoices": [],
+            "error": None,
+        }
+
+    open_invoices = invoice_data.get("open_invoices") or []
+    open_balance = invoice_data.get("open_balance")
+    error = invoice_data.get("error")
+
+    latest_due_invoice = None
+    sortable_invoices = [inv for inv in open_invoices if inv.get("due_date")]
+    if sortable_invoices:
+        latest_due_invoice = sorted(
+            sortable_invoices,
+            key=lambda inv: inv.get("due_date"),
+            reverse=True,
+        )[0]
+    elif open_invoices:
+        latest_due_invoice = open_invoices[0]
+
+    return {
+        "invoice_count": invoice_data.get("invoice_count", 0),
+        "due_date": latest_due_invoice.get("due_date") if latest_due_invoice else None,
+        "total_amt": latest_due_invoice.get("total_amt") if latest_due_invoice else None,
+        "balance": open_balance,
+        "open_invoices": open_invoices,
+        "error": error,
+    }
 
 
 async def fetch_ar_balance(rows: List[Dict[str, Any]], conn) -> List[Dict[str, Any]]:
@@ -468,9 +505,9 @@ async def fetch_ar_balance(rows: List[Dict[str, Any]], conn) -> List[Dict[str, A
                 customer_invoice_map[customer_id] = {
                     "customer_id": customer_id,
                     "found": False,
-                    "due_date": None,
-                    "total_amt": None,
-                    "balance": None,
+                    "invoice_count": 0,
+                    "open_balance": None,
+                    "open_invoices": [],
                     "error": str(result),
                 }
             else:
@@ -489,9 +526,13 @@ async def fetch_ar_balance(rows: List[Dict[str, Any]], conn) -> List[Dict[str, A
             customer_id = email_to_customerid.get(email.lower())
             if not customer_id:
                 customers_by_email[email] = {
+                    "customer_id": None,
+                    "invoice_count": 0,
                     "due_date": None,
                     "total_amt": None,
                     "balance": None,
+                    "open_invoices": [],
+                    "error": None,
                 }
                 continue
 
@@ -500,20 +541,30 @@ async def fetch_ar_balance(rows: List[Dict[str, Any]], conn) -> List[Dict[str, A
 
             if not invoice_data:
                 customers_by_email[email] = {
+                    "customer_id": customer_id,
+                    "invoice_count": 0,
                     "due_date": None,
                     "total_amt": None,
                     "balance": None,
+                    "open_invoices": [],
+                    "error": None,
                 }
                 continue
 
+            summary = summarize_customer_invoice(invoice_data)
+
             customers_by_email[email] = {
-                "due_date": invoice_data.get("due_date"),
-                "total_amt": invoice_data.get("total_amt"),
-                "balance": invoice_data.get("balance"),
+                "customer_id": customer_id,
+                "invoice_count": summary["invoice_count"],
+                "due_date": summary["due_date"],
+                "total_amt": summary["total_amt"],
+                "balance": summary["balance"],
+                "open_invoices": summary["open_invoices"],
+                "error": summary["error"],
             }
 
-            if invoice_data.get("balance") is not None:
-                total_open_balance += float(invoice_data["balance"])
+            if summary["balance"] is not None:
+                total_open_balance += float(summary["balance"])
 
         enriched_rows.append({
             **row,
