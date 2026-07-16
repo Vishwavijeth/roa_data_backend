@@ -2,10 +2,14 @@ from typing import Optional, Dict, Any, List, Tuple
 import logging
 import time
 import requests
+
 from db import get_db
 from fastapi import APIRouter, Depends, Query, HTTPException
 from psycopg2.extras import RealDictCursor, execute_values
-from services.account_hold_helper import get_valid_quickbooks_connection, split_emails
+from services.account_hold_helper import (
+    get_valid_quickbooks_connection,
+    split_emails,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -46,8 +50,8 @@ def get_users_without_qb_customerid(conn, limit: Optional[int] = None) -> List[D
     return rows
 
 
-def get_quickbooks_session(conn):
-    qb = get_valid_quickbooks_connection(conn)
+async def get_quickbooks_session(conn):
+    qb = await get_valid_quickbooks_connection(conn)
 
     session = requests.Session()
     session.headers.update({
@@ -64,8 +68,8 @@ def get_quickbooks_session(conn):
     return session, qb
 
 
-def fetch_all_qb_customers_map(conn) -> Dict[str, Dict[str, Any]]:
-    session, qb = get_quickbooks_session(conn)
+async def fetch_all_qb_customers_map(conn) -> Dict[str, Dict[str, Any]]:
+    session, qb = await get_quickbooks_session(conn)
     realm_id = qb["realm_id"]
 
     email_map: Dict[str, Dict[str, Any]] = {}
@@ -95,9 +99,12 @@ def fetch_all_qb_customers_map(conn) -> Dict[str, Dict[str, Any]]:
             resp = session.get(url, params=params, timeout=60)
 
             if resp.status_code == 401:
-                logger.warning("QuickBooks token expired, refreshing token", extra={"realm_id": realm_id})
+                logger.warning(
+                    "QuickBooks token expired, refreshing token",
+                    extra={"realm_id": realm_id},
+                )
                 session.close()
-                session, qb = get_quickbooks_session(conn)
+                session, qb = await get_quickbooks_session(conn)
                 realm_id = qb["realm_id"]
                 url = f"{QBO_API_BASE}/v3/company/{realm_id}/query"
                 resp = session.get(url, params=params, timeout=60)
@@ -240,7 +247,7 @@ def select_customer_from_email_map(
     return None
 
 
-def populate_qb_customerids(conn, limit: Optional[int] = None) -> Dict[str, Any]:
+async def populate_qb_customerids(conn, limit: Optional[int] = None) -> Dict[str, Any]:
     started_at = time.perf_counter()
 
     logger.info(
@@ -249,7 +256,7 @@ def populate_qb_customerids(conn, limit: Optional[int] = None) -> Dict[str, Any]
     )
 
     users = get_users_without_qb_customerid(conn, limit=limit)
-    qb_email_map = fetch_all_qb_customers_map(conn)
+    qb_email_map = await fetch_all_qb_customers_map(conn)
 
     updates: List[Tuple[str, str]] = []
     results = []
@@ -361,7 +368,7 @@ def populate_qb_customerids(conn, limit: Optional[int] = None) -> Dict[str, Any]
 
 
 @router.post("/qb-customerid-population")
-def qb_customerid_population(
+async def qb_customerid_population(
     limit: Optional[int] = Query(default=None, ge=1),
     conn=Depends(get_db),
 ):
@@ -369,4 +376,4 @@ def qb_customerid_population(
         "Received request for qb_customerid population",
         extra={"limit": limit},
     )
-    return populate_qb_customerids(conn=conn, limit=limit)
+    return await populate_qb_customerids(conn=conn, limit=limit)
