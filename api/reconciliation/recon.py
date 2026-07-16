@@ -791,110 +791,100 @@ def get_reconciliation_transaction_details(
 
 
 @router.get("/recon-data/download")
-def download_recon_data(conn=Depends(get_db)):
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
+def download_recon_data(
+    search: Optional[str] = Query(default=None),
+    mismatch_parameter: Optional[List[str]] = Query(default=None),
+    source_table: Optional[List[str]] = Query(default=None),
+    from_close_date: Optional[str] = Query(None),
+    to_close_date: Optional[str] = Query(None),
+    status: Optional[List[str]] = Query(None),
+    skyslope_stage: Optional[List[str]] = Query(None),
+    review_status: Optional[List[str]] = Query(None),
+    specialist: Optional[List[str]] = Query(None),
+    reviewer: Optional[List[str]] = Query(None),
+    saleincome_no_skyslopefileid: Optional[bool] = Query(default=None),
+    otherincome_no_skyslopefileid: Optional[bool] = Query(default=None),
+    conn=Depends(get_db),
+):
+    parsed_mismatch_params = parse_mismatch_params(mismatch_parameter)
+    parsed_source_tables = parse_source_table_params(source_table)
 
-    data_query = """
+    where_clause, params = build_where_clause(
+        search=search,
+        parsed_mismatch_params=parsed_mismatch_params,
+        parsed_source_tables=parsed_source_tables,
+        from_close_date=from_close_date,
+        to_close_date=to_close_date,
+        status=status,
+        skyslope_stage=skyslope_stage,
+        review_status=review_status,
+        specialist=specialist,
+        reviewer=reviewer,
+        saleincome_no_skyslopefileid=saleincome_no_skyslopefileid,
+        otherincome_no_skyslopefileid=otherincome_no_skyslopefileid,
+    )
+
+    data_query = f"""
         SELECT
-            rd.transactionid,
-            rd.be_source_table,
-            rd.saleguid,
-            rd.property_address,
-            rd.be_transaction_specialist,
-            rd.skyslope_reviewer,
+            cs.transactionid,
+            cs.source_table,
+            cs.saleguid,
+            cs.propertyaddress,
+            cs.be_transaction_specialist,
+            cs.skyslope_reviewer,
+            cs.skyslope_stage,
+            cs.review_status,
+            cs.review_notes,
+            cs.review_updated_by,
+            cs.review_updated_at,
+            cs.skyslope_url,
 
-            rd.be_gross_commission,
-            rd.skyslope_gross_commission,
-            rd.gross_commission_match,
-
-            rd.be_close_date_value,
-            rd.skyslope_close_date_value,
-            rd.close_date_match,
-
-            rd.be_status_value,
-            rd.skyslope_status_value,
-            rd.status_match,
-
-            rd.be_sale_price,
-            rd.skyslope_sale_price,
-            rd.sale_price_match,
-
-            rd.be_listing_price,
-            rd.skyslope_listing_price,
-            rd.listing_price_match,
-
-            rd.be_contract_date,
-            rd.skyslope_contract_date,
-            rd.contract_date_match,
-
-            rd.be_buyer_name,
-            rd.skyslope_buyer_name,
-            rd.buyer_name_match,
-
-            rd.be_seller_name,
-            rd.skyslope_seller_name,
-            rd.seller_name_match,
-
-            rd.be_buying_agent_name,
-            rd.skyslope_buying_agent_name,
-            rd.buying_agent_match,
-
-            rd.be_title_company,
-            rd.skyslope_title_company,
-            rd.title_company_match
-        FROM reconciliation_data rd
-        ORDER BY rd.transactionid
+            cs.gross_commission_match,
+            cs.close_date_match,
+            cs.status_match,
+            cs.sale_price_match,
+            cs.listing_price_match,
+            cs.contract_date_match,
+            cs.buyer_name_match,
+            cs.seller_name_match,
+            cs.buying_agent_match,
+            cs.title_company_match
+        FROM (
+            {BASE_QUERY}
+        ) cs
+        {where_clause}
+        ORDER BY
+            CASE WHEN cs.saleguid IS NULL THEN 1 ELSE 0 END,
+            cs.saleguid NULLS LAST,
+            cs.transactionid
     """
 
-    cursor.execute(data_query)
-    data = cursor.fetchall()
+    with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+        cursor.execute(data_query, params)
+        data = cursor.fetchall()
 
     columns_map = {
         "transactionid": "Transaction ID",
-        "be_source_table": "Source Table",
+        "source_table": "Source Table",
         "saleguid": "Sale GUID",
-        "property_address": "Property Address",
+        "propertyaddress": "Property Address",
         "be_transaction_specialist": "Transaction Specialist",
         "skyslope_reviewer": "Skyslope Reviewer",
-
-        "be_gross_commission": "BE Gross Commission",
-        "skyslope_gross_commission": "Skyslope Gross Commission",
+        "skyslope_stage": "Skyslope Stage",
+        "review_status": "Review Status",
+        "review_notes": "Review Notes",
+        "review_updated_by": "Review Updated By",
+        "review_updated_at": "Review Updated At",
+        "skyslope_url": "Skyslope URL",
         "gross_commission_match": "Gross Commission Match",
-
-        "be_close_date_value": "BE Close Date",
-        "skyslope_close_date_value": "Skyslope Close Date",
         "close_date_match": "Close Date Match",
-
-        "be_status_value": "BE Status",
-        "skyslope_status_value": "Skyslope Status",
         "status_match": "Status Match",
-
-        "be_sale_price": "BE Sale Price",
-        "skyslope_sale_price": "Skyslope Sale Price",
         "sale_price_match": "Sale Price Match",
-
-        "be_listing_price": "BE Listing Price",
-        "skyslope_listing_price": "Skyslope Listing Price",
         "listing_price_match": "Listing Price Match",
-
-        "be_contract_date": "BE Contract Date",
-        "skyslope_contract_date": "Skyslope Contract Date",
         "contract_date_match": "Contract Date Match",
-
-        "be_buyer_name": "BE Buyer Name",
-        "skyslope_buyer_name": "Skyslope Buyer Name",
         "buyer_name_match": "Buyer Name Match",
-
-        "be_seller_name": "BE Seller Name",
-        "skyslope_seller_name": "Skyslope Seller Name",
         "seller_name_match": "Seller Name Match",
-
-        "be_buying_agent_name": "BE Buying Agent Name",
-        "skyslope_buying_agent_name": "Skyslope Buying Agent Name",
         "buying_agent_match": "Buying Agent Match",
-
-        "be_title_company": "BE Title Company",
-        "skyslope_title_company": "Skyslope Title Company",
         "title_company_match": "Title Company Match",
     }
 
@@ -914,6 +904,10 @@ def download_recon_data(conn=Depends(get_db)):
                 val = ""
 
             row_dict[header] = val
+
+        row_dict["Mismatched Parameters"] = ", ".join(
+            get_mismatched_parameters_from_row(record)
+        )
 
         rows_to_export.append(row_dict)
 
