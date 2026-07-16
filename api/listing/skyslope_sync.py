@@ -1,4 +1,10 @@
-import json, logging, psycopg2, requests
+import json
+import logging
+import random
+import time
+import psycopg2
+import requests
+
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
@@ -7,6 +13,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from psycopg2.extras import execute_values
 from fastapi import APIRouter
+
 from db import get_conn
 from services.session import get_session_token
 
@@ -24,16 +31,22 @@ SALES_FILTER_TYPE = "sale"
 DEFAULT_SYNC_DATE = "2024-01-01"
 
 REQUEST_TIMEOUT = 300
-MAX_RETRIES = 3
+MAX_RETRIES = 5
 BACKOFF_FACTOR = 2
-DEFAULT_NUM_WORKERS = 10
-BATCH_SIZE = 100
+DEFAULT_NUM_WORKERS = 3
+BATCH_SIZE = 50
 DEBUG_SAMPLE_LIMIT = 10
+FAILED_SALEGUID_RETRY_ROUNDS = 2
+RATE_LIMIT_BUFFER = 2
 
 progress_lock = Lock()
+rate_limit_lock = Lock()
+failed_saleguids_lock = Lock()
+
 processed_count = 0
 error_count_global = 0
 saved_count_global = 0
+failed_saleguids_global = set()
 
 
 def get_last_sync_date() -> str:
@@ -108,8 +121,13 @@ def build_session() -> requests.Session:
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET"],
         raise_on_status=False,
+        respect_retry_after_header=True,
     )
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=100, pool_maxsize=100)
+    adapter = HTTPAdapter(
+        max_retries=retry,
+        pool_connections=50,
+        pool_maxsize=50
+    )
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     session.headers.update({"Content-Type": "application/json"})
@@ -249,12 +267,43 @@ def clean_url(value: Any) -> Optional[str]:
     return value
 
 
+def apply_rate_limit_wait(response: requests.Response, url: str) -> None:
+    try:
+        limit = clean_int(response.headers.get("x-ratelimit-limit")) or 0
+        remaining = clean_int(response.headers.get("x-ratelimit-remaining")) or 0
+        reset_ts = clean_int(response.headers.get("x-ratelimit-reset")) or 0
+
+        if limit > 0:
+            logger.info(
+                "RateLimit headers for %s -> limit=%s remaining=%s reset=%s",
+                url, limit, remaining, reset_ts
+            )
+
+        if remaining <= RATE_LIMIT_BUFFER and reset_ts > 0:
+            now_ts = int(time.time())
+            wait_for = max(0, reset_ts - now_ts) + 1 + random.uniform(0.1, 0.8)
+
+            if wait_for > 0:
+                logger.warning(
+                    "Rate limit nearly exhausted for %s. remaining=%s, sleeping %.2fs until reset.",
+                    url, remaining, wait_for
+                )
+                time.sleep(wait_for)
+
+    except Exception as e:
+        logger.warning("Failed to process rate limit headers for %s: %s", url, e)
+
+
 def fetch_api(url: str) -> Optional[Dict[str, Any]]:
     try:
-        response = HTTP_SESSION.get(url, timeout=REQUEST_TIMEOUT)
+        with rate_limit_lock:
+            response = HTTP_SESSION.get(url, timeout=REQUEST_TIMEOUT)
+            apply_rate_limit_wait(response, url)
+
         response.raise_for_status()
         text = response.content.decode("utf-8-sig")
         return json.loads(text)
+
     except requests.exceptions.Timeout:
         logger.error("Timeout fetching: %s", url)
     except requests.exceptions.RequestException as e:
@@ -883,7 +932,18 @@ VALUES %s
 """
 
 
-def process_sale_batch(sales_batch: List[Dict[str, Any]], worker_id: int) -> None:
+def register_failed_saleguid(sale_guid: str) -> None:
+    if not sale_guid:
+        return
+    with failed_saleguids_lock:
+        failed_saleguids_global.add(sale_guid)
+
+
+def build_retry_sales_from_failed_guids(failed_sale_guids: Sequence[str]) -> List[Dict[str, Any]]:
+    return [{"saleGuid": guid} for guid in failed_sale_guids if clean_guid(guid)]
+
+
+def process_sale_batch(sales_batch: List[Dict[str, Any]], worker_id: int, retry_round: int = 0) -> None:
     global processed_count, saved_count_global, error_count_global
 
     conn = get_conn()
@@ -936,6 +996,7 @@ def process_sale_batch(sales_batch: List[Dict[str, Any]], worker_id: int) -> Non
             detail_item = fetch_sale_detail(sale_guid)
             if not detail_item:
                 skipped_detail_missing += 1
+                register_failed_saleguid(sale_guid)
                 if len(sample_detail_missing) < DEBUG_SAMPLE_LIMIT:
                     sample_detail_missing.append(sale_guid)
                 continue
@@ -943,6 +1004,7 @@ def process_sale_batch(sales_batch: List[Dict[str, Any]], worker_id: int) -> Non
             data = process_sale(detail_item, bulk_item)
             if not data:
                 skipped_process_sale += 1
+                register_failed_saleguid(sale_guid)
                 if len(sample_process_sale_none) < DEBUG_SAMPLE_LIMIT:
                     sample_process_sale_none.append(sale_guid)
                 continue
@@ -984,8 +1046,8 @@ def process_sale_batch(sales_batch: List[Dict[str, Any]], worker_id: int) -> Non
             sale_url = clean_url(sale_data.get("url"))
 
             logger.info(
-                "[WORKER-%s] saleGuid=%s fileId=%r url=%r",
-                worker_id, sale_guid, sale_file_id, sale_url
+                "[WORKER-%s][RETRY-%s] saleGuid=%s fileId=%r url=%r",
+                worker_id, retry_round, sale_guid, sale_file_id, sale_url
             )
 
             sales_rows.append(build_sale_row(sale_data))
@@ -1190,19 +1252,19 @@ def process_sale_batch(sales_batch: List[Dict[str, Any]], worker_id: int) -> Non
             batch_saved += 1
 
         if sample_no_guid:
-            logger.info("[WORKER-%s] sample skipped_no_guid: %s", worker_id, sample_no_guid)
+            logger.info("[WORKER-%s][RETRY-%s] sample skipped_no_guid: %s", worker_id, retry_round, sample_no_guid)
 
         if sample_detail_missing:
-            logger.info("[WORKER-%s] sample skipped_detail_missing: %s", worker_id, sample_detail_missing)
+            logger.info("[WORKER-%s][RETRY-%s] sample skipped_detail_missing: %s", worker_id, retry_round, sample_detail_missing)
 
         if sample_process_sale_none:
-            logger.info("[WORKER-%s] sample skipped_process_sale: %s", worker_id, sample_process_sale_none)
+            logger.info("[WORKER-%s][RETRY-%s] sample skipped_process_sale: %s", worker_id, retry_round, sample_process_sale_none)
 
         if not sales_rows:
             logger.warning(
-                "[WORKER-%s] No sales_rows built. batch_size=%s, skipped_no_guid=%s, "
+                "[WORKER-%s][RETRY-%s] No sales_rows built. batch_size=%s, skipped_no_guid=%s, "
                 "skipped_detail_missing=%s, skipped_process_sale=%s",
-                worker_id, len(sales_batch), skipped_no_guid, skipped_detail_missing, skipped_process_sale
+                worker_id, retry_round, len(sales_batch), skipped_no_guid, skipped_detail_missing, skipped_process_sale
             )
             return
 
@@ -1261,9 +1323,10 @@ def process_sale_batch(sales_batch: List[Dict[str, Any]], worker_id: int) -> Non
         conn.commit()
 
         logger.info(
-            "[WORKER-%s] batch summary: input=%s, valid_sales=%s, skipped_no_guid=%s, "
+            "[WORKER-%s][RETRY-%s] batch summary: input=%s, valid_sales=%s, skipped_no_guid=%s, "
             "skipped_detail_missing=%s, skipped_process_sale=%s, sale_rows=%s, sale_rows_after_dedup=%s",
             worker_id,
+            retry_round,
             len(sales_batch),
             batch_saved,
             skipped_no_guid,
@@ -1281,9 +1344,16 @@ def process_sale_batch(sales_batch: List[Dict[str, Any]], worker_id: int) -> Non
 
     except Exception as e:
         conn.rollback()
+
+        for bulk_item in sales_batch:
+            sale_guid = clean_guid(bulk_item.get("saleGuid"))
+            if sale_guid:
+                register_failed_saleguid(sale_guid)
+
         with progress_lock:
             error_count_global += len(sales_batch)
-        logger.error("[WORKER-%s BATCH ERROR] %s", worker_id, e, exc_info=True)
+
+        logger.error("[WORKER-%s][RETRY-%s BATCH ERROR] %s", worker_id, retry_round, e, exc_info=True)
 
     finally:
         if cur:
@@ -1291,45 +1361,106 @@ def process_sale_batch(sales_batch: List[Dict[str, Any]], worker_id: int) -> Non
         conn.close()
 
 
+def run_batches(sales: List[Dict[str, Any]], retry_round: int = 0) -> None:
+    if not sales:
+        return
+
+    batches = [sales[i:i + BATCH_SIZE] for i in range(0, len(sales), BATCH_SIZE)]
+
+    with ThreadPoolExecutor(max_workers=DEFAULT_NUM_WORKERS) as executor:
+        futures = [
+            executor.submit(process_sale_batch, batch, idx, retry_round)
+            for idx, batch in enumerate(batches)
+        ]
+
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                logger.error("[RETRY-%s] Batch processing error: %s", retry_round, e, exc_info=True)
+
+
+def retry_failed_saleguids() -> int:
+    unresolved_failed_count = 0
+
+    for retry_round in range(1, FAILED_SALEGUID_RETRY_ROUNDS + 1):
+        with failed_saleguids_lock:
+            current_failed = list(failed_saleguids_global)
+            failed_saleguids_global.clear()
+
+        if not current_failed:
+            logger.info("No failed saleGuids to retry on round %s.", retry_round)
+            return 0
+
+        logger.info(
+            "Retry round %s started for %s failed saleGuids.",
+            retry_round, len(current_failed)
+        )
+
+        retry_sales = build_retry_sales_from_failed_guids(current_failed)
+        run_batches(retry_sales, retry_round=retry_round)
+
+        with failed_saleguids_lock:
+            unresolved_failed_count = len(failed_saleguids_global)
+
+        logger.info(
+            "Retry round %s completed. unresolved_failed_saleguids=%s",
+            retry_round, unresolved_failed_count
+        )
+
+        if unresolved_failed_count == 0:
+            break
+
+    return unresolved_failed_count
+
+
 @router.post("/sync/skyslope-sales")
 def trigger_sales_sync():
-    global processed_count, saved_count_global, error_count_global
+    global processed_count, saved_count_global, error_count_global, failed_saleguids_global
 
     processed_count = 0
     saved_count_global = 0
     error_count_global = 0
+
+    with failed_saleguids_lock:
+        failed_saleguids_global = set()
 
     logger.info("Starting sync job...")
     sales = fetch_sales_bulk()
 
     if not sales:
         logger.info("No sales found to sync.")
-        return {"message": "No sales found to sync.", "saved": 0, "errors": 0}
+        return {
+            "message": "No sales found to sync.",
+            "saved": 0,
+            "errors": 0,
+            "failed_saleguids": 0
+        }
 
     total_sales = len(sales)
     logger.info("Found %s bulk sales to process.", total_sales)
 
-    batches = [sales[i:i + BATCH_SIZE] for i in range(0, total_sales, BATCH_SIZE)]
+    run_batches(sales, retry_round=0)
 
-    with ThreadPoolExecutor(max_workers=DEFAULT_NUM_WORKERS) as executor:
-        futures = [executor.submit(process_sale_batch, batch, idx) for idx, batch in enumerate(batches)]
-
-        for future in as_completed(futures):
-            try:
-                future.result()
-            except Exception as e:
-                logger.error("Batch processing error: %s", e, exc_info=True)
+    unresolved_failed = retry_failed_saleguids()
 
     logger.info(
-        "Sync completed! total_fetched=%s, saved=%s, errors=%s",
-        total_sales, saved_count_global, error_count_global
+        "Sync completed! total_fetched=%s, saved=%s, errors=%s, unresolved_failed_saleguids=%s",
+        total_sales, saved_count_global, error_count_global, unresolved_failed
     )
 
-    update_sync_date()
+    if unresolved_failed == 0:
+        update_sync_date()
+    else:
+        logger.warning(
+            "Sync date not updated because %s saleGuids still failed after retries.",
+            unresolved_failed
+        )
 
     return {
-        "message": "Sync completed successfully.",
+        "message": "Sync completed successfully." if unresolved_failed == 0 else "Sync completed with unresolved failures.",
         "total_fetched": total_sales,
         "saved": saved_count_global,
         "errors": error_count_global,
+        "failed_saleguids": unresolved_failed,
     }

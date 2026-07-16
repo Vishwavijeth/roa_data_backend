@@ -12,4 +12,4 @@ jobs:
     steps:
       - name: Call FastAPI Cron
         run: |
-          curl -X GET "https://roa-data-backend.vercel.app/cron-data-sync"
+          curl -X GET "https://roa-data-backend.vercel.app/data-sync"
