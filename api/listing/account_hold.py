@@ -25,73 +25,91 @@ def serialize_value(value):
 def has_account_hold_tag(agenttags):
     if not agenttags:
         return False
-
-    tags = [tag.strip().lower() for tag in str(agenttags).split(",") if tag.strip()]
-    return "accounthold" in tags
+    return "accounthold" in {tag.strip().lower() for tag in str(agenttags).split(",") if tag.strip()}
 
 
-def build_transaction_flags(row):
-    if row.get("saleguid") is None:
-        return ["no_skyslope_file_id"]
+LISTING_BASE_CTE = """
+    WITH all_agents AS (
+        SELECT
+            u.display_name,
+            u.primary_emailaddress,
+            u.agenttags,
+            LOWER(TRIM(u.display_name)) AS normalized_display_name
+        FROM brokerage_engine_users u
+    ),
 
-    transaction_flags = []
+    unified_transactions AS (
+        SELECT
+            be.transaction_identifier_transactionid,
+            be.buying_agent_name AS raw_agent_names,
+            'brokerage_engine' AS source_name
+        FROM brokerage_engine be
 
-    match_mapping = {
-        "gross_commission_match": "gross_commission",
-        "close_date_match": "close_date",
-        "status_match": "status",
-        "sale_price_match": "sale_price",
-    }
+        UNION ALL
 
-    for db_field, response_flag in match_mapping.items():
-        value = row.get(db_field)
-        if value is not None and str(value).strip().lower() != "match":
-            transaction_flags.append(response_flag)
+        SELECT
+            oi.transaction_identifier_transactionid,
+            oi.agents AS raw_agent_names,
+            'otherincome_transactions' AS source_name
+        FROM otherincome_transactions oi
+    ),
 
-    return transaction_flags
+    split_transaction_agents AS (
+        SELECT
+            ut.transaction_identifier_transactionid,
+            ut.source_name,
+            LOWER(TRIM(split_name)) AS normalized_agent_name
+        FROM unified_transactions ut
+        CROSS JOIN LATERAL regexp_split_to_table(
+            COALESCE(ut.raw_agent_names, ''),
+            ','
+        ) AS split_name
+        WHERE NULLIF(TRIM(split_name), '') IS NOT NULL
+    ),
+
+    matched_transactions AS (
+        SELECT DISTINCT
+            a.display_name,
+            a.primary_emailaddress,
+            sta.transaction_identifier_transactionid
+        FROM all_agents a
+        JOIN split_transaction_agents sta
+          ON sta.normalized_agent_name = a.normalized_display_name
+    ),
+
+    latest_reconciliation_data AS (
+        SELECT DISTINCT ON (rd.transactionid)
+            rd.transactionid,
+            rd.saleguid,
+            rd.gross_commission_match,
+            rd.close_date_match,
+            rd.status_match,
+            rd.sale_price_match
+        FROM reconciliation_data rd
+        ORDER BY rd.transactionid, rd.evaluated_at DESC NULLS LAST
+    ),
+
+    transaction_summary AS (
+        SELECT
+            mt.display_name,
+            mt.primary_emailaddress,
+            COUNT(*) AS transaction_count,
+            BOOL_OR(
+                lrd.saleguid IS NULL
+                OR (lrd.gross_commission_match IS NOT NULL AND LOWER(TRIM(lrd.gross_commission_match)) <> 'match')
+                OR (lrd.close_date_match IS NOT NULL AND LOWER(TRIM(lrd.close_date_match)) <> 'match')
+                OR (lrd.status_match IS NOT NULL AND LOWER(TRIM(lrd.status_match)) <> 'match')
+                OR (lrd.sale_price_match IS NOT NULL AND LOWER(TRIM(lrd.sale_price_match)) <> 'match')
+            ) AS has_transaction_mismatch
+        FROM matched_transactions mt
+        LEFT JOIN latest_reconciliation_data lrd
+          ON lrd.transactionid = mt.transaction_identifier_transactionid
+        GROUP BY mt.display_name, mt.primary_emailaddress
+    )
+"""
 
 
-def build_mismatch_details(row, transaction_flags):
-    if row.get("saleguid") is None:
-        return {}
-
-    mismatch_field_map = {
-        "gross_commission": {
-            "be_key": "be_gross_commission",
-            "skyslope_key": "skyslope_gross_commission",
-        },
-        "close_date": {
-            "be_key": "be_close_date_value",
-            "skyslope_key": "skyslope_close_date_value",
-        },
-        "status": {
-            "be_key": "be_status_value",
-            "skyslope_key": "skyslope_status_value",
-        },
-        "sale_price": {
-            "be_key": "be_sale_price",
-            "skyslope_key": "skyslope_sale_price",
-        },
-    }
-
-    mismatch_details = {}
-
-    for flag in transaction_flags:
-        config = mismatch_field_map.get(flag)
-        if not config:
-            continue
-
-        mismatch_details[flag] = {
-            "be": serialize_value(row.get(config["be_key"])),
-            "skyslope": serialize_value(row.get(config["skyslope_key"])),
-        }
-
-    return mismatch_details
-
-
-def fetch_agent_listing_page(db, page: int, size: int, has_account_hold=None, has_transaction_mismatch=None):
-    offset = (page - 1) * size
-
+def build_listing_where_clause(has_account_hold=None, has_transaction_mismatch=None, search: str | None = None):
     filters = []
     params = []
 
@@ -105,99 +123,32 @@ def fetch_agent_listing_page(db, page: int, size: int, has_account_hold=None, ha
         filters.append("COALESCE(ts.has_transaction_mismatch, FALSE) = %s")
         params.append(has_transaction_mismatch)
 
-    where_clause = ""
-    if filters:
-        where_clause = "WHERE " + " AND ".join(filters)
+    if search and search.strip():
+        search_value = f"%{search.strip()}%"
+        filters.append("(a.display_name ILIKE %s OR a.primary_emailaddress ILIKE %s)")
+        params.extend([search_value, search_value])
+
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+    return where_clause, params
+
+
+def fetch_agent_listing_page(
+    db,
+    page: int,
+    size: int,
+    has_account_hold=None,
+    has_transaction_mismatch=None,
+    search: str | None = None,
+):
+    offset = (page - 1) * size
+    where_clause, params = build_listing_where_clause(
+        has_account_hold=has_account_hold,
+        has_transaction_mismatch=has_transaction_mismatch,
+        search=search,
+    )
 
     count_query = f"""
-        WITH all_agents AS (
-            SELECT
-                u.display_name,
-                u.primary_emailaddress,
-                u.agenttags,
-                LOWER(TRIM(u.display_name)) AS normalized_display_name
-            FROM brokerage_engine_users u
-        ),
-
-        unified_transactions AS (
-            SELECT
-                be.transaction_identifier_transactionid,
-                be.buying_agent_name AS raw_agent_names,
-                'brokerage_engine' AS source_name
-            FROM brokerage_engine be
-
-            UNION ALL
-
-            SELECT
-                oi.transaction_identifier_transactionid,
-                oi.agents AS raw_agent_names,
-                'otherincome_transactions' AS source_name
-            FROM otherincome_transactions oi
-        ),
-
-        split_transaction_agents AS (
-            SELECT
-                ut.transaction_identifier_transactionid,
-                ut.source_name,
-                LOWER(TRIM(split_name)) AS normalized_agent_name
-            FROM unified_transactions ut
-            CROSS JOIN LATERAL regexp_split_to_table(
-                COALESCE(ut.raw_agent_names, ''),
-                ','
-            ) AS split_name
-            WHERE NULLIF(TRIM(split_name), '') IS NOT NULL
-        ),
-
-        matched_transactions AS (
-            SELECT DISTINCT ON (
-                a.display_name,
-                a.primary_emailaddress,
-                sta.transaction_identifier_transactionid,
-                sta.source_name
-            )
-                a.display_name,
-                a.primary_emailaddress,
-                sta.transaction_identifier_transactionid
-            FROM all_agents a
-            JOIN split_transaction_agents sta
-              ON sta.normalized_agent_name = a.normalized_display_name
-            ORDER BY
-                a.display_name,
-                a.primary_emailaddress,
-                sta.transaction_identifier_transactionid,
-                sta.source_name
-        ),
-
-        latest_reconciliation_data AS (
-            SELECT DISTINCT ON (rd.transactionid)
-                rd.transactionid,
-                rd.saleguid,
-                rd.gross_commission_match,
-                rd.close_date_match,
-                rd.status_match,
-                rd.sale_price_match
-            FROM reconciliation_data rd
-            ORDER BY rd.transactionid, rd.evaluated_at DESC NULLS LAST
-        ),
-
-        transaction_summary AS (
-            SELECT
-                mt.display_name,
-                mt.primary_emailaddress,
-                COUNT(*) AS transaction_count,
-                BOOL_OR(
-                    lrd.saleguid IS NULL
-                    OR (lrd.gross_commission_match IS NOT NULL AND LOWER(TRIM(lrd.gross_commission_match)) <> 'match')
-                    OR (lrd.close_date_match IS NOT NULL AND LOWER(TRIM(lrd.close_date_match)) <> 'match')
-                    OR (lrd.status_match IS NOT NULL AND LOWER(TRIM(lrd.status_match)) <> 'match')
-                    OR (lrd.sale_price_match IS NOT NULL AND LOWER(TRIM(lrd.sale_price_match)) <> 'match')
-                ) AS has_transaction_mismatch
-            FROM matched_transactions mt
-            LEFT JOIN latest_reconciliation_data lrd
-              ON lrd.transactionid = mt.transaction_identifier_transactionid
-            GROUP BY mt.display_name, mt.primary_emailaddress
-        )
-
+        {LISTING_BASE_CTE}
         SELECT COUNT(*) AS total_count
         FROM brokerage_engine_users a
         LEFT JOIN transaction_summary ts
@@ -207,94 +158,7 @@ def fetch_agent_listing_page(db, page: int, size: int, has_account_hold=None, ha
     """
 
     data_query = f"""
-        WITH all_agents AS (
-            SELECT
-                u.display_name,
-                u.primary_emailaddress,
-                u.agenttags,
-                LOWER(TRIM(u.display_name)) AS normalized_display_name
-            FROM brokerage_engine_users u
-        ),
-
-        unified_transactions AS (
-            SELECT
-                be.transaction_identifier_transactionid,
-                be.buying_agent_name AS raw_agent_names,
-                'brokerage_engine' AS source_name
-            FROM brokerage_engine be
-
-            UNION ALL
-
-            SELECT
-                oi.transaction_identifier_transactionid,
-                oi.agents AS raw_agent_names,
-                'otherincome_transactions' AS source_name
-            FROM otherincome_transactions oi
-        ),
-
-        split_transaction_agents AS (
-            SELECT
-                ut.transaction_identifier_transactionid,
-                ut.source_name,
-                LOWER(TRIM(split_name)) AS normalized_agent_name
-            FROM unified_transactions ut
-            CROSS JOIN LATERAL regexp_split_to_table(
-                COALESCE(ut.raw_agent_names, ''),
-                ','
-            ) AS split_name
-            WHERE NULLIF(TRIM(split_name), '') IS NOT NULL
-        ),
-
-        matched_transactions AS (
-            SELECT DISTINCT ON (
-                a.display_name,
-                a.primary_emailaddress,
-                sta.transaction_identifier_transactionid,
-                sta.source_name
-            )
-                a.display_name,
-                a.primary_emailaddress,
-                sta.transaction_identifier_transactionid
-            FROM all_agents a
-            JOIN split_transaction_agents sta
-              ON sta.normalized_agent_name = a.normalized_display_name
-            ORDER BY
-                a.display_name,
-                a.primary_emailaddress,
-                sta.transaction_identifier_transactionid,
-                sta.source_name
-        ),
-
-        latest_reconciliation_data AS (
-            SELECT DISTINCT ON (rd.transactionid)
-                rd.transactionid,
-                rd.saleguid,
-                rd.gross_commission_match,
-                rd.close_date_match,
-                rd.status_match,
-                rd.sale_price_match
-            FROM reconciliation_data rd
-            ORDER BY rd.transactionid, rd.evaluated_at DESC NULLS LAST
-        ),
-
-        transaction_summary AS (
-            SELECT
-                mt.display_name,
-                mt.primary_emailaddress,
-                COUNT(*) AS transaction_count,
-                BOOL_OR(
-                    lrd.saleguid IS NULL
-                    OR (lrd.gross_commission_match IS NOT NULL AND LOWER(TRIM(lrd.gross_commission_match)) <> 'match')
-                    OR (lrd.close_date_match IS NOT NULL AND LOWER(TRIM(lrd.close_date_match)) <> 'match')
-                    OR (lrd.status_match IS NOT NULL AND LOWER(TRIM(lrd.status_match)) <> 'match')
-                    OR (lrd.sale_price_match IS NOT NULL AND LOWER(TRIM(lrd.sale_price_match)) <> 'match')
-                ) AS has_transaction_mismatch
-            FROM matched_transactions mt
-            LEFT JOIN latest_reconciliation_data lrd
-              ON lrd.transactionid = mt.transaction_identifier_transactionid
-            GROUP BY mt.display_name, mt.primary_emailaddress
-        )
-
+        {LISTING_BASE_CTE}
         SELECT
             a.display_name,
             a.primary_emailaddress,
@@ -434,9 +298,6 @@ def fetch_agent_detail_transactions(db, email: str):
         )
 
         SELECT
-            mt.display_name,
-            mt.primary_emailaddress,
-            mt.agenttags,
             mt.transaction_identifier_transactionid,
             mt.property_address,
             mt.source_name,
@@ -470,13 +331,72 @@ def fetch_agent_detail_transactions(db, email: str):
         raise HTTPException(status_code=500, detail=f"Detail transaction query failed: {str(e)}")
 
 
+def build_transaction_flags(row):
+    if row.get("saleguid") is None:
+        return ["no_skyslope_file_id"]
+
+    transaction_flags = []
+    match_mapping = {
+        "gross_commission_match": "gross_commission",
+        "close_date_match": "close_date",
+        "status_match": "status",
+        "sale_price_match": "sale_price",
+    }
+
+    for db_field, response_flag in match_mapping.items():
+        value = row.get(db_field)
+        if value is not None and str(value).strip().lower() != "match":
+            transaction_flags.append(response_flag)
+
+    return transaction_flags
+
+
+def build_mismatch_details(row, transaction_flags):
+    if row.get("saleguid") is None:
+        return {}
+
+    mismatch_field_map = {
+        "gross_commission": {
+            "be_key": "be_gross_commission",
+            "skyslope_key": "skyslope_gross_commission",
+        },
+        "close_date": {
+            "be_key": "be_close_date_value",
+            "skyslope_key": "skyslope_close_date_value",
+        },
+        "status": {
+            "be_key": "be_status_value",
+            "skyslope_key": "skyslope_status_value",
+        },
+        "sale_price": {
+            "be_key": "be_sale_price",
+            "skyslope_key": "skyslope_sale_price",
+        },
+    }
+
+    mismatch_details = {}
+
+    for flag in transaction_flags:
+        config = mismatch_field_map.get(flag)
+        if not config:
+            continue
+
+        mismatch_details[flag] = {
+            "be": serialize_value(row.get(config["be_key"])),
+            "skyslope": serialize_value(row.get(config["skyslope_key"])),
+        }
+
+    return mismatch_details
+
+
 @router.get("/account-hold")
 async def get_account_hold_listing(
     page: int = Query(1, ge=1),
-    size: int = Query(50, ge=1, le=50),
+    size: int = Query(50, ge=1, le=100),
     has_account_hold: bool | None = Query(None),
     has_transaction_mismatch: bool | None = Query(None),
-    db=Depends(get_db)
+    search: str | None = Query(None, max_length=100),
+    db=Depends(get_db),
 ):
     total_count, rows = fetch_agent_listing_page(
         db=db,
@@ -484,6 +404,7 @@ async def get_account_hold_listing(
         size=size,
         has_account_hold=has_account_hold,
         has_transaction_mismatch=has_transaction_mismatch,
+        search=search,
     )
 
     total_pages = ceil(total_count / size) if total_count else 1
@@ -526,6 +447,7 @@ async def get_account_hold_detail(email: str, db=Depends(get_db)):
     rows = fetch_agent_detail_transactions(db, email)
 
     transactions = []
+    transaction_flags_rollup = []
     seen_transactions = set()
 
     for row in rows:
@@ -533,8 +455,8 @@ async def get_account_hold_detail(email: str, db=Depends(get_db)):
         if transaction_id in seen_transactions:
             continue
 
-        transaction_flags = build_transaction_flags(row)
-        mismatch_details = build_mismatch_details(row, transaction_flags)
+        per_transaction_flags = build_transaction_flags(row)
+        mismatch_details = build_mismatch_details(row, per_transaction_flags)
 
         transactions.append({
             "transactionid": transaction_id,
@@ -543,10 +465,13 @@ async def get_account_hold_detail(email: str, db=Depends(get_db)):
             "saleguid": serialize_value(row["saleguid"]),
             "be_transaction_specialist": row["be_transaction_specialist"],
             "skyslope_reviewer": row["skyslope_reviewer"],
-            "transaction_flags": transaction_flags,
+            "transaction_flags": per_transaction_flags,
             "mismatch_details": mismatch_details,
         })
         seen_transactions.add(transaction_id)
+
+    if any(tx["transaction_flags"] for tx in transactions):
+        transaction_flags_rollup.append("transaction_mismatch")
 
     ar_input_rows = [{
         "display_name": agent["display_name"],
@@ -560,8 +485,7 @@ async def get_account_hold_detail(email: str, db=Depends(get_db)):
     broker_flags = []
     if has_account_hold_tag(agent.get("agenttags")):
         broker_flags.append("account_hold")
-    if any(tx.get("transaction_flags") for tx in transactions):
-        broker_flags.append("transaction_mismatch")
+
     if ar_balance and ar_balance.get("total_open_balance") is not None:
         if float(ar_balance["total_open_balance"]) > 0:
             broker_flags.append("ar_balance")
@@ -571,6 +495,7 @@ async def get_account_hold_detail(email: str, db=Depends(get_db)):
         "primary_emailaddress": agent["primary_emailaddress"],
         "transaction_count": len(transactions),
         "broker_flags": broker_flags,
+        "transaction_flags": transaction_flags_rollup,
         "ar_balance": ar_balance,
         "transactions": transactions,
     }
