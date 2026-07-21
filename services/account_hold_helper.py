@@ -2,7 +2,11 @@ import os
 import base64
 import secrets
 import asyncio
+import random
+import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Optional, Dict, Any, List
 from urllib.parse import urlencode
 
@@ -27,7 +31,18 @@ FRONTEND_BASE_URL = "https://roa-data-ui.vercel.app"
 oauth_state_store = {}
 
 QB_TIMEOUT = httpx.Timeout(30.0)
-QB_CONCURRENCY_LIMIT = int(os.getenv("QB_CONCURRENCY_LIMIT", "5"))
+
+QBO_REQUESTS_PER_MINUTE = int(os.getenv("QBO_REQUESTS_PER_MINUTE", "500"))
+QBO_MAX_CONCURRENT = int(os.getenv("QBO_MAX_CONCURRENT", "10"))
+QBO_BATCH_REQUESTS_PER_MINUTE = int(os.getenv("QBO_BATCH_REQUESTS_PER_MINUTE", "40"))
+QBO_MAX_BATCH_PAYLOADS = int(os.getenv("QBO_MAX_BATCH_PAYLOADS", "30"))
+QBO_MAX_RETRIES = int(os.getenv("QBO_MAX_RETRIES", "5"))
+QBO_RETRY_MAX_DELAY_SECONDS = float(os.getenv("QBO_RETRY_MAX_DELAY_SECONDS", "30"))
+
+_qbo_limiters: Dict[str, "QBORateLimiter"] = {}
+_qbo_limiters_lock = asyncio.Lock()
+_qbo_refresh_locks: Dict[str, asyncio.Lock] = {}
+_qbo_refresh_locks_guard = asyncio.Lock()
 
 
 def basic_auth_header() -> str:
@@ -328,7 +343,115 @@ def get_qb_customerids_for_emails(emails: List[str], conn) -> Dict[str, str]:
     }
 
 
-async def _quickbooks_query(
+class QBORateLimiter:
+    def __init__(
+        self,
+        requests_per_minute: int = QBO_REQUESTS_PER_MINUTE,
+        max_concurrent: int = QBO_MAX_CONCURRENT,
+        batch_requests_per_minute: int = QBO_BATCH_REQUESTS_PER_MINUTE,
+    ) -> None:
+        self.requests_per_minute = requests_per_minute
+        self.max_concurrent = max_concurrent
+        self.batch_requests_per_minute = batch_requests_per_minute
+
+        self._request_timestamps = deque()
+        self._batch_timestamps = deque()
+        self._concurrency = asyncio.Semaphore(max_concurrent)
+        self._window_lock = asyncio.Lock()
+
+    async def acquire(self, is_batch: bool = False) -> None:
+        await self._concurrency.acquire()
+        try:
+            await self._wait_for_window_slot(is_batch=is_batch)
+        except Exception:
+            self._concurrency.release()
+            raise
+
+    def release(self) -> None:
+        self._concurrency.release()
+
+    async def _wait_for_window_slot(self, is_batch: bool = False) -> None:
+        while True:
+            sleep_for = 0.0
+            now = time.monotonic()
+
+            async with self._window_lock:
+                self._prune(now)
+
+                if len(self._request_timestamps) >= self.requests_per_minute:
+                    oldest_request = self._request_timestamps[0]
+                    sleep_for = max(sleep_for, 60 - (now - oldest_request))
+
+                if is_batch and len(self._batch_timestamps) >= self.batch_requests_per_minute:
+                    oldest_batch = self._batch_timestamps[0]
+                    sleep_for = max(sleep_for, 60 - (now - oldest_batch))
+
+                if sleep_for <= 0:
+                    current = time.monotonic()
+                    self._request_timestamps.append(current)
+                    if is_batch:
+                        self._batch_timestamps.append(current)
+                    return
+
+            await asyncio.sleep(sleep_for + random.uniform(0.02, 0.2))
+
+    def _prune(self, now: float) -> None:
+        while self._request_timestamps and now - self._request_timestamps[0] >= 60:
+            self._request_timestamps.popleft()
+
+        while self._batch_timestamps and now - self._batch_timestamps[0] >= 60:
+            self._batch_timestamps.popleft()
+
+
+async def get_qbo_limiter(realm_id: str) -> QBORateLimiter:
+    async with _qbo_limiters_lock:
+        limiter = _qbo_limiters.get(realm_id)
+        if limiter is None:
+            limiter = QBORateLimiter()
+            _qbo_limiters[realm_id] = limiter
+        return limiter
+
+
+async def get_refresh_lock(realm_id: str) -> asyncio.Lock:
+    async with _qbo_refresh_locks_guard:
+        lock = _qbo_refresh_locks.get(realm_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _qbo_refresh_locks[realm_id] = lock
+        return lock
+
+
+def _parse_retry_after(response: httpx.Response) -> Optional[float]:
+    retry_after = response.headers.get("Retry-After")
+    if not retry_after:
+        return None
+
+    try:
+        return max(float(retry_after), 0.0)
+    except ValueError:
+        pass
+
+    try:
+        retry_dt = parsedate_to_datetime(retry_after)
+        if retry_dt.tzinfo is None:
+            retry_dt = retry_dt.replace(tzinfo=timezone.utc)
+        delay = (retry_dt - datetime.now(timezone.utc)).total_seconds()
+        return max(delay, 0.0)
+    except Exception:
+        return None
+
+
+def _compute_retry_delay(response: httpx.Response, attempt: int) -> float:
+    retry_after = _parse_retry_after(response)
+    if retry_after is not None:
+        return min(retry_after, QBO_RETRY_MAX_DELAY_SECONDS)
+
+    base_delay = min(2 ** attempt, QBO_RETRY_MAX_DELAY_SECONDS)
+    jitter = random.uniform(0.1, 0.8)
+    return min(base_delay + jitter, QBO_RETRY_MAX_DELAY_SECONDS)
+
+
+async def _quickbooks_query_once(
     client: httpx.AsyncClient,
     realm_id: str,
     access_token: str,
@@ -347,57 +470,124 @@ async def _quickbooks_query(
     return await client.get(url, headers=headers, params=params)
 
 
+async def _refresh_tokens_once_for_shared_row(conn, qb_row: dict) -> dict:
+    realm_id = str(qb_row["realm_id"])
+    lock = await get_refresh_lock(realm_id)
+
+    async with lock:
+        latest = get_latest_quickbooks_connection(conn)
+
+        if str(latest["realm_id"]) != realm_id:
+            latest = qb_row
+
+        expires_at = latest.get("expires_at")
+        now = datetime.now(timezone.utc)
+
+        if expires_at is not None:
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+            if expires_at > now + timedelta(minutes=5):
+                qb_row.update(latest)
+                return qb_row
+
+        refreshed = await refresh_quickbooks_tokens(conn, latest)
+        qb_row.update(refreshed)
+        return qb_row
+
+
+async def quickbooks_query_with_retry(
+    client: httpx.AsyncClient,
+    conn,
+    qb_row: dict,
+    query: str,
+    max_retries: int = QBO_MAX_RETRIES,
+) -> httpx.Response:
+    realm_id = str(qb_row["realm_id"])
+    limiter = await get_qbo_limiter(realm_id)
+    refreshed_after_401 = False
+
+    for attempt in range(max_retries + 1):
+        await limiter.acquire(is_batch=False)
+        try:
+            response = await _quickbooks_query_once(
+                client=client,
+                realm_id=realm_id,
+                access_token=qb_row["access_token"],
+                query=query,
+            )
+        finally:
+            limiter.release()
+
+        if response.status_code < 400:
+            return response
+
+        if response.status_code == 401 and not refreshed_after_401:
+            qb_row = await _refresh_tokens_once_for_shared_row(conn, qb_row)
+            realm_id = str(qb_row["realm_id"])
+            refreshed_after_401 = True
+            continue
+
+        if response.status_code == 429:
+            if attempt >= max_retries:
+                raise HTTPException(
+                    status_code=429,
+                    detail={
+                        "message": "QuickBooks rate limit exceeded after retries",
+                        "realm_id": realm_id,
+                        "query": query,
+                    },
+                )
+
+            delay = _compute_retry_delay(response, attempt)
+            await asyncio.sleep(delay)
+            continue
+
+        raise HTTPException(
+            status_code=response.status_code,
+            detail={
+                "message": "QuickBooks query failed",
+                "realm_id": realm_id,
+                "query": query,
+                "quickbooks_response": response.text,
+            },
+        )
+
+    raise HTTPException(
+        status_code=500,
+        detail={"message": "Unexpected QuickBooks retry flow failure"},
+    )
+
+
 async def fetch_qb_invoices_by_customer_id(
     customer_id: str,
     conn,
     client: httpx.AsyncClient,
-    semaphore: asyncio.Semaphore,
     qb_row: dict,
 ) -> Dict[str, Any]:
-    async with semaphore:
-        realm_id = qb_row["realm_id"]
-        access_token = qb_row["access_token"]
+    realm_id = str(qb_row["realm_id"])
+    safe_customer_id = escape_qbo_value(str(customer_id))
+    query = f"SELECT * FROM Invoice WHERE CustomerRef = '{safe_customer_id}'"
 
-        safe_customer_id = escape_qbo_value(str(customer_id))
-        query = f"SELECT * FROM Invoice WHERE CustomerRef = '{safe_customer_id}'"
+    try:
+        resp = await quickbooks_query_with_retry(
+            client=client,
+            conn=conn,
+            qb_row=qb_row,
+            query=query,
+        )
 
-        try:
-            resp = await _quickbooks_query(
-                client=client,
-                realm_id=realm_id,
-                access_token=access_token,
-                query=query,
-            )
+        payload = resp.json()
+        invoices = payload.get("QueryResponse", {}).get("Invoice", []) or []
 
-            if resp.status_code == 401:
-                qb_row = await refresh_quickbooks_tokens(conn, qb_row)
-                resp = await _quickbooks_query(
-                    client=client,
-                    realm_id=qb_row["realm_id"],
-                    access_token=qb_row["access_token"],
-                    query=query,
-                )
+        open_invoices = []
+        open_balance = 0.0
 
-            if resp.status_code >= 400:
-                return {
-                    "customer_id": customer_id,
-                    "found": False,
-                    "invoice_count": 0,
-                    "open_balance": None,
-                    "open_invoices": [],
-                    "error": resp.text,
-                }
-
-            payload = resp.json()
-            invoices = payload.get("QueryResponse", {}).get("Invoice", [])
-
-            open_invoices = []
-            open_balance = 0.0
-
-            for invoice in invoices:
-                balance = float(invoice.get("Balance") or 0)
-                if balance != 0:
-                    open_invoices.append({
+        for invoice in invoices:
+            balance = float(invoice.get("Balance") or 0)
+            if balance != 0:
+                open_invoices.append(
+                    {
                         "invoice_id": invoice.get("Id"),
                         "doc_number": invoice.get("DocNumber"),
                         "txn_date": invoice.get("TxnDate"),
@@ -405,27 +595,30 @@ async def fetch_qb_invoices_by_customer_id(
                         "total_amt": float(invoice.get("TotalAmt") or 0),
                         "balance": balance,
                         "customer_ref": invoice.get("CustomerRef"),
-                    })
-                    open_balance += balance
+                    }
+                )
+                open_balance += balance
 
-            return {
-                "customer_id": customer_id,
-                "found": True,
-                "invoice_count": len(open_invoices),
-                "open_balance": open_balance,
-                "open_invoices": open_invoices,
-                "error": None,
-            }
+        return {
+            "customer_id": customer_id,
+            "realm_id": realm_id,
+            "found": True,
+            "invoice_count": len(open_invoices),
+            "open_balance": open_balance,
+            "open_invoices": open_invoices,
+            "error": None,
+        }
 
-        except Exception as exc:
-            return {
-                "customer_id": customer_id,
-                "found": False,
-                "invoice_count": 0,
-                "open_balance": None,
-                "open_invoices": [],
-                "error": str(exc),
-            }
+    except Exception as exc:
+        return {
+            "customer_id": customer_id,
+            "realm_id": realm_id,
+            "found": False,
+            "invoice_count": 0,
+            "open_balance": None,
+            "open_invoices": [],
+            "error": str(exc),
+        }
 
 
 def summarize_customer_invoice(invoice_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -483,7 +676,6 @@ async def fetch_ar_balance(rows: List[Dict[str, Any]], conn) -> List[Dict[str, A
 
     if unique_customer_ids:
         qb_row = await get_valid_quickbooks_connection(conn)
-        semaphore = asyncio.Semaphore(QB_CONCURRENCY_LIMIT)
 
         async with httpx.AsyncClient(timeout=QB_TIMEOUT) as client:
             tasks = [
@@ -491,7 +683,6 @@ async def fetch_ar_balance(rows: List[Dict[str, Any]], conn) -> List[Dict[str, A
                     customer_id=customer_id,
                     conn=conn,
                     client=client,
-                    semaphore=semaphore,
                     qb_row=qb_row,
                 )
                 for customer_id in unique_customer_ids
@@ -565,13 +756,15 @@ async def fetch_ar_balance(rows: List[Dict[str, Any]], conn) -> List[Dict[str, A
             if summary["balance"] is not None:
                 total_open_balance += float(summary["balance"])
 
-        enriched_rows.append({
-            **row,
-            "ar_balance": {
-                "has_match": has_match,
-                "total_open_balance": total_open_balance if has_match else None,
-                "customers": customers_by_email,
-            },
-        })
+        enriched_rows.append(
+            {
+                **row,
+                "ar_balance": {
+                    "has_match": has_match,
+                    "total_open_balance": total_open_balance if has_match else None,
+                    "customers": customers_by_email,
+                },
+            }
+        )
 
     return enriched_rows
