@@ -485,6 +485,32 @@ def build_mismatch_details(row, transaction_flags):
 
     return mismatch_details
 
+@router.get("/account-hold/summary")
+async def get_account_hold_summary(db=Depends(get_db)):
+    base_cte = get_base_cte()
+
+    query = f"""
+        {base_cte}
+        SELECT
+            COUNT(*) AS total_agents,
+            COUNT(*) FILTER (WHERE b.has_ar_balance) AS agents_with_ar_balance,
+            COUNT(*) FILTER (WHERE b.has_account_hold) AS agents_with_account_hold
+        FROM b
+    """
+
+    try:
+        with db.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query)
+            row = cur.fetchone()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Summary query failed: {str(e)}")
+
+    return {
+        "total_agents": int(row["total_agents"] or 0),
+        "agents_with_ar_balance": int(row["agents_with_ar_balance"] or 0),
+        "agents_with_account_hold": int(row["agents_with_account_hold"] or 0),
+    }
+
 
 @router.get("/account-hold")
 async def get_account_hold_listing(
