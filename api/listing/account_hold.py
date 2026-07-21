@@ -1,13 +1,13 @@
 from decimal import Decimal
 from datetime import date, datetime
 from math import ceil
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from psycopg2.extras import RealDictCursor
 
 from db import get_db
-from services.account_hold_helper import fetch_ar_balance
 
 router = APIRouter()
 
@@ -22,155 +22,153 @@ def serialize_value(value):
     return value
 
 
+def normalize_email(value):
+    if not value:
+        return None
+    return str(value).strip().lower()
+
+
 def has_account_hold_tag(agenttags):
     if not agenttags:
         return False
-    return "accounthold" in {tag.strip().lower() for tag in str(agenttags).split(",") if tag.strip()}
+    return "accounthold" in {
+        tag.strip().lower()
+        for tag in str(agenttags).split(",")
+        if tag.strip()
+    }
 
 
-LISTING_BASE_CTE = """
-    WITH all_agents AS (
-        SELECT
-            u.display_name,
-            u.primary_emailaddress,
-            u.agenttags,
-            LOWER(TRIM(u.display_name)) AS normalized_display_name
-        FROM brokerage_engine_users u
-    ),
-
-    unified_transactions AS (
-        SELECT
-            be.transaction_identifier_transactionid,
-            be.buying_agent_name AS raw_agent_names,
-            'brokerage_engine' AS source_name
-        FROM brokerage_engine be
-
-        UNION ALL
-
-        SELECT
-            oi.transaction_identifier_transactionid,
-            oi.agents AS raw_agent_names,
-            'otherincome_transactions' AS source_name
-        FROM otherincome_transactions oi
-    ),
-
-    split_transaction_agents AS (
-        SELECT
-            ut.transaction_identifier_transactionid,
-            ut.source_name,
-            LOWER(TRIM(split_name)) AS normalized_agent_name
-        FROM unified_transactions ut
-        CROSS JOIN LATERAL regexp_split_to_table(
-            COALESCE(ut.raw_agent_names, ''),
-            ','
-        ) AS split_name
-        WHERE NULLIF(TRIM(split_name), '') IS NOT NULL
-    ),
-
-    matched_transactions AS (
-        SELECT DISTINCT
-            a.display_name,
-            a.primary_emailaddress,
-            sta.transaction_identifier_transactionid
-        FROM all_agents a
-        JOIN split_transaction_agents sta
-          ON sta.normalized_agent_name = a.normalized_display_name
-    ),
-
-    latest_reconciliation_data AS (
-        SELECT DISTINCT ON (rd.transactionid)
-            rd.transactionid,
-            rd.saleguid,
-            rd.gross_commission_match,
-            rd.close_date_match,
-            rd.status_match,
-            rd.sale_price_match
-        FROM reconciliation_data rd
-        ORDER BY rd.transactionid, rd.evaluated_at DESC NULLS LAST
-    ),
-
-    transaction_summary AS (
-        SELECT
-            mt.display_name,
-            mt.primary_emailaddress,
-            COUNT(*) AS transaction_count,
-            BOOL_OR(
-                lrd.saleguid IS NULL
-                OR (lrd.gross_commission_match IS NOT NULL AND LOWER(TRIM(lrd.gross_commission_match)) <> 'match')
-                OR (lrd.close_date_match IS NOT NULL AND LOWER(TRIM(lrd.close_date_match)) <> 'match')
-                OR (lrd.status_match IS NOT NULL AND LOWER(TRIM(lrd.status_match)) <> 'match')
-                OR (lrd.sale_price_match IS NOT NULL AND LOWER(TRIM(lrd.sale_price_match)) <> 'match')
-            ) AS has_transaction_mismatch
-        FROM matched_transactions mt
-        LEFT JOIN latest_reconciliation_data lrd
-          ON lrd.transactionid = mt.transaction_identifier_transactionid
-        GROUP BY mt.display_name, mt.primary_emailaddress
-    )
-"""
-
-
-def build_listing_where_clause(has_account_hold=None, has_transaction_mismatch=None, search: str | None = None):
-    filters = []
+def build_where_clause(
+    search: str | None = None,
+    account_hold: bool | None = None,
+    ar_balance: bool | None = None,
+    match_mode: str = "and",
+):
+    search_filters = []
+    combinable_filters = []
     params = []
-
-    if has_account_hold is not None:
-        if has_account_hold:
-            filters.append("COALESCE(a.agenttags, '') ILIKE '%AccountHold%'")
-        else:
-            filters.append("COALESCE(a.agenttags, '') NOT ILIKE '%AccountHold%'")
-
-    if has_transaction_mismatch is not None:
-        filters.append("COALESCE(ts.has_transaction_mismatch, FALSE) = %s")
-        params.append(has_transaction_mismatch)
 
     if search and search.strip():
         search_value = f"%{search.strip()}%"
-        filters.append("(a.display_name ILIKE %s OR a.primary_emailaddress ILIKE %s)")
+        search_filters.append(
+            "(b.display_name ILIKE %s OR b.primary_emailaddress ILIKE %s)"
+        )
         params.extend([search_value, search_value])
 
-    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+    if account_hold is True:
+        combinable_filters.append("b.has_account_hold = TRUE")
+    elif account_hold is False:
+        combinable_filters.append("b.has_account_hold = FALSE")
+
+    if ar_balance is True:
+        combinable_filters.append("COALESCE(b.total_open_balance, 0) > 0")
+    elif ar_balance is False:
+        combinable_filters.append("COALESCE(b.total_open_balance, 0) <= 0")
+
+    clauses = []
+    if search_filters:
+        clauses.append(" AND ".join(search_filters))
+
+    if combinable_filters:
+        joiner = " AND " if match_mode == "and" else " OR "
+        combined = joiner.join(combinable_filters)
+        if len(combinable_filters) > 1:
+            combined = f"({combined})"
+        clauses.append(combined)
+
+    where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     return where_clause, params
 
 
-def fetch_agent_listing_page(
+def get_base_cte():
+    return """
+        WITH ar_summary AS (
+            SELECT
+                abd.customer_id AS customer_id,
+                MAX(COALESCE(abd.total_open_balance, 0)) AS total_open_balance,
+                MAX(COALESCE(abd.invoice_count, 0)) AS invoice_count,
+                MAX(abd.updated_at) AS ar_updated_at
+            FROM ar_balance_details abd
+            GROUP BY abd.customer_id
+        ),
+        user_base AS (
+            SELECT
+                u.display_name,
+                u.primary_emailaddress,
+                u.agenttags,
+                u.qb_customerid,
+                EXISTS (
+                    SELECT 1
+                    FROM regexp_split_to_table(COALESCE(u.agenttags, ''), ',') AS tag
+                    WHERE LOWER(TRIM(tag)) = 'accounthold'
+                ) AS has_account_hold
+            FROM brokerage_engine_users u
+        ),
+        b AS (
+            SELECT
+                ub.display_name,
+                ub.primary_emailaddress,
+                ub.agenttags,
+                ub.qb_customerid,
+                ub.has_account_hold,
+                ar.customer_id AS matched_customer_id,
+                COALESCE(ar.total_open_balance, 0) AS total_open_balance,
+                COALESCE(ar.invoice_count, 0) AS invoice_count,
+                ar.ar_updated_at,
+                (COALESCE(ar.total_open_balance, 0) > 0) AS has_ar_balance
+            FROM user_base ub
+            LEFT JOIN ar_summary ar
+              ON ar.customer_id = ub.qb_customerid
+        )
+    """
+
+
+def fetch_agent_listing_page_base(
     db,
     page: int,
     size: int,
-    has_account_hold=None,
-    has_transaction_mismatch=None,
     search: str | None = None,
+    account_hold: bool | None = None,
+    ar_balance: bool | None = None,
+    match_mode: str = "and",
 ):
     offset = (page - 1) * size
-    where_clause, params = build_listing_where_clause(
-        has_account_hold=has_account_hold,
-        has_transaction_mismatch=has_transaction_mismatch,
+    where_clause, params = build_where_clause(
         search=search,
+        account_hold=account_hold,
+        ar_balance=ar_balance,
+        match_mode=match_mode,
     )
 
+    base_cte = get_base_cte()
+
     count_query = f"""
-        {LISTING_BASE_CTE}
+        {base_cte}
         SELECT COUNT(*) AS total_count
-        FROM brokerage_engine_users a
-        LEFT JOIN transaction_summary ts
-          ON ts.display_name = a.display_name
-         AND ts.primary_emailaddress = a.primary_emailaddress
+        FROM b
         {where_clause}
     """
 
     data_query = f"""
-        {LISTING_BASE_CTE}
+        {base_cte}
         SELECT
-            a.display_name,
-            a.primary_emailaddress,
-            a.agenttags,
-            COALESCE(ts.transaction_count, 0) AS transaction_count,
-            COALESCE(ts.has_transaction_mismatch, FALSE) AS has_transaction_mismatch
-        FROM brokerage_engine_users a
-        LEFT JOIN transaction_summary ts
-          ON ts.display_name = a.display_name
-         AND ts.primary_emailaddress = a.primary_emailaddress
+            b.display_name,
+            b.primary_emailaddress,
+            b.agenttags,
+            b.qb_customerid,
+            b.matched_customer_id,
+            b.total_open_balance,
+            b.invoice_count,
+            b.ar_updated_at,
+            b.has_account_hold,
+            b.has_ar_balance
+        FROM b
         {where_clause}
-        ORDER BY a.display_name, a.primary_emailaddress
+        ORDER BY
+            b.has_account_hold DESC,
+            b.total_open_balance DESC,
+            b.display_name,
+            b.primary_emailaddress
         LIMIT %s OFFSET %s
     """
 
@@ -184,7 +182,97 @@ def fetch_agent_listing_page(
 
         return total_count, rows
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Listing query failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Listing base query failed: {str(e)}")
+
+
+def fetch_transaction_summary_for_agents(db, agent_emails: list[str]):
+    if not agent_emails:
+        return {}
+
+    query = """
+        WITH target_agents AS (
+            SELECT DISTINCT
+                LOWER(TRIM(u.primary_emailaddress)) AS normalized_email,
+                LOWER(TRIM(u.display_name)) AS normalized_name
+            FROM brokerage_engine_users u
+            WHERE u.primary_emailaddress IS NOT NULL
+              AND TRIM(u.primary_emailaddress) <> ''
+              AND LOWER(TRIM(u.primary_emailaddress)) = ANY(%s)
+        ),
+        brokerage_engine_transactions AS (
+            SELECT
+                be.transaction_identifier_transactionid AS transaction_id,
+                LOWER(TRIM(split_email)) AS normalized_email
+            FROM brokerage_engine be
+            CROSS JOIN LATERAL regexp_split_to_table(COALESCE(be.buying_agent_email, ''), ',') AS split_email
+            WHERE NULLIF(TRIM(split_email), '') IS NOT NULL
+        ),
+        otherincome_transaction_agents AS (
+            SELECT
+                oi.transaction_identifier_transactionid AS transaction_id,
+                LOWER(TRIM(split_agent)) AS normalized_name
+            FROM otherincome_transactions oi
+            CROSS JOIN LATERAL regexp_split_to_table(COALESCE(oi.agents, ''), ',') AS split_agent
+            WHERE NULLIF(TRIM(split_agent), '') IS NOT NULL
+        ),
+        matched_be_transactions AS (
+            SELECT DISTINCT ta.normalized_email, bet.transaction_id
+            FROM target_agents ta
+            JOIN brokerage_engine_transactions bet
+              ON bet.normalized_email = ta.normalized_email
+        ),
+        matched_oi_transactions AS (
+            SELECT DISTINCT ta.normalized_email, oita.transaction_id
+            FROM target_agents ta
+            JOIN otherincome_transaction_agents oita
+              ON oita.normalized_name = ta.normalized_name
+        ),
+        matched_transactions AS (
+            SELECT normalized_email, transaction_id FROM matched_be_transactions
+            UNION
+            SELECT normalized_email, transaction_id FROM matched_oi_transactions
+        ),
+        latest_reconciliation_data AS (
+            SELECT DISTINCT ON (rd.transactionid)
+                rd.transactionid,
+                rd.saleguid,
+                rd.gross_commission_match,
+                rd.close_date_match,
+                rd.status_match,
+                rd.sale_price_match
+            FROM reconciliation_data rd
+            ORDER BY rd.transactionid, rd.evaluated_at DESC NULLS LAST
+        )
+        SELECT
+            mt.normalized_email,
+            COUNT(DISTINCT mt.transaction_id) AS transaction_count,
+            BOOL_OR(
+                lrd.saleguid IS NULL
+                OR (lrd.gross_commission_match IS NOT NULL AND LOWER(TRIM(lrd.gross_commission_match)) <> 'match')
+                OR (lrd.close_date_match IS NOT NULL AND LOWER(TRIM(lrd.close_date_match)) <> 'match')
+                OR (lrd.status_match IS NOT NULL AND LOWER(TRIM(lrd.status_match)) <> 'match')
+                OR (lrd.sale_price_match IS NOT NULL AND LOWER(TRIM(lrd.sale_price_match)) <> 'match')
+            ) AS has_transaction_mismatch
+        FROM matched_transactions mt
+        LEFT JOIN latest_reconciliation_data lrd
+          ON lrd.transactionid = mt.transaction_id
+        GROUP BY mt.normalized_email
+    """
+
+    try:
+        with db.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query, (agent_emails,))
+            rows = cur.fetchall()
+
+        return {
+            row["normalized_email"]: {
+                "transaction_count": int(row["transaction_count"] or 0),
+                "has_transaction_mismatch": bool(row["has_transaction_mismatch"]),
+            }
+            for row in rows
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Transaction summary query failed: {str(e)}")
 
 
 def fetch_agent_by_email(db, email: str):
@@ -192,9 +280,10 @@ def fetch_agent_by_email(db, email: str):
         SELECT
             u.display_name,
             u.primary_emailaddress,
-            u.agenttags
+            u.agenttags,
+            u.qb_customerid
         FROM brokerage_engine_users u
-        WHERE LOWER(u.primary_emailaddress) = LOWER(%s)
+        WHERE LOWER(TRIM(u.primary_emailaddress)) = LOWER(TRIM(%s))
         LIMIT 1
     """
 
@@ -206,74 +295,97 @@ def fetch_agent_by_email(db, email: str):
         raise HTTPException(status_code=500, detail=f"Agent lookup failed: {str(e)}")
 
 
+def fetch_agent_ar_balance(db, qb_customerid):
+    if qb_customerid is None:
+        return None
+
+    query = """
+        SELECT
+            abd.customer_id AS customer_id,
+            MAX(COALESCE(abd.total_open_balance, 0)) AS total_open_balance,
+            MAX(COALESCE(abd.invoice_count, 0)) AS invoice_count,
+            MAX(abd.updated_at) AS updated_at
+        FROM ar_balance_details abd
+        WHERE abd.customer_id = %s
+        GROUP BY abd.customer_id
+    """
+
+    try:
+        with db.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query, (qb_customerid,))
+            row = cur.fetchone()
+
+        if not row:
+            return None
+
+        return {
+            "customer_id": str(row["customer_id"]),
+            "total_open_balance": serialize_value(row["total_open_balance"]),
+            "invoice_count": int(row["invoice_count"] or 0),
+            "updated_at": serialize_value(row["updated_at"]),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AR balance lookup failed: {str(e)}")
+
+
 def fetch_agent_detail_transactions(db, email: str):
     query = """
         WITH target_agent AS (
             SELECT
-                u.display_name,
-                u.primary_emailaddress,
-                u.agenttags,
-                LOWER(TRIM(u.display_name)) AS normalized_display_name
+                LOWER(TRIM(u.primary_emailaddress)) AS normalized_email,
+                LOWER(TRIM(u.display_name)) AS normalized_name
             FROM brokerage_engine_users u
-            WHERE LOWER(u.primary_emailaddress) = LOWER(%s)
+            WHERE LOWER(TRIM(u.primary_emailaddress)) = LOWER(TRIM(%s))
+            LIMIT 1
         ),
-
-        unified_transactions AS (
+        brokerage_engine_transactions AS (
             SELECT
-                be.transaction_identifier_transactionid,
+                be.transaction_identifier_transactionid AS transaction_id,
                 be.property_address,
-                be.buying_agent_name AS raw_agent_names,
+                LOWER(TRIM(split_email)) AS normalized_email,
                 'brokerage_engine' AS source_name
             FROM brokerage_engine be
-
-            UNION ALL
-
+            CROSS JOIN LATERAL regexp_split_to_table(COALESCE(be.buying_agent_email, ''), ',') AS split_email
+            WHERE NULLIF(TRIM(split_email), '') IS NOT NULL
+        ),
+        otherincome_transaction_agents AS (
             SELECT
-                oi.transaction_identifier_transactionid,
+                oi.transaction_identifier_transactionid AS transaction_id,
                 oi.property_address,
-                oi.agents AS raw_agent_names,
+                LOWER(TRIM(split_agent)) AS normalized_name,
                 'otherincome_transactions' AS source_name
             FROM otherincome_transactions oi
+            CROSS JOIN LATERAL regexp_split_to_table(COALESCE(oi.agents, ''), ',') AS split_agent
+            WHERE NULLIF(TRIM(split_agent), '') IS NOT NULL
         ),
-
-        split_transaction_agents AS (
+        matched_be_transactions AS (
             SELECT
-                ut.transaction_identifier_transactionid,
-                ut.property_address,
-                ut.source_name,
-                LOWER(TRIM(split_name)) AS normalized_agent_name
-            FROM unified_transactions ut
-            CROSS JOIN LATERAL regexp_split_to_table(
-                COALESCE(ut.raw_agent_names, ''),
-                ','
-            ) AS split_name
-            WHERE NULLIF(TRIM(split_name), '') IS NOT NULL
+                bet.transaction_id,
+                bet.property_address,
+                bet.source_name
+            FROM brokerage_engine_transactions bet
+            JOIN target_agent ta
+              ON ta.normalized_email = bet.normalized_email
         ),
-
+        matched_oi_transactions AS (
+            SELECT
+                oita.transaction_id,
+                oita.property_address,
+                oita.source_name
+            FROM otherincome_transaction_agents oita
+            JOIN target_agent ta
+              ON ta.normalized_name = oita.normalized_name
+        ),
         matched_transactions AS (
-            SELECT DISTINCT ON (
-                ta.display_name,
-                ta.primary_emailaddress,
-                sta.transaction_identifier_transactionid,
-                sta.source_name
-            )
-                ta.display_name,
-                ta.primary_emailaddress,
-                ta.agenttags,
-                sta.transaction_identifier_transactionid,
-                sta.property_address,
-                sta.source_name
-            FROM target_agent ta
-            JOIN split_transaction_agents sta
-              ON sta.normalized_agent_name = ta.normalized_display_name
-            ORDER BY
-                ta.display_name,
-                ta.primary_emailaddress,
-                sta.transaction_identifier_transactionid,
-                sta.source_name,
-                sta.property_address
+            SELECT DISTINCT ON (transaction_id, source_name)
+                transaction_id, property_address, source_name
+            FROM (
+                SELECT * FROM matched_be_transactions
+                UNION ALL
+                SELECT * FROM matched_oi_transactions
+            ) combined
+            ORDER BY transaction_id, source_name, property_address
         ),
-
         latest_reconciliation_data AS (
             SELECT DISTINCT ON (rd.transactionid)
                 rd.transactionid,
@@ -296,9 +408,8 @@ def fetch_agent_detail_transactions(db, email: str):
             FROM reconciliation_data rd
             ORDER BY rd.transactionid, rd.evaluated_at DESC NULLS LAST
         )
-
         SELECT
-            mt.transaction_identifier_transactionid,
+            mt.transaction_id AS transaction_identifier_transactionid,
             mt.property_address,
             mt.source_name,
             lrd.be_source_table,
@@ -319,8 +430,8 @@ def fetch_agent_detail_transactions(db, email: str):
             lrd.sale_price_match
         FROM matched_transactions mt
         LEFT JOIN latest_reconciliation_data lrd
-          ON lrd.transactionid = mt.transaction_identifier_transactionid
-        ORDER BY mt.property_address, mt.transaction_identifier_transactionid
+          ON lrd.transactionid = mt.transaction_id
+        ORDER BY mt.property_address, mt.transaction_id
     """
 
     try:
@@ -356,31 +467,17 @@ def build_mismatch_details(row, transaction_flags):
         return {}
 
     mismatch_field_map = {
-        "gross_commission": {
-            "be_key": "be_gross_commission",
-            "skyslope_key": "skyslope_gross_commission",
-        },
-        "close_date": {
-            "be_key": "be_close_date_value",
-            "skyslope_key": "skyslope_close_date_value",
-        },
-        "status": {
-            "be_key": "be_status_value",
-            "skyslope_key": "skyslope_status_value",
-        },
-        "sale_price": {
-            "be_key": "be_sale_price",
-            "skyslope_key": "skyslope_sale_price",
-        },
+        "gross_commission": {"be_key": "be_gross_commission", "skyslope_key": "skyslope_gross_commission"},
+        "close_date": {"be_key": "be_close_date_value", "skyslope_key": "skyslope_close_date_value"},
+        "status": {"be_key": "be_status_value", "skyslope_key": "skyslope_status_value"},
+        "sale_price": {"be_key": "be_sale_price", "skyslope_key": "skyslope_sale_price"},
     }
 
     mismatch_details = {}
-
     for flag in transaction_flags:
         config = mismatch_field_map.get(flag)
         if not config:
             continue
-
         mismatch_details[flag] = {
             "be": serialize_value(row.get(config["be_key"])),
             "skyslope": serialize_value(row.get(config["skyslope_key"])),
@@ -393,40 +490,59 @@ def build_mismatch_details(row, transaction_flags):
 async def get_account_hold_listing(
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=100),
-    has_account_hold: bool | None = Query(None),
-    has_transaction_mismatch: bool | None = Query(None),
+    account_hold: bool | None = Query(None),
+    ar_balance: bool | None = Query(None),
+    match_mode: Literal["and", "or"] = Query("and"),
     search: str | None = Query(None, max_length=100),
     db=Depends(get_db),
 ):
-    total_count, rows = fetch_agent_listing_page(
+    total_count, agent_rows = fetch_agent_listing_page_base(
         db=db,
         page=page,
         size=size,
-        has_account_hold=has_account_hold,
-        has_transaction_mismatch=has_transaction_mismatch,
         search=search,
+        account_hold=account_hold,
+        ar_balance=ar_balance,
+        match_mode=match_mode,
     )
 
-    total_pages = ceil(total_count / size) if total_count else 1
+    agent_emails = [
+        normalize_email(row["primary_emailaddress"])
+        for row in agent_rows
+        if row.get("primary_emailaddress")
+    ]
+
+    transaction_summary_map = fetch_transaction_summary_for_agents(db, agent_emails)
 
     data = []
-    for row in rows:
+    for row in agent_rows:
+        normalized_email = normalize_email(row.get("primary_emailaddress"))
+        tx_summary = transaction_summary_map.get(normalized_email, {})
+
+        total_open_balance = float(row.get("total_open_balance") or 0)
+        has_account_hold = bool(row.get("has_account_hold"))
+        has_ar_balance = total_open_balance > 0
+
         broker_flags = []
-        transaction_flags = []
-
-        if has_account_hold_tag(row.get("agenttags")):
+        if has_account_hold:
             broker_flags.append("account_hold")
+        if has_ar_balance:
+            broker_flags.append("ar_balance")
 
-        if row.get("has_transaction_mismatch"):
+        transaction_flags = []
+        if bool(tx_summary.get("has_transaction_mismatch", False)):
             transaction_flags.append("transaction_mismatch")
 
         data.append({
             "display_name": row["display_name"],
             "primary_emailaddress": row["primary_emailaddress"],
-            "transaction_count": int(row["transaction_count"] or 0),
+            "customer_id": row["qb_customerid"],
+            "transaction_count": int(tx_summary.get("transaction_count") or 0),
             "broker_flags": broker_flags,
             "transaction_flags": transaction_flags,
         })
+
+    total_pages = ceil(total_count / size) if total_count else 1
 
     return {
         "count": len(data),
@@ -438,21 +554,75 @@ async def get_account_hold_listing(
     }
 
 
-@router.get("/account-hold/detail/{email}")
-async def get_account_hold_detail(email: str, db=Depends(get_db)):
-    agent = fetch_agent_by_email(db, email)
+@router.get("/account-hold/detail/{customer_id}")
+async def get_account_hold_detail(customer_id: int, db=Depends(get_db)):
+    try:
+        with db.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    u.display_name,
+                    u.primary_emailaddress,
+                    u.qb_customerid
+                FROM brokerage_engine_users u
+                WHERE u.qb_customerid = %s
+                LIMIT 1
+                """,
+                (customer_id,),
+            )
+            agent = cur.fetchone()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Agent lookup failed: {str(e)}")
+
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    rows = fetch_agent_detail_transactions(db, email)
+    rows = fetch_agent_detail_transactions(db, agent["primary_emailaddress"])
+
+    ar_balance_row = None
+    try:
+        with db.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT abd.raw_invoice, abd.updated_at
+                FROM ar_balance_details abd
+                WHERE abd.customer_id = %s
+                ORDER BY abd.updated_at DESC NULLS LAST
+                LIMIT 1
+                """,
+                (customer_id,),
+            )
+            row = cur.fetchone()
+
+        if row and row.get("raw_invoice"):
+            raw_invoice = row["raw_invoice"]
+            open_invoices = [
+                {
+                    "balance": serialize_value(inv.get("balance")),
+                    "due_date": inv.get("due_date"),
+                    "txn_date": inv.get("txn_date"),
+                    "total_amt": serialize_value(inv.get("total_amt")),
+                    "doc_number": inv.get("doc_number"),
+                    "invoice_id": inv.get("invoice_id"),
+                }
+                for inv in (raw_invoice.get("open_invoices") or [])
+            ]
+
+            ar_balance_row = {
+                "balance": serialize_value(raw_invoice.get("balance")),
+                "open_invoices": open_invoices,
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AR balance lookup failed: {str(e)}")
 
     transactions = []
-    transaction_flags_rollup = []
     seen_transactions = set()
 
     for row in rows:
         transaction_id = serialize_value(row["transaction_identifier_transactionid"])
-        if transaction_id in seen_transactions:
+        dedupe_key = (transaction_id, row.get("source_name"))
+
+        if dedupe_key in seen_transactions:
             continue
 
         per_transaction_flags = build_transaction_flags(row)
@@ -468,34 +638,13 @@ async def get_account_hold_detail(email: str, db=Depends(get_db)):
             "transaction_flags": per_transaction_flags,
             "mismatch_details": mismatch_details,
         })
-        seen_transactions.add(transaction_id)
-
-    if any(tx["transaction_flags"] for tx in transactions):
-        transaction_flags_rollup.append("transaction_mismatch")
-
-    ar_input_rows = [{
-        "display_name": agent["display_name"],
-        "primary_emailaddress": agent["primary_emailaddress"],
-        "email": agent["primary_emailaddress"],
-    }]
-
-    ar_enriched_rows = await fetch_ar_balance(ar_input_rows, db)
-    ar_balance = ar_enriched_rows[0].get("ar_balance") if ar_enriched_rows else None
-
-    broker_flags = []
-    if has_account_hold_tag(agent.get("agenttags")):
-        broker_flags.append("account_hold")
-
-    if ar_balance and ar_balance.get("total_open_balance") is not None:
-        if float(ar_balance["total_open_balance"]) > 0:
-            broker_flags.append("ar_balance")
+        seen_transactions.add(dedupe_key)
 
     return {
         "display_name": agent["display_name"],
         "primary_emailaddress": agent["primary_emailaddress"],
+        "customer_id": agent["qb_customerid"],
         "transaction_count": len(transactions),
-        "broker_flags": broker_flags,
-        "transaction_flags": transaction_flags_rollup,
-        "ar_balance": ar_balance,
+        "ar_balance": ar_balance_row,
         "transactions": transactions,
     }

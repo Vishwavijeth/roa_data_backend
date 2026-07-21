@@ -37,6 +37,7 @@ from api.reconciliation.recon_analytics import router as recon_analytics_router
 from api.reconciliation.recon_data_population import router as recon_data_populate_router
 from api.reconciliation.data_sync import router as data_sync_router
 from api.qb_customerid_population import router as qb_customerid_population_router
+from api.quickbooks.ar_balance_details import router as ar_balance_details_router
 from api.cron import router as cron_router
 
 app = FastAPI()
@@ -86,4 +87,5 @@ app.include_router(recon_analytics_router)
 app.include_router(recon_data_populate_router)
 app.include_router(data_sync_router)
 app.include_router(cron_router)
+app.include_router(ar_balance_details_router)
 app.include_router(broker_hold_router)
