@@ -1,5 +1,7 @@
 import json
 import logging
+import random
+import time
 import psycopg2
 import requests
 
@@ -32,10 +34,16 @@ REQUEST_TIMEOUT = 300
 MAX_RETRIES = 3
 BACKOFF_FACTOR = 1
 
-API_DETAIL_WORKERS = 1
-DB_WORKERS = 3
+API_DETAIL_WORKERS = 2
 BATCH_SIZE = 50
 DEBUG_SAMPLE_LIMIT = 10
+FAILED_SALEGUID_RETRY_ROUNDS = 1
+
+RATE_LIMIT_DEFAULT_LIMIT = 100
+RATE_LIMIT_WINDOW_SECONDS = 60
+RATE_LIMIT_SAFETY_BUFFER = 8
+RATE_LIMIT_MIN_INTERVAL = 0.45
+RATE_LIMIT_LOW_WATERMARK = 15
 
 progress_lock = Lock()
 failed_saleguids_lock = Lock()
@@ -46,6 +54,116 @@ error_count_global = 0
 saved_count_global = 0
 failed_saleguids_global = set()
 detail_cache: Dict[str, Dict[str, Any]] = {}
+
+
+class SkySlopeRateLimiter:
+    def __init__(
+        self,
+        default_limit: int = RATE_LIMIT_DEFAULT_LIMIT,
+        window_seconds: int = RATE_LIMIT_WINDOW_SECONDS,
+        safety_buffer: int = RATE_LIMIT_SAFETY_BUFFER,
+        min_interval: float = RATE_LIMIT_MIN_INTERVAL,
+        low_watermark: int = RATE_LIMIT_LOW_WATERMARK,
+    ):
+        self.lock = Lock()
+        self.default_limit = default_limit
+        self.window_seconds = window_seconds
+        self.safety_buffer = safety_buffer
+        self.min_interval = min_interval
+        self.low_watermark = low_watermark
+
+        self.limit = default_limit
+        self.remaining = default_limit
+        self.reset_ts = 0
+        self.next_allowed_at = 0.0
+
+    def _sleep_unlocked(self, seconds: float, reason: str, url: str) -> None:
+        if seconds <= 0:
+            return
+        logger.info("Rate limiter sleeping %.2fs for %s url=%s", seconds, reason, url)
+        time.sleep(seconds)
+
+    def wait_before_request(self, url: str) -> None:
+        with self.lock:
+            now = time.time()
+
+            if self.reset_ts and now >= self.reset_ts:
+                self.remaining = self.limit or self.default_limit
+                self.reset_ts = 0
+
+            wait_for = max(0.0, self.next_allowed_at - now)
+            if wait_for > 0:
+                self._sleep_unlocked(wait_for, "request pacing", url)
+
+            now = time.time()
+            self.next_allowed_at = max(self.next_allowed_at, now) + self.min_interval
+
+            if self.remaining is not None and self.remaining <= 1 and self.reset_ts and self.reset_ts > now:
+                reset_wait = max(0.0, self.reset_ts - now) + random.uniform(0.05, 0.25)
+                self._sleep_unlocked(reset_wait, "remaining quota exhausted", url)
+                now = time.time()
+                self.next_allowed_at = max(self.next_allowed_at, now) + self.min_interval
+
+    def update_from_response(self, response: requests.Response, url: str) -> None:
+        limit = clean_int(response.headers.get("x-ratelimit-limit"))
+        remaining = clean_int(response.headers.get("x-ratelimit-remaining"))
+        reset_ts = clean_int(response.headers.get("x-ratelimit-reset"))
+
+        if limit is None:
+            limit = self.default_limit
+
+        with self.lock:
+            self.limit = limit
+            if remaining is not None:
+                self.remaining = remaining
+            if reset_ts is not None:
+                self.reset_ts = reset_ts
+
+            logger.info(
+                "RateLimit headers for %s -> limit=%s remaining=%s reset=%s",
+                url, self.limit, self.remaining, self.reset_ts
+            )
+
+            now = time.time()
+
+            if self.reset_ts and self.reset_ts <= now:
+                self.remaining = self.limit
+                self.reset_ts = 0
+                return
+
+            if self.remaining is None or not self.reset_ts or self.reset_ts <= now:
+                return
+
+            seconds_left = max(self.reset_ts - now, 1.0)
+            safe_remaining = max(self.remaining - self.safety_buffer, 1)
+            dynamic_interval = max(seconds_left / safe_remaining, self.min_interval)
+
+            if self.remaining <= self.low_watermark:
+                dynamic_interval = max(dynamic_interval, 1.0)
+
+            self.next_allowed_at = max(self.next_allowed_at, now + dynamic_interval)
+
+    def backoff_after_429(self, url: str, response: Optional[requests.Response] = None) -> None:
+        reset_ts = None
+        if response is not None:
+            reset_ts = clean_int(response.headers.get("x-ratelimit-reset"))
+
+        with self.lock:
+            now = time.time()
+            if reset_ts and reset_ts > now:
+                self.reset_ts = reset_ts
+                self.remaining = 0
+                wait_for = max(0.0, reset_ts - now) + random.uniform(0.15, 0.5)
+            else:
+                wait_for = 5.0 + random.uniform(0.15, 0.5)
+
+            self.next_allowed_at = max(self.next_allowed_at, now + wait_for)
+
+        logger.warning("429 received for %s, sleeping %.2fs until rate-limit reset", url, wait_for)
+        time.sleep(wait_for)
+
+
+RATE_LIMITER = SkySlopeRateLimiter()
 
 
 def get_last_sync_date() -> str:
@@ -267,28 +385,36 @@ def clean_url(value: Any) -> Optional[str]:
 
 
 def fetch_api(url: str) -> Optional[Dict[str, Any]]:
-    try:
-        response = HTTP_SESSION.get(url, timeout=REQUEST_TIMEOUT)
+    for attempt in range(1, 3):
+        try:
+            RATE_LIMITER.wait_before_request(url)
+            response = HTTP_SESSION.get(url, timeout=REQUEST_TIMEOUT)
+            RATE_LIMITER.update_from_response(response, url)
 
-        if response.status_code == 429:
-            logger.warning(
-                "SkySlope rate limit hit for url=%s remaining=%s reset=%s",
-                url,
-                response.headers.get("x-ratelimit-remaining"),
-                response.headers.get("x-ratelimit-reset"),
-            )
-            return None
+            if response.status_code == 429:
+                logger.warning(
+                    "SkySlope rate limit hit for url=%s remaining=%s reset=%s",
+                    url,
+                    response.headers.get("x-ratelimit-remaining"),
+                    response.headers.get("x-ratelimit-reset"),
+                )
+                RATE_LIMITER.backoff_after_429(url, response)
+                continue
 
-        response.raise_for_status()
-        text = response.content.decode("utf-8-sig")
-        return json.loads(text)
+            response.raise_for_status()
+            text = response.content.decode("utf-8-sig")
+            return json.loads(text)
 
-    except requests.exceptions.Timeout:
-        logger.error("Timeout fetching: %s", url)
-    except requests.exceptions.RequestException as e:
-        logger.error("Request error for %s: %s", url, e)
-    except ValueError as e:
-        logger.error("JSON decode error for %s: %s", url, e)
+        except requests.exceptions.Timeout:
+            logger.error("Timeout fetching: %s", url)
+            break
+        except requests.exceptions.RequestException as e:
+            logger.error("Request error for %s: %s", url, e)
+            break
+        except ValueError as e:
+            logger.error("JSON decode error for %s: %s", url, e)
+            break
+
     return None
 
 
@@ -323,20 +449,6 @@ def fetch_sales_bulk() -> List[Dict[str, Any]]:
 
     logger.info("Found %s bulk sales in total.", len(sales))
     return sales
-
-
-def deduplicate_sales_by_guid(sales: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    latest_by_guid: Dict[str, Dict[str, Any]] = {}
-
-    for item in sales:
-        sale_guid = clean_guid(item.get("saleGuid"))
-        if not sale_guid:
-            continue
-        latest_by_guid[sale_guid] = item
-
-    deduped = list(latest_by_guid.values())
-    logger.info("Deduplicated bulk sales from %s to %s", len(sales), len(deduped))
-    return deduped
 
 
 def fetch_sale_detail(sale_guid: str) -> Optional[Dict[str, Any]]:
@@ -554,28 +666,6 @@ def process_sale(detail_item: Dict[str, Any], bulk_item: Dict[str, Any]) -> Opti
         "activity_docs": all_activity_docs,
         "comments": all_comments,
     }
-
-
-def deduplicate_rows(rows: Sequence[Tuple], key_indices: Sequence[int]) -> List[Tuple]:
-    seen = set()
-    unique = []
-
-    for row in reversed(rows):
-        key = tuple(row[i] for i in key_indices)
-        if key not in seen:
-            seen.add(key)
-            unique.append(row)
-
-    return unique[::-1]
-
-
-def log_dedup_stats(worker_id: int, table_name: str, original_rows: Sequence[Tuple], deduped_rows: Sequence[Tuple]) -> None:
-    dropped = len(original_rows) - len(deduped_rows)
-    if dropped > 0:
-        logger.info(
-            "[WORKER-%s] %s: before=%s, after=%s, dedup_dropped=%s",
-            worker_id, table_name, len(original_rows), len(deduped_rows), dropped
-        )
 
 
 def bulk_execute_values(cur, sql: str, rows: Sequence[Tuple]) -> None:
@@ -943,57 +1033,23 @@ def register_failed_saleguid(sale_guid: str) -> None:
         failed_saleguids_global.add(sale_guid)
 
 
-def fetch_and_transform_sale(bulk_item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    sale_guid = clean_guid(bulk_item.get("saleGuid"))
-    if not sale_guid:
-        return None
-
-    detail_item = fetch_sale_detail(sale_guid)
-    if not detail_item:
-        register_failed_saleguid(sale_guid)
-        return None
-
-    data = process_sale(detail_item, bulk_item)
-    if not data:
-        register_failed_saleguid(sale_guid)
-        return None
-
-    return data
+def build_retry_sales_from_failed_guids(failed_sale_guids: Sequence[str]) -> List[Dict[str, Any]]:
+    return [{"saleGuid": guid} for guid in failed_sale_guids if clean_guid(guid)]
 
 
-def fetch_all_sale_payloads(sales: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    payloads: List[Dict[str, Any]] = []
-
-    if API_DETAIL_WORKERS == 1:
-        for idx, bulk_item in enumerate(sales, start=1):
-            payload = fetch_and_transform_sale(bulk_item)
-            if payload:
-                payloads.append(payload)
-            if idx % 100 == 0:
-                logger.info("API stage progress: %s/%s sales prepared", idx, len(sales))
-        return payloads
-
-    with ThreadPoolExecutor(max_workers=API_DETAIL_WORKERS) as executor:
-        futures = [executor.submit(fetch_and_transform_sale, item) for item in sales]
-        for idx, future in enumerate(as_completed(futures), start=1):
-            try:
-                payload = future.result()
-                if payload:
-                    payloads.append(payload)
-            except Exception as e:
-                logger.error("API stage error: %s", e, exc_info=True)
-
-            if idx % 100 == 0:
-                logger.info("API stage progress: %s/%s sales prepared", idx, len(sales))
-
-    return payloads
-
-
-def process_payload_batch(payload_batch: List[Dict[str, Any]], worker_id: int) -> None:
+def process_sale_batch(sales_batch: List[Dict[str, Any]], worker_id: int, retry_round: int = 0) -> None:
     global processed_count, saved_count_global, error_count_global
 
     conn = get_conn()
     cur = None
+
+    skipped_no_guid = 0
+    skipped_detail_missing = 0
+    skipped_process_sale = 0
+
+    sample_no_guid = []
+    sample_detail_missing = []
+    sample_process_sale_none = []
 
     try:
         cur = conn.cursor()
@@ -1021,13 +1077,33 @@ def process_payload_batch(payload_batch: List[Dict[str, Any]], worker_id: int) -
 
         batch_saved = 0
 
-        for data in payload_batch:
-            sale_data = data["sale"]
-            sale_guid = clean_guid(sale_data.get("saleGuid"))
+        for bulk_item in sales_batch:
+            raw_sale_guid = bulk_item.get("saleGuid")
+            sale_guid = clean_guid(raw_sale_guid)
 
             if not sale_guid:
+                skipped_no_guid += 1
+                if len(sample_no_guid) < DEBUG_SAMPLE_LIMIT:
+                    sample_no_guid.append(raw_sale_guid)
                 continue
 
+            detail_item = fetch_sale_detail(sale_guid)
+            if not detail_item:
+                skipped_detail_missing += 1
+                register_failed_saleguid(sale_guid)
+                if len(sample_detail_missing) < DEBUG_SAMPLE_LIMIT:
+                    sample_detail_missing.append(sale_guid)
+                continue
+
+            data = process_sale(detail_item, bulk_item)
+            if not data:
+                skipped_process_sale += 1
+                register_failed_saleguid(sale_guid)
+                if len(sample_process_sale_none) < DEBUG_SAMPLE_LIMIT:
+                    sample_process_sale_none.append(sale_guid)
+                continue
+
+            sale_data = data["sale"]
             sale_guids_in_batch.add(sale_guid)
 
             for field in ("createdByGuid", "agentGuid", "reviewerGuid"):
@@ -1059,6 +1135,14 @@ def process_payload_batch(payload_batch: List[Dict[str, Any]], worker_id: int) -
             off_name = clean_text(sale_data.get("officeName"))
             if off_guid:
                 offices_to_ensure[off_guid] = off_name
+
+            sale_file_id = clean_text(sale_data.get("fileId"))
+            sale_url = clean_url(sale_data.get("url"))
+
+            logger.info(
+                "[WORKER-%s][RETRY-%s] saleGuid=%s fileId=%r url=%r",
+                worker_id, retry_round, sale_guid, sale_file_id, sale_url
+            )
 
             sales_rows.append(build_sale_row(sale_data))
 
@@ -1261,53 +1345,38 @@ def process_payload_batch(payload_batch: List[Dict[str, Any]], worker_id: int) -
 
             batch_saved += 1
 
+        if sample_no_guid:
+            logger.info("[WORKER-%s][RETRY-%s] sample skipped_no_guid: %s", worker_id, retry_round, sample_no_guid)
+
+        if sample_detail_missing:
+            logger.info("[WORKER-%s][RETRY-%s] sample skipped_detail_missing: %s", worker_id, retry_round, sample_detail_missing)
+
+        if sample_process_sale_none:
+            logger.info("[WORKER-%s][RETRY-%s] sample skipped_process_sale: %s", worker_id, retry_round, sample_process_sale_none)
+
         if not sales_rows:
-            logger.warning("[WORKER-%s] No sales rows built for payload batch", worker_id)
+            logger.warning(
+                "[WORKER-%s][RETRY-%s] No sales_rows built. batch_size=%s, skipped_no_guid=%s, "
+                "skipped_detail_missing=%s, skipped_process_sale=%s",
+                worker_id, retry_round, len(sales_batch), skipped_no_guid, skipped_detail_missing, skipped_process_sale
+            )
             return
-
-        sales_rows_dedup = deduplicate_rows(sales_rows, [1])
-        property_rows_dedup = deduplicate_rows(property_rows, [0]) if property_rows else []
-        commission_rows_dedup = deduplicate_rows(commission_rows, [0]) if commission_rows else []
-        file_creator_rows_dedup = deduplicate_rows(file_creator_rows, [0, 1]) if file_creator_rows else []
-        contact_rows_dedup = deduplicate_rows(contact_rows, [0, 1, 2]) if contact_rows else []
-        co_agent_rows_dedup = deduplicate_rows(co_agent_rows, [0, 1]) if co_agent_rows else []
-        coordinator_rows_dedup = deduplicate_rows(coordinator_rows, [0, 1]) if coordinator_rows else []
-        split_rows_dedup = deduplicate_rows(split_rows, [0, 1]) if split_rows else []
-        referral_rows_dedup = deduplicate_rows(referral_rows, [0]) if referral_rows else []
-        emd_rows_dedup = deduplicate_rows(emd_rows, [0]) if emd_rows else []
-        activity_rows_dedup = deduplicate_rows(activity_rows, [0, 1]) if activity_rows else []
-        doc_rows_dedup = deduplicate_rows(doc_rows, [2, 0]) if doc_rows else []
-        activity_doc_rows_dedup = deduplicate_rows(activity_doc_rows, [0, 1, 2]) if activity_doc_rows else []
-
-        log_dedup_stats(worker_id, "sale", sales_rows, sales_rows_dedup)
-        log_dedup_stats(worker_id, "sale_property", property_rows, property_rows_dedup)
-        log_dedup_stats(worker_id, "sale_commission", commission_rows, commission_rows_dedup)
-        log_dedup_stats(worker_id, "sale_file_creator", file_creator_rows, file_creator_rows_dedup)
-        log_dedup_stats(worker_id, "sale_contact", contact_rows, contact_rows_dedup)
-        log_dedup_stats(worker_id, "sale_co_agent", co_agent_rows, co_agent_rows_dedup)
-        log_dedup_stats(worker_id, "sale_transaction_coordinator", coordinator_rows, coordinator_rows_dedup)
-        log_dedup_stats(worker_id, "sale_commission_split", split_rows, split_rows_dedup)
-        log_dedup_stats(worker_id, "sale_commission_referral", referral_rows, referral_rows_dedup)
-        log_dedup_stats(worker_id, "sale_earnest_money_deposit", emd_rows, emd_rows_dedup)
-        log_dedup_stats(worker_id, "sale_checklist_activity", activity_rows, activity_rows_dedup)
-        log_dedup_stats(worker_id, "sale_checklist_doc", doc_rows, doc_rows_dedup)
-        log_dedup_stats(worker_id, "sale_checklist_activity_docs", activity_doc_rows, activity_doc_rows_dedup)
 
         ensure_reference_data(cur, worker_id, users_to_ensure, checklists_to_ensure, offices_to_ensure)
 
-        bulk_execute_values(cur, SALE_UPSERT_SQL, sales_rows_dedup)
-        bulk_execute_values(cur, FILE_CREATOR_UPSERT_SQL, file_creator_rows_dedup)
-        bulk_execute_values(cur, PROPERTY_UPSERT_SQL, property_rows_dedup)
-        bulk_execute_values(cur, COMMISSION_UPSERT_SQL, commission_rows_dedup)
-        bulk_execute_values(cur, CONTACT_UPSERT_SQL, contact_rows_dedup)
-        bulk_execute_values(cur, CO_AGENT_UPSERT_SQL, co_agent_rows_dedup)
-        bulk_execute_values(cur, COORDINATOR_UPSERT_SQL, coordinator_rows_dedup)
-        bulk_execute_values(cur, SPLIT_UPSERT_SQL, split_rows_dedup)
-        bulk_execute_values(cur, REFERRAL_UPSERT_SQL, referral_rows_dedup)
-        bulk_execute_values(cur, EMD_UPSERT_SQL, emd_rows_dedup)
-        bulk_execute_values(cur, ACTIVITY_UPSERT_SQL, activity_rows_dedup)
-        bulk_execute_values(cur, DOC_UPSERT_SQL, doc_rows_dedup)
-        bulk_execute_values(cur, ACTIVITY_DOC_UPSERT_SQL, activity_doc_rows_dedup)
+        bulk_execute_values(cur, SALE_UPSERT_SQL, sales_rows)
+        bulk_execute_values(cur, FILE_CREATOR_UPSERT_SQL, file_creator_rows)
+        bulk_execute_values(cur, PROPERTY_UPSERT_SQL, property_rows)
+        bulk_execute_values(cur, COMMISSION_UPSERT_SQL, commission_rows)
+        bulk_execute_values(cur, CONTACT_UPSERT_SQL, contact_rows)
+        bulk_execute_values(cur, CO_AGENT_UPSERT_SQL, co_agent_rows)
+        bulk_execute_values(cur, COORDINATOR_UPSERT_SQL, coordinator_rows)
+        bulk_execute_values(cur, SPLIT_UPSERT_SQL, split_rows)
+        bulk_execute_values(cur, REFERRAL_UPSERT_SQL, referral_rows)
+        bulk_execute_values(cur, EMD_UPSERT_SQL, emd_rows)
+        bulk_execute_values(cur, ACTIVITY_UPSERT_SQL, activity_rows)
+        bulk_execute_values(cur, DOC_UPSERT_SQL, doc_rows)
+        bulk_execute_values(cur, ACTIVITY_DOC_UPSERT_SQL, activity_doc_rows)
 
         if sale_guids_in_batch:
             guid_list = list(sale_guids_in_batch)
@@ -1319,17 +1388,37 @@ def process_payload_batch(payload_batch: List[Dict[str, Any]], worker_id: int) -
 
         conn.commit()
 
+        logger.info(
+            "[WORKER-%s][RETRY-%s] batch summary: input=%s, valid_sales=%s, skipped_no_guid=%s, "
+            "skipped_detail_missing=%s, skipped_process_sale=%s, sale_rows=%s",
+            worker_id,
+            retry_round,
+            len(sales_batch),
+            batch_saved,
+            skipped_no_guid,
+            skipped_detail_missing,
+            skipped_process_sale,
+            len(sales_rows),
+        )
+
         with progress_lock:
             saved_count_global += batch_saved
-            processed_count += len(payload_batch)
+            processed_count += len(sales_batch)
             if processed_count % 100 == 0:
-                logger.info("DB stage progress: %s payloads persisted", processed_count)
+                logger.info("Progress: %s sales processed...", processed_count)
 
     except Exception as e:
         conn.rollback()
+
+        for bulk_item in sales_batch:
+            sale_guid = clean_guid(bulk_item.get("saleGuid"))
+            if sale_guid:
+                register_failed_saleguid(sale_guid)
+
         with progress_lock:
-            error_count_global += len(payload_batch)
-        logger.error("[WORKER-%s BATCH ERROR] %s", worker_id, e, exc_info=True)
+            error_count_global += len(sales_batch)
+
+        logger.error("[WORKER-%s][RETRY-%s BATCH ERROR] %s", worker_id, retry_round, e, exc_info=True)
 
     finally:
         if cur:
@@ -1337,15 +1426,15 @@ def process_payload_batch(payload_batch: List[Dict[str, Any]], worker_id: int) -
         conn.close()
 
 
-def run_db_batches(payloads: List[Dict[str, Any]]) -> None:
-    if not payloads:
+def run_batches(sales: List[Dict[str, Any]], retry_round: int = 0) -> None:
+    if not sales:
         return
 
-    batches = [payloads[i:i + BATCH_SIZE] for i in range(0, len(payloads), BATCH_SIZE)]
+    batches = [sales[i:i + BATCH_SIZE] for i in range(0, len(sales), BATCH_SIZE)]
 
-    with ThreadPoolExecutor(max_workers=DB_WORKERS) as executor:
+    with ThreadPoolExecutor(max_workers=API_DETAIL_WORKERS) as executor:
         futures = [
-            executor.submit(process_payload_batch, batch, idx)
+            executor.submit(process_sale_batch, batch, idx, retry_round)
             for idx, batch in enumerate(batches)
         ]
 
@@ -1353,7 +1442,41 @@ def run_db_batches(payloads: List[Dict[str, Any]]) -> None:
             try:
                 future.result()
             except Exception as e:
-                logger.error("DB batch processing error: %s", e, exc_info=True)
+                logger.error("[RETRY-%s] Batch processing error: %s", retry_round, e, exc_info=True)
+
+
+def retry_failed_saleguids() -> int:
+    unresolved_failed_count = 0
+
+    for retry_round in range(1, FAILED_SALEGUID_RETRY_ROUNDS + 1):
+        with failed_saleguids_lock:
+            current_failed = list(failed_saleguids_global)
+            failed_saleguids_global.clear()
+
+        if not current_failed:
+            logger.info("No failed saleGuids to retry on round %s.", retry_round)
+            return 0
+
+        logger.info(
+            "Retry round %s started for %s failed saleGuids.",
+            retry_round, len(current_failed)
+        )
+
+        retry_sales = build_retry_sales_from_failed_guids(current_failed)
+        run_batches(retry_sales, retry_round=retry_round)
+
+        with failed_saleguids_lock:
+            unresolved_failed_count = len(failed_saleguids_global)
+
+        logger.info(
+            "Retry round %s completed. unresolved_failed_saleguids=%s",
+            retry_round, unresolved_failed_count
+        )
+
+        if unresolved_failed_count == 0:
+            break
+
+    return unresolved_failed_count
 
 
 @router.post("/sync/skyslope-sales")
@@ -1371,8 +1494,8 @@ def trigger_sales_sync():
         detail_cache = {}
 
     logger.info("Starting sync job...")
-
     sales = fetch_sales_bulk()
+
     if not sales:
         logger.info("No sales found to sync.")
         return {
@@ -1382,46 +1505,29 @@ def trigger_sales_sync():
             "failed_saleguids": 0
         }
 
-    total_bulk_sales = len(sales)
-    unique_sales = deduplicate_sales_by_guid(sales)
-    total_unique_sales = len(unique_sales)
+    total_sales = len(sales)
+    logger.info("Found %s bulk sales to process.", total_sales)
+
+    run_batches(sales, retry_round=0)
+
+    unresolved_failed = retry_failed_saleguids()
 
     logger.info(
-        "Bulk sales fetched=%s, unique sales to process=%s",
-        total_bulk_sales,
-        total_unique_sales
-    )
-
-    payloads = fetch_all_sale_payloads(unique_sales)
-    logger.info("Prepared %s sale payloads for DB persistence", len(payloads))
-
-    run_db_batches(payloads)
-
-    unresolved_failed = len(failed_saleguids_global)
-
-    logger.info(
-        "Sync completed! total_bulk=%s, total_unique=%s, prepared=%s, saved=%s, errors=%s, unresolved_failed_saleguids=%s",
-        total_bulk_sales,
-        total_unique_sales,
-        len(payloads),
-        saved_count_global,
-        error_count_global,
-        unresolved_failed
+        "Sync completed! total_fetched=%s, saved=%s, errors=%s, unresolved_failed_saleguids=%s",
+        total_sales, saved_count_global, error_count_global, unresolved_failed
     )
 
     if unresolved_failed == 0:
         update_sync_date()
     else:
         logger.warning(
-            "Sync date not updated because %s saleGuids failed during API/detail stage.",
+            "Sync date not updated because %s saleGuids still failed after retries.",
             unresolved_failed
         )
 
     return {
         "message": "Sync completed successfully." if unresolved_failed == 0 else "Sync completed with unresolved failures.",
-        "total_bulk_fetched": total_bulk_sales,
-        "total_unique_sales": total_unique_sales,
-        "prepared_payloads": len(payloads),
+        "total_fetched": total_sales,
         "saved": saved_count_global,
         "errors": error_count_global,
         "failed_saleguids": unresolved_failed,
