@@ -20,19 +20,19 @@ QBO_PAGE_SIZE = 1000
 DB_UPDATE_BATCH_SIZE = 1000
 
 
-def chunked(items: List[Tuple[str, str]], size: int):
+def chunked(items: List[Tuple[str, int]], size: int):
     for i in range(0, len(items), size):
         yield items[i:i + size]
 
 
 def get_users_without_qb_customerid(conn, limit: Optional[int] = None) -> List[Dict[str, Any]]:
     sql = """
-        SELECT userguid, email
-        FROM users
+        SELECT personguid, primary_emailaddress
+        FROM brokerage_engine_users
         WHERE qb_customerid IS NULL
-          AND email IS NOT NULL
-          AND TRIM(email) <> ''
-        ORDER BY userguid
+          AND primary_emailaddress IS NOT NULL
+          AND TRIM(primary_emailaddress) <> ''
+        ORDER BY personguid
     """
 
     params = []
@@ -40,13 +40,19 @@ def get_users_without_qb_customerid(conn, limit: Optional[int] = None) -> List[D
         sql += " LIMIT %s"
         params.append(limit)
 
-    logger.info("Fetching users without qb_customerid", extra={"limit": limit})
+    logger.info(
+        "Fetching brokerage_engine_users without qb_customerid",
+        extra={"limit": limit},
+    )
 
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(sql, params)
         rows = cur.fetchall()
 
-    logger.info("Fetched users without qb_customerid", extra={"count": len(rows)})
+    logger.info(
+        "Fetched brokerage_engine_users without qb_customerid",
+        extra={"count": len(rows)},
+    )
     return rows
 
 
@@ -145,8 +151,9 @@ async def fetch_all_qb_customers_map(conn) -> Dict[str, Dict[str, Any]]:
                 email_key = primary_email.lower()
 
                 if email_key not in email_map:
+                    customer_id = customer.get("Id")
                     email_map[email_key] = {
-                        "customer_id": str(customer.get("Id")) if customer.get("Id") is not None else None,
+                        "customer_id": int(customer_id) if customer_id is not None else None,
                         "display_name": customer.get("DisplayName"),
                         "primary_email": primary_email,
                     }
@@ -172,15 +179,15 @@ async def fetch_all_qb_customers_map(conn) -> Dict[str, Dict[str, Any]]:
         logger.debug("Closed QuickBooks session")
 
 
-def bulk_update_user_qb_customerids(conn, updates: List[Tuple[str, str]]) -> int:
+def bulk_update_user_qb_customerids(conn, updates: List[Tuple[str, int]]) -> int:
     if not updates:
-        logger.info("No user updates to apply")
+        logger.info("No brokerage_engine_users updates to apply")
         return 0
 
     total_updated = 0
 
     logger.info(
-        "Applying bulk user qb_customerid updates",
+        "Applying bulk brokerage_engine_users qb_customerid updates",
         extra={"requested_updates": len(updates), "batch_size": DB_UPDATE_BATCH_SIZE},
     )
 
@@ -188,7 +195,7 @@ def bulk_update_user_qb_customerids(conn, updates: List[Tuple[str, str]]) -> int
         with conn.cursor() as cur:
             for batch_number, batch in enumerate(chunked(updates, DB_UPDATE_BATCH_SIZE), start=1):
                 logger.info(
-                    "Executing user qb_customerid update batch",
+                    "Executing brokerage_engine_users qb_customerid update batch",
                     extra={
                         "batch_number": batch_number,
                         "batch_size": len(batch),
@@ -199,10 +206,10 @@ def bulk_update_user_qb_customerids(conn, updates: List[Tuple[str, str]]) -> int
                 execute_values(
                     cur,
                     """
-                    UPDATE users AS u
-                    SET qb_customerid = v.qb_customerid
-                    FROM (VALUES %s) AS v(userguid, qb_customerid)
-                    WHERE u.userguid = v.userguid::uuid
+                    UPDATE brokerage_engine_users AS u
+                    SET qb_customerid = v.qb_customerid::integer
+                    FROM (VALUES %s) AS v(personguid, qb_customerid)
+                    WHERE u.personguid = v.personguid::uuid
                       AND u.qb_customerid IS NULL
                     """,
                     batch,
@@ -214,7 +221,7 @@ def bulk_update_user_qb_customerids(conn, updates: List[Tuple[str, str]]) -> int
                 total_updated += batch_updated
 
                 logger.info(
-                    "Executed user qb_customerid update batch",
+                    "Executed brokerage_engine_users qb_customerid update batch",
                     extra={
                         "batch_number": batch_number,
                         "batch_requested": len(batch),
@@ -225,14 +232,14 @@ def bulk_update_user_qb_customerids(conn, updates: List[Tuple[str, str]]) -> int
         conn.commit()
 
         logger.info(
-            "Bulk user qb_customerid update committed",
+            "Bulk brokerage_engine_users qb_customerid update committed",
             extra={"requested_updates": len(updates), "updated_count": total_updated},
         )
         return total_updated
 
     except Exception:
         conn.rollback()
-        logger.exception("Bulk user qb_customerid update failed and transaction rolled back")
+        logger.exception("Bulk brokerage_engine_users qb_customerid update failed and transaction rolled back")
         raise
 
 
@@ -251,14 +258,14 @@ async def populate_qb_customerids(conn, limit: Optional[int] = None) -> Dict[str
     started_at = time.perf_counter()
 
     logger.info(
-        "Starting qb_customerid population",
+        "Starting qb_customerid population for brokerage_engine_users",
         extra={"limit": limit},
     )
 
     users = get_users_without_qb_customerid(conn, limit=limit)
     qb_email_map = await fetch_all_qb_customers_map(conn)
 
-    updates: List[Tuple[str, str]] = []
+    updates: List[Tuple[str, int]] = []
     results = []
 
     summary = {
@@ -273,16 +280,19 @@ async def populate_qb_customerids(conn, limit: Optional[int] = None) -> Dict[str
 
     for user in users:
         try:
-            userguid = user["userguid"]
-            raw_email = user.get("email")
+            personguid = user["personguid"]
+            raw_email = user.get("primary_emailaddress")
             emails = split_emails(raw_email)
 
             if not emails:
                 summary["skipped"] += 1
-                logger.debug("Skipping user due to invalid email", extra={"userguid": str(userguid)})
+                logger.debug(
+                    "Skipping user due to invalid primary_emailaddress",
+                    extra={"personguid": str(personguid)},
+                )
                 results.append({
-                    "userguid": str(userguid),
-                    "email": raw_email,
+                    "personguid": str(personguid),
+                    "primary_emailaddress": raw_email,
                     "status": "skipped",
                     "qb_customerid": None,
                     "reason": "no_valid_email",
@@ -291,28 +301,28 @@ async def populate_qb_customerids(conn, limit: Optional[int] = None) -> Dict[str
 
             selected_customer = select_customer_from_email_map(emails, qb_email_map)
 
-            if not selected_customer or not selected_customer.get("customer_id"):
+            if not selected_customer or selected_customer.get("customer_id") is None:
                 summary["not_found"] += 1
                 logger.debug(
-                    "No QuickBooks customer match found for user",
-                    extra={"userguid": str(userguid), "emails": emails},
+                    "No QuickBooks customer match found for brokerage_engine_user",
+                    extra={"personguid": str(personguid), "emails": emails},
                 )
                 results.append({
-                    "userguid": str(userguid),
-                    "email": raw_email,
+                    "personguid": str(personguid),
+                    "primary_emailaddress": raw_email,
                     "status": "not_found",
                     "qb_customerid": None,
                     "reason": "no_matching_customer",
                 })
                 continue
 
-            qb_customerid = str(selected_customer["customer_id"])
+            qb_customerid = int(selected_customer["customer_id"])
             summary["matched"] += 1
-            updates.append((str(userguid), qb_customerid))
+            updates.append((str(personguid), qb_customerid))
 
             results.append({
-                "userguid": str(userguid),
-                "email": raw_email,
+                "personguid": str(personguid),
+                "primary_emailaddress": raw_email,
                 "status": "updated",
                 "qb_customerid": qb_customerid,
                 "matched_email": selected_customer.get("primary_email"),
@@ -322,12 +332,15 @@ async def populate_qb_customerids(conn, limit: Optional[int] = None) -> Dict[str
         except Exception:
             summary["errors"] += 1
             logger.exception(
-                "Failed processing user during qb_customerid population",
-                extra={"userguid": str(user.get("userguid")), "email": user.get("email")},
+                "Failed processing brokerage_engine_user during qb_customerid population",
+                extra={
+                    "personguid": str(user.get("personguid")),
+                    "primary_emailaddress": user.get("primary_emailaddress"),
+                },
             )
             results.append({
-                "userguid": str(user.get("userguid")),
-                "email": user.get("email"),
+                "personguid": str(user.get("personguid")),
+                "primary_emailaddress": user.get("primary_emailaddress"),
                 "status": "error",
                 "qb_customerid": None,
                 "reason": "processing_failed",
@@ -335,7 +348,7 @@ async def populate_qb_customerids(conn, limit: Optional[int] = None) -> Dict[str
 
     if updates:
         logger.info(
-            "Prepared updates for users",
+            "Prepared updates for brokerage_engine_users",
             extra={
                 "update_count": len(updates),
                 "sample_updates": updates[:3],
@@ -349,7 +362,7 @@ async def populate_qb_customerids(conn, limit: Optional[int] = None) -> Dict[str
     summary["duration_seconds"] = duration_seconds
 
     logger.info(
-        "Completed qb_customerid population",
+        "Completed qb_customerid population for brokerage_engine_users",
         extra={
             "total_users": summary["total_users"],
             "matched": summary["matched"],
