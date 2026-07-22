@@ -1,9 +1,9 @@
-name: Daily Cron Test (13:30 IST)
+name: Daily Cron Test
 
 on:
   schedule:
-    - cron: "0 8 * * *"   # 13:30 IST
-  workflow_dispatch:       # manual trigger
+    - cron: "0 */6 * * *"   # Every 6 hours (UTC)
+  workflow_dispatch:        # manual trigger
 
 jobs:
   trigger-cron:

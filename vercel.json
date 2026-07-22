@@ -14,7 +14,7 @@
   "crons": [
     {
       "path": "/data-sync",
-      "schedule": "0 8 * * *"
+      "schedule": "0 */8 * * *"
     }
   ]
 }

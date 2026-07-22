@@ -1,6 +1,5 @@
 import json
 import logging
-import random
 import time
 import psycopg2
 import requests
@@ -9,12 +8,13 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from fastapi import APIRouter, Depends
+from psycopg2.extras import execute_values
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from psycopg2.extras import execute_values
-from fastapi import APIRouter
 
-from db import get_conn
+from db import get_db, get_conn, DB_CONFIG
 from services.session import get_session_token
 
 logging.basicConfig(
@@ -31,146 +31,57 @@ SALES_FILTER_TYPE = "sale"
 DEFAULT_SYNC_DATE = "2024-01-01"
 
 REQUEST_TIMEOUT = 300
-MAX_RETRIES = 3
-BACKOFF_FACTOR = 1
+HTTP_RETRY_TOTAL = 3
+HTTP_BACKOFF_FACTOR = 1
 
 API_DETAIL_WORKERS = 2
 BATCH_SIZE = 50
 DEBUG_SAMPLE_LIMIT = 10
 FAILED_SALEGUID_RETRY_ROUNDS = 1
 
-RATE_LIMIT_DEFAULT_LIMIT = 100
-RATE_LIMIT_WINDOW_SECONDS = 60
-RATE_LIMIT_SAFETY_BUFFER = 8
-RATE_LIMIT_MIN_INTERVAL = 0.45
-RATE_LIMIT_LOW_WATERMARK = 15
+REQUEST_GAP_SECONDS = 0.5
+RATE_LIMIT_FALLBACK_SLEEP_SECONDS = 10
 
 progress_lock = Lock()
 failed_saleguids_lock = Lock()
 detail_cache_lock = Lock()
+request_gap_lock = Lock()
 
 processed_count = 0
 error_count_global = 0
 saved_count_global = 0
 failed_saleguids_global = set()
 detail_cache: Dict[str, Dict[str, Any]] = {}
+last_request_ts = 0.0
 
 
-class SkySlopeRateLimiter:
-    def __init__(
-        self,
-        default_limit: int = RATE_LIMIT_DEFAULT_LIMIT,
-        window_seconds: int = RATE_LIMIT_WINDOW_SECONDS,
-        safety_buffer: int = RATE_LIMIT_SAFETY_BUFFER,
-        min_interval: float = RATE_LIMIT_MIN_INTERVAL,
-        low_watermark: int = RATE_LIMIT_LOW_WATERMARK,
-    ):
-        self.lock = Lock()
-        self.default_limit = default_limit
-        self.window_seconds = window_seconds
-        self.safety_buffer = safety_buffer
-        self.min_interval = min_interval
-        self.low_watermark = low_watermark
-
-        self.limit = default_limit
-        self.remaining = default_limit
-        self.reset_ts = 0
-        self.next_allowed_at = 0.0
-
-    def _sleep_unlocked(self, seconds: float, reason: str, url: str) -> None:
-        if seconds <= 0:
-            return
-        logger.info("Rate limiter sleeping %.2fs for %s url=%s", seconds, reason, url)
-        time.sleep(seconds)
-
-    def wait_before_request(self, url: str) -> None:
-        with self.lock:
-            now = time.time()
-
-            if self.reset_ts and now >= self.reset_ts:
-                self.remaining = self.limit or self.default_limit
-                self.reset_ts = 0
-
-            wait_for = max(0.0, self.next_allowed_at - now)
-            if wait_for > 0:
-                self._sleep_unlocked(wait_for, "request pacing", url)
-
-            now = time.time()
-            self.next_allowed_at = max(self.next_allowed_at, now) + self.min_interval
-
-            if self.remaining is not None and self.remaining <= 1 and self.reset_ts and self.reset_ts > now:
-                reset_wait = max(0.0, self.reset_ts - now) + random.uniform(0.05, 0.25)
-                self._sleep_unlocked(reset_wait, "remaining quota exhausted", url)
-                now = time.time()
-                self.next_allowed_at = max(self.next_allowed_at, now) + self.min_interval
-
-    def update_from_response(self, response: requests.Response, url: str) -> None:
-        limit = clean_int(response.headers.get("x-ratelimit-limit"))
-        remaining = clean_int(response.headers.get("x-ratelimit-remaining"))
-        reset_ts = clean_int(response.headers.get("x-ratelimit-reset"))
-
-        if limit is None:
-            limit = self.default_limit
-
-        with self.lock:
-            self.limit = limit
-            if remaining is not None:
-                self.remaining = remaining
-            if reset_ts is not None:
-                self.reset_ts = reset_ts
-
-            logger.info(
-                "RateLimit headers for %s -> limit=%s remaining=%s reset=%s",
-                url, self.limit, self.remaining, self.reset_ts
-            )
-
-            now = time.time()
-
-            if self.reset_ts and self.reset_ts <= now:
-                self.remaining = self.limit
-                self.reset_ts = 0
-                return
-
-            if self.remaining is None or not self.reset_ts or self.reset_ts <= now:
-                return
-
-            seconds_left = max(self.reset_ts - now, 1.0)
-            safe_remaining = max(self.remaining - self.safety_buffer, 1)
-            dynamic_interval = max(seconds_left / safe_remaining, self.min_interval)
-
-            if self.remaining <= self.low_watermark:
-                dynamic_interval = max(dynamic_interval, 1.0)
-
-            self.next_allowed_at = max(self.next_allowed_at, now + dynamic_interval)
-
-    def backoff_after_429(self, url: str, response: Optional[requests.Response] = None) -> None:
-        reset_ts = None
-        if response is not None:
-            reset_ts = clean_int(response.headers.get("x-ratelimit-reset"))
-
-        with self.lock:
-            now = time.time()
-            if reset_ts and reset_ts > now:
-                self.reset_ts = reset_ts
-                self.remaining = 0
-                wait_for = max(0.0, reset_ts - now) + random.uniform(0.15, 0.5)
-            else:
-                wait_for = 5.0 + random.uniform(0.15, 0.5)
-
-            self.next_allowed_at = max(self.next_allowed_at, now + wait_for)
-
-        logger.warning("429 received for %s, sleeping %.2fs until rate-limit reset", url, wait_for)
-        time.sleep(wait_for)
-
-
-RATE_LIMITER = SkySlopeRateLimiter()
-
-
-def get_last_sync_date() -> str:
+def log_connection_identity(conn, label: str) -> None:
     try:
-        conn = get_conn()
-        cur = conn.cursor()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    current_database(),
+                    current_schema(),
+                    current_user,
+                    inet_server_addr()::text,
+                    inet_server_port()
+            """)
+            row = cur.fetchone()
+            logger.info(
+                "[%s] DB identity => database=%s schema=%s user=%s host=%s port=%s",
+                label,
+                row[0] if row else None,
+                row[1] if row else None,
+                row[2] if row else None,
+                row[3] if row else None,
+                row[4] if row else None,
+            )
+    except Exception as e:
+        logger.warning("[%s] Could not log DB identity: %s", label, e)
 
+
+def ensure_sync_table(conn) -> None:
+    with conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS skyslope_sync (
                 id serial PRIMARY KEY,
@@ -181,16 +92,19 @@ def get_last_sync_date() -> str:
             )
         """)
 
-        cur.execute("""
-            SELECT sync_date
-            FROM skyslope_sync
-            ORDER BY id DESC
-            LIMIT 1
-        """)
 
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
+def get_last_sync_date(conn) -> str:
+    try:
+        ensure_sync_table(conn)
+
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT sync_date
+                FROM skyslope_sync
+                ORDER BY id DESC
+                LIMIT 1
+            """)
+            row = cur.fetchone()
 
         if row and row[0]:
             date_str = row[0].strftime("%Y-%m-%d")
@@ -204,37 +118,47 @@ def get_last_sync_date() -> str:
     return DEFAULT_SYNC_DATE
 
 
-def update_sync_date() -> None:
+def update_sync_date(conn, status: str = "success", error_message: Optional[str] = None) -> None:
     now = datetime.now()
 
     try:
-        conn = get_conn()
-        cur = conn.cursor()
+        log_connection_identity(conn, "SYNC_TRACKER_CONNECTION")
+        ensure_sync_table(conn)
 
-        cur.execute("""
-            INSERT INTO skyslope_sync (
-                sync_date,
-                sync_timestamp,
-                status
-            )
-            VALUES (%s, NOW(), %s)
-        """, (now.date(), "success"))
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO skyslope_sync (
+                    sync_date,
+                    sync_timestamp,
+                    status,
+                    error_message
+                )
+                VALUES (%s, NOW(), %s, %s)
+                RETURNING id, sync_date, sync_timestamp, status
+            """, (now.date(), status, error_message))
+            inserted_row = cur.fetchone()
 
         conn.commit()
-        cur.close()
-        conn.close()
 
-        logger.info("Sync date inserted into DB: %s", now.date())
+        logger.info(
+            "Sync date committed to DB: id=%s sync_date=%s sync_timestamp=%s status=%s",
+            inserted_row[0] if inserted_row else None,
+            inserted_row[1] if inserted_row else None,
+            inserted_row[2] if inserted_row else None,
+            inserted_row[3] if inserted_row else None,
+        )
 
     except Exception as e:
-        logger.error("Failed to insert sync date into DB: %s", e)
+        conn.rollback()
+        logger.error("Failed to insert sync date into DB. Rolled back transaction: %s", e, exc_info=True)
+        raise
 
 
 def build_session() -> requests.Session:
     session = requests.Session()
     retry = Retry(
-        total=MAX_RETRIES,
-        backoff_factor=BACKOFF_FACTOR,
+        total=HTTP_RETRY_TOTAL,
+        backoff_factor=HTTP_BACKOFF_FACTOR,
         status_forcelist=[500, 502, 503, 504],
         allowed_methods=["GET"],
         raise_on_status=False,
@@ -243,7 +167,7 @@ def build_session() -> requests.Session:
     adapter = HTTPAdapter(
         max_retries=retry,
         pool_connections=20,
-        pool_maxsize=20
+        pool_maxsize=20,
     )
     session.mount("https://", adapter)
     session.mount("http://", adapter)
@@ -252,6 +176,17 @@ def build_session() -> requests.Session:
 
 
 HTTP_SESSION = build_session()
+
+
+def wait_for_request_gap() -> None:
+    global last_request_ts
+
+    with request_gap_lock:
+        now = time.time()
+        elapsed = now - last_request_ts
+        if elapsed < REQUEST_GAP_SECONDS:
+            time.sleep(REQUEST_GAP_SECONDS - elapsed)
+        last_request_ts = time.time()
 
 
 def normalize_date(value: Any) -> Optional[str]:
@@ -384,21 +319,36 @@ def clean_url(value: Any) -> Optional[str]:
     return value
 
 
-def fetch_api(url: str) -> Optional[Dict[str, Any]]:
-    for attempt in range(1, 3):
+def get_rate_limit_sleep_seconds(response: requests.Response) -> float:
+    retry_after = response.headers.get("Retry-After")
+    if retry_after:
         try:
-            RATE_LIMITER.wait_before_request(url)
+            return max(float(retry_after), 1.0)
+        except ValueError:
+            pass
+
+    reset_ts = clean_int(response.headers.get("x-ratelimit-reset"))
+    if reset_ts:
+        wait_for = reset_ts - int(time.time())
+        if wait_for > 0:
+            return float(wait_for)
+
+    return float(RATE_LIMIT_FALLBACK_SLEEP_SECONDS)
+
+
+def fetch_api(url: str) -> Optional[Dict[str, Any]]:
+    for attempt in range(1, HTTP_RETRY_TOTAL + 1):
+        try:
+            wait_for_request_gap()
             response = HTTP_SESSION.get(url, timeout=REQUEST_TIMEOUT)
-            RATE_LIMITER.update_from_response(response, url)
 
             if response.status_code == 429:
+                sleep_for = get_rate_limit_sleep_seconds(response)
                 logger.warning(
-                    "SkySlope rate limit hit for url=%s remaining=%s reset=%s",
-                    url,
-                    response.headers.get("x-ratelimit-remaining"),
-                    response.headers.get("x-ratelimit-reset"),
+                    "SkySlope 429 for url=%s attempt=%s sleeping %.2fs",
+                    url, attempt, sleep_for
                 )
-                RATE_LIMITER.backoff_after_429(url, response)
+                time.sleep(sleep_for)
                 continue
 
             response.raise_for_status()
@@ -418,10 +368,9 @@ def fetch_api(url: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def fetch_sales_bulk() -> List[Dict[str, Any]]:
+def fetch_sales_bulk(sync_date: str) -> List[Dict[str, Any]]:
     sales: List[Dict[str, Any]] = []
 
-    sync_date = get_last_sync_date()
     modified_after = f"{sync_date}T00:00:00"
     url = f"{SALES_BASE_URL}?modifiedAfter={modified_after}&type={SALES_FILTER_TYPE}"
 
@@ -449,6 +398,20 @@ def fetch_sales_bulk() -> List[Dict[str, Any]]:
 
     logger.info("Found %s bulk sales in total.", len(sales))
     return sales
+
+
+def deduplicate_sales_by_guid(sales: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    latest_by_guid: Dict[str, Dict[str, Any]] = {}
+
+    for item in sales:
+        sale_guid = clean_guid(item.get("saleGuid"))
+        if not sale_guid:
+            continue
+        latest_by_guid[sale_guid] = item
+
+    deduped = list(latest_by_guid.values())
+    logger.info("Deduplicated bulk sales from %s to %s", len(sales), len(deduped))
+    return deduped
 
 
 def fetch_sale_detail(sale_guid: str) -> Optional[Dict[str, Any]]:
@@ -668,9 +631,32 @@ def process_sale(detail_item: Dict[str, Any], bulk_item: Dict[str, Any]) -> Opti
     }
 
 
-def bulk_execute_values(cur, sql: str, rows: Sequence[Tuple]) -> None:
+def deduplicate_rows(rows: Sequence[Tuple], key_indices: Sequence[int]) -> List[Tuple]:
+    seen = set()
+    unique = []
+
+    for row in reversed(rows):
+        key = tuple(row[i] for i in key_indices)
+        if key not in seen:
+            seen.add(key)
+            unique.append(row)
+
+    return unique[::-1]
+
+
+def log_dedup_stats(worker_id: int, table_name: str, original_rows: Sequence[Tuple], deduped_rows: Sequence[Tuple]) -> None:
+    dropped = len(original_rows) - len(deduped_rows)
+    if dropped > 0:
+        logger.info(
+            "[WORKER-%s] %s: before=%s, after=%s, dedup_dropped=%s",
+            worker_id, table_name, len(original_rows), len(deduped_rows), dropped
+        )
+
+
+def bulk_execute_values(cur, sql: str, rows: Sequence[Tuple], label: str) -> None:
     if rows:
         execute_values(cur, sql, rows)
+        logger.info("Executed bulk upsert for %s with rows=%s", label, len(rows))
 
 
 def ensure_reference_data(cur, worker_id: int, users: set, checklists: Dict[int, Optional[str]], offices: Dict[str, Optional[str]]) -> None:
@@ -1040,7 +1026,6 @@ def build_retry_sales_from_failed_guids(failed_sale_guids: Sequence[str]) -> Lis
 def process_sale_batch(sales_batch: List[Dict[str, Any]], worker_id: int, retry_round: int = 0) -> None:
     global processed_count, saved_count_global, error_count_global
 
-    conn = get_conn()
     cur = None
 
     skipped_no_guid = 0
@@ -1052,363 +1037,403 @@ def process_sale_batch(sales_batch: List[Dict[str, Any]], worker_id: int, retry_
     sample_process_sale_none = []
 
     try:
-        cur = conn.cursor()
+        with get_conn() as conn:
+            log_connection_identity(conn, f"WORKER_{worker_id}_CONNECTION")
+            cur = conn.cursor()
 
-        users_to_ensure = set()
-        offices_to_ensure: Dict[str, Optional[str]] = {}
-        checklists_to_ensure: Dict[int, Optional[str]] = {}
-        sale_guids_in_batch = set()
+            users_to_ensure = set()
+            offices_to_ensure: Dict[str, Optional[str]] = {}
+            checklists_to_ensure: Dict[int, Optional[str]] = {}
+            sale_guids_in_batch = set()
 
-        sales_rows = []
-        property_rows = []
-        commission_rows = []
-        file_creator_rows = []
-        contact_rows = []
-        breakdown_rows = []
-        co_agent_rows = []
-        coordinator_rows = []
-        split_rows = []
-        referral_rows = []
-        emd_rows = []
-        activity_rows = []
-        doc_rows = []
-        activity_doc_rows = []
-        comment_rows = []
+            sales_rows = []
+            property_rows = []
+            commission_rows = []
+            file_creator_rows = []
+            contact_rows = []
+            breakdown_rows = []
+            co_agent_rows = []
+            coordinator_rows = []
+            split_rows = []
+            referral_rows = []
+            emd_rows = []
+            activity_rows = []
+            doc_rows = []
+            activity_doc_rows = []
+            comment_rows = []
 
-        batch_saved = 0
+            batch_saved = 0
 
-        for bulk_item in sales_batch:
-            raw_sale_guid = bulk_item.get("saleGuid")
-            sale_guid = clean_guid(raw_sale_guid)
+            for bulk_item in sales_batch:
+                raw_sale_guid = bulk_item.get("saleGuid")
+                sale_guid = clean_guid(raw_sale_guid)
 
-            if not sale_guid:
-                skipped_no_guid += 1
-                if len(sample_no_guid) < DEBUG_SAMPLE_LIMIT:
-                    sample_no_guid.append(raw_sale_guid)
-                continue
+                if not sale_guid:
+                    skipped_no_guid += 1
+                    if len(sample_no_guid) < DEBUG_SAMPLE_LIMIT:
+                        sample_no_guid.append(raw_sale_guid)
+                    continue
 
-            detail_item = fetch_sale_detail(sale_guid)
-            if not detail_item:
-                skipped_detail_missing += 1
-                register_failed_saleguid(sale_guid)
-                if len(sample_detail_missing) < DEBUG_SAMPLE_LIMIT:
-                    sample_detail_missing.append(sale_guid)
-                continue
+                detail_item = fetch_sale_detail(sale_guid)
+                if not detail_item:
+                    skipped_detail_missing += 1
+                    register_failed_saleguid(sale_guid)
+                    if len(sample_detail_missing) < DEBUG_SAMPLE_LIMIT:
+                        sample_detail_missing.append(sale_guid)
+                    continue
 
-            data = process_sale(detail_item, bulk_item)
-            if not data:
-                skipped_process_sale += 1
-                register_failed_saleguid(sale_guid)
-                if len(sample_process_sale_none) < DEBUG_SAMPLE_LIMIT:
-                    sample_process_sale_none.append(sale_guid)
-                continue
+                data = process_sale(detail_item, bulk_item)
+                if not data:
+                    skipped_process_sale += 1
+                    register_failed_saleguid(sale_guid)
+                    if len(sample_process_sale_none) < DEBUG_SAMPLE_LIMIT:
+                        sample_process_sale_none.append(sale_guid)
+                    continue
 
-            sale_data = data["sale"]
-            sale_guids_in_batch.add(sale_guid)
+                sale_data = data["sale"]
+                sale_guids_in_batch.add(sale_guid)
 
-            for field in ("createdByGuid", "agentGuid", "reviewerGuid"):
-                u = clean_text(sale_data.get(field))
-                if u:
-                    users_to_ensure.add(u)
+                for field in ("createdByGuid", "agentGuid", "reviewerGuid"):
+                    u = clean_text(sale_data.get(field))
+                    if u:
+                        users_to_ensure.add(u)
 
-            for row in data.get("co_agents", []):
-                u = clean_text(row.get("coAgentGuid") or row.get("userGuid"))
-                if u:
-                    users_to_ensure.add(u)
+                for row in data.get("co_agents", []):
+                    u = clean_text(row.get("coAgentGuid") or row.get("userGuid"))
+                    if u:
+                        users_to_ensure.add(u)
 
-            for row in data.get("splits", []):
-                u = clean_text(row.get("agentGuid") or row.get("userGuid"))
-                if u:
-                    users_to_ensure.add(u)
+                for row in data.get("splits", []):
+                    u = clean_text(row.get("agentGuid") or row.get("userGuid"))
+                    if u:
+                        users_to_ensure.add(u)
 
-            fc = data.get("file_creator", {}) or {}
-            fc_guid = clean_text(fc.get("guid"))
-            if fc_guid:
-                users_to_ensure.add(fc_guid)
+                fc = data.get("file_creator", {}) or {}
+                fc_guid = clean_text(fc.get("guid"))
+                if fc_guid:
+                    users_to_ensure.add(fc_guid)
 
-            chk_id = clean_int(sale_data.get("checklistTypeId"))
-            chk_name = clean_text(sale_data.get("checklistType"))
-            if chk_id is not None:
-                checklists_to_ensure[chk_id] = chk_name
+                chk_id = clean_int(sale_data.get("checklistTypeId"))
+                chk_name = clean_text(sale_data.get("checklistType"))
+                if chk_id is not None:
+                    checklists_to_ensure[chk_id] = chk_name
 
-            off_guid = clean_text(sale_data.get("officeGuid"))
-            off_name = clean_text(sale_data.get("officeName"))
-            if off_guid:
-                offices_to_ensure[off_guid] = off_name
+                off_guid = clean_text(sale_data.get("officeGuid"))
+                off_name = clean_text(sale_data.get("officeName"))
+                if off_guid:
+                    offices_to_ensure[off_guid] = off_name
 
-            sale_file_id = clean_text(sale_data.get("fileId"))
-            sale_url = clean_url(sale_data.get("url"))
+                sale_file_id = clean_text(sale_data.get("fileId"))
+                sale_url = clean_url(sale_data.get("url"))
+
+                logger.info(
+                    "[WORKER-%s][RETRY-%s] saleGuid=%s fileId=%r url=%r",
+                    worker_id, retry_round, sale_guid, sale_file_id, sale_url
+                )
+
+                sales_rows.append(build_sale_row(sale_data))
+
+                pd = data.get("property", {}) or {}
+                if pd:
+                    property_rows.append((
+                        sale_guid,
+                        clean_int(pd.get("streetNumber")),
+                        clean_text(pd.get("streetAddress")),
+                        clean_text(pd.get("unit")),
+                        clean_text(pd.get("direction")),
+                        clean_text(pd.get("city")),
+                        clean_text(pd.get("county")),
+                        clean_text(pd.get("state")),
+                        clean_text(pd.get("zip")),
+                        clean_int(pd.get("yearBuilt")),
+                        clean_int(pd.get("realPropertyTypeId")),
+                        clean_int(pd.get("realPropertySubtypeId")),
+                    ))
+
+                cd = data.get("commission", {}) or {}
+                if cd:
+                    commission_rows.append((
+                        sale_guid,
+                        clean_text(cd.get("transactionCoordinatorName")),
+                        clean_text(cd.get("transactionCoordinatorFee")),
+                        clean_decimal(cd.get("adminBrokerageComp")),
+                        normalize_date(cd.get("dateOfCheck")),
+                        normalize_date(cd.get("datePostedToLogBook")),
+                        clean_decimal(cd.get("listingCommissionPercent")),
+                        clean_decimal(cd.get("listingCommissionAmount")),
+                        clean_decimal(cd.get("saleCommissionPercent")),
+                        clean_decimal(cd.get("saleCommissionAmount")),
+                        clean_decimal(cd.get("otherDeductions")),
+                        clean_bool(cd.get("personalDeal")),
+                        clean_text(cd.get("commissionBreakdownDetails")),
+                        clean_decimal(cd.get("officeGrossCommissionOnSale")),
+                    ))
+
+                if fc_guid:
+                    file_creator_rows.append((
+                        sale_guid,
+                        fc_guid,
+                        clean_text(fc.get("firstName")),
+                        clean_text(fc.get("lastName")),
+                        clean_text(fc.get("email")),
+                        clean_text(fc.get("alternateEmail")),
+                    ))
+
+                for contact in data.get("contacts", []):
+                    c_guid = clean_text(contact.get("contactGuid"))
+                    role = clean_text(contact.get("role"))
+                    if c_guid and role:
+                        contact_rows.append((
+                            sale_guid,
+                            c_guid,
+                            role,
+                            clean_text(contact.get("firstName")),
+                            clean_text(contact.get("lastName")),
+                            clean_text(contact.get("phoneNumber")),
+                            clean_text(contact.get("email")),
+                            clean_text(contact.get("company")),
+                            clean_text(contact.get("alternatePhone")),
+                            clean_text(contact.get("streetNumber")),
+                            clean_text(contact.get("streetName")),
+                            clean_text(contact.get("zip")),
+                            clean_text(contact.get("city")),
+                            clean_text(contact.get("state")),
+                            clean_text(contact.get("fax")),
+                            clean_text(contact.get("notes")),
+                            clean_bool(contact.get("isTrustCompanyOrOtherEntity")),
+                            clean_bool(contact.get("isCashDeal")),
+                            clean_int(contact.get("loanTypeId")),
+                            clean_text(contact.get("loanType")),
+                            clean_decimal(contact.get("loanAmount")),
+                            clean_int(contact.get("brokerTaxId")),
+                            clean_text(contact.get("miscContactType")),
+                        ))
+
+                for item in data.get("breakdown", []):
+                    name = clean_text(item.get("name"))
+                    if name:
+                        breakdown_rows.append((
+                            sale_guid,
+                            name,
+                            clean_text(item.get("details")),
+                            clean_decimal(item.get("amount")),
+                        ))
+
+                for item in data.get("co_agents", []):
+                    co_guid = clean_text(item.get("coAgentGuid") or item.get("userGuid"))
+                    if co_guid:
+                        co_agent_rows.append((sale_guid, co_guid))
+
+                for item in data.get("coordinators", []):
+                    contact_guid = clean_text(item.get("contactGuid"))
+                    if contact_guid:
+                        coordinator_rows.append((
+                            sale_guid,
+                            contact_guid,
+                            clean_text(item.get("firstName")),
+                            clean_text(item.get("lastName")),
+                            clean_text(item.get("fullName")),
+                            clean_text(item.get("email")),
+                            clean_text(item.get("phoneNumber") or item.get("phone")),
+                            clean_text(item.get("notes")),
+                            clean_decimal(item.get("fee") or item.get("tcFee")),
+                            clean_bool(item.get("hasAccess")),
+                        ))
+
+                for item in data.get("splits", []):
+                    agent_guid = clean_text(item.get("agentGuid") or item.get("userGuid"))
+                    if agent_guid:
+                        split_rows.append((
+                            sale_guid,
+                            agent_guid,
+                            clean_decimal(item.get("amount")),
+                            clean_decimal(item.get("percentage")),
+                        ))
+
+                rd = data.get("referral", {}) or {}
+                if rd:
+                    t_obj = rd.get("type", {}) or {}
+                    referral_rows.append((
+                        sale_guid,
+                        clean_int(t_obj.get("id")) or clean_int(rd.get("typeId")),
+                        clean_text(t_obj.get("name")) or clean_text(rd.get("typeName")),
+                        clean_text(rd.get("contactGuid")) or clean_text(rd.get("agentGuid")),
+                        clean_text(rd.get("contactFirstName")),
+                        clean_text(rd.get("contactLastName")),
+                        clean_text(rd.get("contactEmail")),
+                        clean_text(rd.get("contactPhoneNumber")),
+                        clean_text(rd.get("brokerageName")),
+                        clean_decimal(rd.get("amount")),
+                    ))
+
+                emd = data.get("emd", {}) or {}
+                if emd:
+                    emd_rows.append((
+                        sale_guid,
+                        clean_bool(emd.get("isEarnestMoneyHeld")),
+                        clean_decimal(emd.get("depositAmount")),
+                        normalize_date(emd.get("depositDueDate")),
+                        normalize_date(emd.get("datePostedToLogBook")),
+                        normalize_date(emd.get("dateOfCheck")),
+                        clean_decimal(emd.get("additionalDepositAmount")),
+                        normalize_date(emd.get("additionalDepositDueDate")),
+                    ))
+
+                for item in data.get("activities", []):
+                    aid = clean_text(item.get("activityId"))
+                    if aid:
+                        activity_rows.append((
+                            sale_guid,
+                            aid,
+                            clean_int(item.get("order")),
+                            clean_text(item.get("activityName")),
+                            normalize_date(item.get("dateAssigned")),
+                            clean_int(item.get("typeId")),
+                            clean_text(item.get("typeName")),
+                            clean_text(item.get("status")),
+                            clean_text(item.get("help")),
+                            normalize_date(item.get("modifiedOn")),
+                        ))
+
+                for item in data.get("docs", []):
+                    did = clean_text(item.get("docId"))
+                    if did:
+                        doc_rows.append((
+                            sale_guid,
+                            clean_text(item.get("activityId")),
+                            did,
+                            clean_text(item.get("name")),
+                            clean_url(item.get("url")),
+                            clean_text(item.get("documentServiceKey")),
+                            normalize_date(item.get("modifiedDate")),
+                            normalize_date(item.get("uploadDate")),
+                            clean_text(item.get("fileName")),
+                            clean_text(item.get("extension")),
+                            clean_decimal(item.get("fileSize")),
+                            clean_int(item.get("pages")),
+                        ))
+
+                for item in data.get("activity_docs", []):
+                    aid = clean_text(item.get("activityId"))
+                    fn = clean_text(item.get("fileName"))
+                    if aid and fn:
+                        activity_doc_rows.append((sale_guid, aid, fn))
+
+                for item in data.get("comments", []):
+                    aid = clean_text(item.get("activityId"))
+                    if aid:
+                        comment_rows.append((
+                            aid,
+                            sale_guid,
+                            clean_text(item.get("comment")),
+                            normalize_date(item.get("createdOn")),
+                            clean_text(item.get("createdBy")),
+                        ))
+
+                batch_saved += 1
+
+            if sample_no_guid:
+                logger.info("[WORKER-%s][RETRY-%s] sample skipped_no_guid: %s", worker_id, retry_round, sample_no_guid)
+
+            if sample_detail_missing:
+                logger.info("[WORKER-%s][RETRY-%s] sample skipped_detail_missing: %s", worker_id, retry_round, sample_detail_missing)
+
+            if sample_process_sale_none:
+                logger.info("[WORKER-%s][RETRY-%s] sample skipped_process_sale: %s", worker_id, retry_round, sample_process_sale_none)
+
+            if not sales_rows:
+                logger.warning(
+                    "[WORKER-%s][RETRY-%s] No sales_rows built. batch_size=%s, skipped_no_guid=%s, "
+                    "skipped_detail_missing=%s, skipped_process_sale=%s",
+                    worker_id, retry_round, len(sales_batch), skipped_no_guid, skipped_detail_missing, skipped_process_sale
+                )
+                return
+
+            sales_rows_dedup = deduplicate_rows(sales_rows, [1])
+            property_rows_dedup = deduplicate_rows(property_rows, [0]) if property_rows else []
+            commission_rows_dedup = deduplicate_rows(commission_rows, [0]) if commission_rows else []
+            file_creator_rows_dedup = deduplicate_rows(file_creator_rows, [0, 1]) if file_creator_rows else []
+            contact_rows_dedup = deduplicate_rows(contact_rows, [0, 1, 2]) if contact_rows else []
+            co_agent_rows_dedup = deduplicate_rows(co_agent_rows, [0, 1]) if co_agent_rows else []
+            coordinator_rows_dedup = deduplicate_rows(coordinator_rows, [0, 1]) if coordinator_rows else []
+            split_rows_dedup = deduplicate_rows(split_rows, [0, 1]) if split_rows else []
+            referral_rows_dedup = deduplicate_rows(referral_rows, [0]) if referral_rows else []
+            emd_rows_dedup = deduplicate_rows(emd_rows, [0]) if emd_rows else []
+            activity_rows_dedup = deduplicate_rows(activity_rows, [0, 1]) if activity_rows else []
+            doc_rows_dedup = deduplicate_rows(doc_rows, [2, 0]) if doc_rows else []
+            activity_doc_rows_dedup = deduplicate_rows(activity_doc_rows, [0, 1, 2]) if activity_doc_rows else []
+
+            log_dedup_stats(worker_id, "sale", sales_rows, sales_rows_dedup)
+            log_dedup_stats(worker_id, "sale_property", property_rows, property_rows_dedup)
+            log_dedup_stats(worker_id, "sale_commission", commission_rows, commission_rows_dedup)
+            log_dedup_stats(worker_id, "sale_file_creator", file_creator_rows, file_creator_rows_dedup)
+            log_dedup_stats(worker_id, "sale_contact", contact_rows, contact_rows_dedup)
+            log_dedup_stats(worker_id, "sale_co_agent", co_agent_rows, co_agent_rows_dedup)
+            log_dedup_stats(worker_id, "sale_transaction_coordinator", coordinator_rows, coordinator_rows_dedup)
+            log_dedup_stats(worker_id, "sale_commission_split", split_rows, split_rows_dedup)
+            log_dedup_stats(worker_id, "sale_commission_referral", referral_rows, referral_rows_dedup)
+            log_dedup_stats(worker_id, "sale_earnest_money_deposit", emd_rows, emd_rows_dedup)
+            log_dedup_stats(worker_id, "sale_checklist_activity", activity_rows, activity_rows_dedup)
+            log_dedup_stats(worker_id, "sale_checklist_doc", doc_rows, doc_rows_dedup)
+            log_dedup_stats(worker_id, "sale_checklist_activity_docs", activity_doc_rows, activity_doc_rows_dedup)
+
+            ensure_reference_data(cur, worker_id, users_to_ensure, checklists_to_ensure, offices_to_ensure)
+
+            bulk_execute_values(cur, SALE_UPSERT_SQL, sales_rows_dedup, "sale")
+            bulk_execute_values(cur, FILE_CREATOR_UPSERT_SQL, file_creator_rows_dedup, "sale_file_creator")
+            bulk_execute_values(cur, PROPERTY_UPSERT_SQL, property_rows_dedup, "sale_property")
+            bulk_execute_values(cur, COMMISSION_UPSERT_SQL, commission_rows_dedup, "sale_commission")
+            bulk_execute_values(cur, CONTACT_UPSERT_SQL, contact_rows_dedup, "sale_contact")
+            bulk_execute_values(cur, CO_AGENT_UPSERT_SQL, co_agent_rows_dedup, "sale_co_agent")
+            bulk_execute_values(cur, COORDINATOR_UPSERT_SQL, coordinator_rows_dedup, "sale_transaction_coordinator")
+            bulk_execute_values(cur, SPLIT_UPSERT_SQL, split_rows_dedup, "sale_commission_split")
+            bulk_execute_values(cur, REFERRAL_UPSERT_SQL, referral_rows_dedup, "sale_commission_referral")
+            bulk_execute_values(cur, EMD_UPSERT_SQL, emd_rows_dedup, "sale_earnest_money_deposit")
+            bulk_execute_values(cur, ACTIVITY_UPSERT_SQL, activity_rows_dedup, "sale_checklist_activity")
+            bulk_execute_values(cur, DOC_UPSERT_SQL, doc_rows_dedup, "sale_checklist_doc")
+            bulk_execute_values(cur, ACTIVITY_DOC_UPSERT_SQL, activity_doc_rows_dedup, "sale_checklist_activity_docs")
+
+            if sale_guids_in_batch:
+                guid_list = list(sale_guids_in_batch)
+                cur.execute("DELETE FROM sale_commission_breakdown WHERE saleGuid = ANY(%s::uuid[])", (guid_list,))
+                cur.execute("DELETE FROM sale_checklist_comment WHERE saleGuid = ANY(%s::uuid[])", (guid_list,))
+                logger.info(
+                    "[WORKER-%s][RETRY-%s] Cleared child rows for sale_commission_breakdown and sale_checklist_comment for %s saleGuids",
+                    worker_id, retry_round, len(guid_list)
+                )
+
+            bulk_execute_values(cur, BREAKDOWN_INSERT_SQL, breakdown_rows, "sale_commission_breakdown")
+            bulk_execute_values(cur, COMMENT_INSERT_SQL, comment_rows, "sale_checklist_comment")
+
+            conn.commit()
 
             logger.info(
-                "[WORKER-%s][RETRY-%s] saleGuid=%s fileId=%r url=%r",
-                worker_id, retry_round, sale_guid, sale_file_id, sale_url
+                "[WORKER-%s][RETRY-%s] batch committed successfully: input=%s, valid_sales=%s, skipped_no_guid=%s, "
+                "skipped_detail_missing=%s, skipped_process_sale=%s, sale_rows=%s, sale_rows_after_dedup=%s",
+                worker_id,
+                retry_round,
+                len(sales_batch),
+                batch_saved,
+                skipped_no_guid,
+                skipped_detail_missing,
+                skipped_process_sale,
+                len(sales_rows),
+                len(sales_rows_dedup),
             )
 
-            sales_rows.append(build_sale_row(sale_data))
-
-            pd = data.get("property", {}) or {}
-            if pd:
-                property_rows.append((
-                    sale_guid,
-                    clean_int(pd.get("streetNumber")),
-                    clean_text(pd.get("streetAddress")),
-                    clean_text(pd.get("unit")),
-                    clean_text(pd.get("direction")),
-                    clean_text(pd.get("city")),
-                    clean_text(pd.get("county")),
-                    clean_text(pd.get("state")),
-                    clean_text(pd.get("zip")),
-                    clean_int(pd.get("yearBuilt")),
-                    clean_int(pd.get("realPropertyTypeId")),
-                    clean_int(pd.get("realPropertySubtypeId")),
-                ))
-
-            cd = data.get("commission", {}) or {}
-            if cd:
-                commission_rows.append((
-                    sale_guid,
-                    clean_text(cd.get("transactionCoordinatorName")),
-                    clean_text(cd.get("transactionCoordinatorFee")),
-                    clean_decimal(cd.get("adminBrokerageComp")),
-                    normalize_date(cd.get("dateOfCheck")),
-                    normalize_date(cd.get("datePostedToLogBook")),
-                    clean_decimal(cd.get("listingCommissionPercent")),
-                    clean_decimal(cd.get("listingCommissionAmount")),
-                    clean_decimal(cd.get("saleCommissionPercent")),
-                    clean_decimal(cd.get("saleCommissionAmount")),
-                    clean_decimal(cd.get("otherDeductions")),
-                    clean_bool(cd.get("personalDeal")),
-                    clean_text(cd.get("commissionBreakdownDetails")),
-                    clean_decimal(cd.get("officeGrossCommissionOnSale")),
-                ))
-
-            if fc_guid:
-                file_creator_rows.append((
-                    sale_guid,
-                    fc_guid,
-                    clean_text(fc.get("firstName")),
-                    clean_text(fc.get("lastName")),
-                    clean_text(fc.get("email")),
-                    clean_text(fc.get("alternateEmail")),
-                ))
-
-            for contact in data.get("contacts", []):
-                c_guid = clean_text(contact.get("contactGuid"))
-                role = clean_text(contact.get("role"))
-                if c_guid and role:
-                    contact_rows.append((
-                        sale_guid,
-                        c_guid,
-                        role,
-                        clean_text(contact.get("firstName")),
-                        clean_text(contact.get("lastName")),
-                        clean_text(contact.get("phoneNumber")),
-                        clean_text(contact.get("email")),
-                        clean_text(contact.get("company")),
-                        clean_text(contact.get("alternatePhone")),
-                        clean_text(contact.get("streetNumber")),
-                        clean_text(contact.get("streetName")),
-                        clean_text(contact.get("zip")),
-                        clean_text(contact.get("city")),
-                        clean_text(contact.get("state")),
-                        clean_text(contact.get("fax")),
-                        clean_text(contact.get("notes")),
-                        clean_bool(contact.get("isTrustCompanyOrOtherEntity")),
-                        clean_bool(contact.get("isCashDeal")),
-                        clean_int(contact.get("loanTypeId")),
-                        clean_text(contact.get("loanType")),
-                        clean_decimal(contact.get("loanAmount")),
-                        clean_int(contact.get("brokerTaxId")),
-                        clean_text(contact.get("miscContactType")),
-                    ))
-
-            for item in data.get("breakdown", []):
-                name = clean_text(item.get("name"))
-                if name:
-                    breakdown_rows.append((
-                        sale_guid,
-                        name,
-                        clean_text(item.get("details")),
-                        clean_decimal(item.get("amount")),
-                    ))
-
-            for item in data.get("co_agents", []):
-                co_guid = clean_text(item.get("coAgentGuid") or item.get("userGuid"))
-                if co_guid:
-                    co_agent_rows.append((sale_guid, co_guid))
-
-            for item in data.get("coordinators", []):
-                contact_guid = clean_text(item.get("contactGuid"))
-                if contact_guid:
-                    coordinator_rows.append((
-                        sale_guid,
-                        contact_guid,
-                        clean_text(item.get("firstName")),
-                        clean_text(item.get("lastName")),
-                        clean_text(item.get("fullName")),
-                        clean_text(item.get("email")),
-                        clean_text(item.get("phoneNumber") or item.get("phone")),
-                        clean_text(item.get("notes")),
-                        clean_decimal(item.get("fee") or item.get("tcFee")),
-                        clean_bool(item.get("hasAccess")),
-                    ))
-
-            for item in data.get("splits", []):
-                agent_guid = clean_text(item.get("agentGuid") or item.get("userGuid"))
-                if agent_guid:
-                    split_rows.append((
-                        sale_guid,
-                        agent_guid,
-                        clean_decimal(item.get("amount")),
-                        clean_decimal(item.get("percentage")),
-                    ))
-
-            rd = data.get("referral", {}) or {}
-            if rd:
-                t_obj = rd.get("type", {}) or {}
-                referral_rows.append((
-                    sale_guid,
-                    clean_int(t_obj.get("id")) or clean_int(rd.get("typeId")),
-                    clean_text(t_obj.get("name")) or clean_text(rd.get("typeName")),
-                    clean_text(rd.get("contactGuid")) or clean_text(rd.get("agentGuid")),
-                    clean_text(rd.get("contactFirstName")),
-                    clean_text(rd.get("contactLastName")),
-                    clean_text(rd.get("contactEmail")),
-                    clean_text(rd.get("contactPhoneNumber")),
-                    clean_text(rd.get("brokerageName")),
-                    clean_decimal(rd.get("amount")),
-                ))
-
-            emd = data.get("emd", {}) or {}
-            if emd:
-                emd_rows.append((
-                    sale_guid,
-                    clean_bool(emd.get("isEarnestMoneyHeld")),
-                    clean_decimal(emd.get("depositAmount")),
-                    normalize_date(emd.get("depositDueDate")),
-                    normalize_date(emd.get("datePostedToLogBook")),
-                    normalize_date(emd.get("dateOfCheck")),
-                    clean_decimal(emd.get("additionalDepositAmount")),
-                    normalize_date(emd.get("additionalDepositDueDate")),
-                ))
-
-            for item in data.get("activities", []):
-                aid = clean_text(item.get("activityId"))
-                if aid:
-                    activity_rows.append((
-                        sale_guid,
-                        aid,
-                        clean_int(item.get("order")),
-                        clean_text(item.get("activityName")),
-                        normalize_date(item.get("dateAssigned")),
-                        clean_int(item.get("typeId")),
-                        clean_text(item.get("typeName")),
-                        clean_text(item.get("status")),
-                        clean_text(item.get("help")),
-                        normalize_date(item.get("modifiedOn")),
-                    ))
-
-            for item in data.get("docs", []):
-                did = clean_text(item.get("docId"))
-                if did:
-                    doc_rows.append((
-                        sale_guid,
-                        clean_text(item.get("activityId")),
-                        did,
-                        clean_text(item.get("name")),
-                        clean_url(item.get("url")),
-                        clean_text(item.get("documentServiceKey")),
-                        normalize_date(item.get("modifiedDate")),
-                        normalize_date(item.get("uploadDate")),
-                        clean_text(item.get("fileName")),
-                        clean_text(item.get("extension")),
-                        clean_decimal(item.get("fileSize")),
-                        clean_int(item.get("pages")),
-                    ))
-
-            for item in data.get("activity_docs", []):
-                aid = clean_text(item.get("activityId"))
-                fn = clean_text(item.get("fileName"))
-                if aid and fn:
-                    activity_doc_rows.append((sale_guid, aid, fn))
-
-            for item in data.get("comments", []):
-                aid = clean_text(item.get("activityId"))
-                if aid:
-                    comment_rows.append((
-                        aid,
-                        sale_guid,
-                        clean_text(item.get("comment")),
-                        normalize_date(item.get("createdOn")),
-                        clean_text(item.get("createdBy")),
-                    ))
-
-            batch_saved += 1
-
-        if sample_no_guid:
-            logger.info("[WORKER-%s][RETRY-%s] sample skipped_no_guid: %s", worker_id, retry_round, sample_no_guid)
-
-        if sample_detail_missing:
-            logger.info("[WORKER-%s][RETRY-%s] sample skipped_detail_missing: %s", worker_id, retry_round, sample_detail_missing)
-
-        if sample_process_sale_none:
-            logger.info("[WORKER-%s][RETRY-%s] sample skipped_process_sale: %s", worker_id, retry_round, sample_process_sale_none)
-
-        if not sales_rows:
-            logger.warning(
-                "[WORKER-%s][RETRY-%s] No sales_rows built. batch_size=%s, skipped_no_guid=%s, "
-                "skipped_detail_missing=%s, skipped_process_sale=%s",
-                worker_id, retry_round, len(sales_batch), skipped_no_guid, skipped_detail_missing, skipped_process_sale
-            )
-            return
-
-        ensure_reference_data(cur, worker_id, users_to_ensure, checklists_to_ensure, offices_to_ensure)
-
-        bulk_execute_values(cur, SALE_UPSERT_SQL, sales_rows)
-        bulk_execute_values(cur, FILE_CREATOR_UPSERT_SQL, file_creator_rows)
-        bulk_execute_values(cur, PROPERTY_UPSERT_SQL, property_rows)
-        bulk_execute_values(cur, COMMISSION_UPSERT_SQL, commission_rows)
-        bulk_execute_values(cur, CONTACT_UPSERT_SQL, contact_rows)
-        bulk_execute_values(cur, CO_AGENT_UPSERT_SQL, co_agent_rows)
-        bulk_execute_values(cur, COORDINATOR_UPSERT_SQL, coordinator_rows)
-        bulk_execute_values(cur, SPLIT_UPSERT_SQL, split_rows)
-        bulk_execute_values(cur, REFERRAL_UPSERT_SQL, referral_rows)
-        bulk_execute_values(cur, EMD_UPSERT_SQL, emd_rows)
-        bulk_execute_values(cur, ACTIVITY_UPSERT_SQL, activity_rows)
-        bulk_execute_values(cur, DOC_UPSERT_SQL, doc_rows)
-        bulk_execute_values(cur, ACTIVITY_DOC_UPSERT_SQL, activity_doc_rows)
-
-        if sale_guids_in_batch:
-            guid_list = list(sale_guids_in_batch)
-            cur.execute("DELETE FROM sale_commission_breakdown WHERE saleGuid = ANY(%s::uuid[])", (guid_list,))
-            cur.execute("DELETE FROM sale_checklist_comment WHERE saleGuid = ANY(%s::uuid[])", (guid_list,))
-
-        bulk_execute_values(cur, BREAKDOWN_INSERT_SQL, breakdown_rows)
-        bulk_execute_values(cur, COMMENT_INSERT_SQL, comment_rows)
-
-        conn.commit()
-
-        logger.info(
-            "[WORKER-%s][RETRY-%s] batch summary: input=%s, valid_sales=%s, skipped_no_guid=%s, "
-            "skipped_detail_missing=%s, skipped_process_sale=%s, sale_rows=%s",
-            worker_id,
-            retry_round,
-            len(sales_batch),
-            batch_saved,
-            skipped_no_guid,
-            skipped_detail_missing,
-            skipped_process_sale,
-            len(sales_rows),
-        )
-
-        with progress_lock:
-            saved_count_global += batch_saved
-            processed_count += len(sales_batch)
-            if processed_count % 100 == 0:
-                logger.info("Progress: %s sales processed...", processed_count)
+            with progress_lock:
+                saved_count_global += batch_saved
+                processed_count += len(sales_batch)
+                if processed_count % 100 == 0:
+                    logger.info("Progress: %s sales processed...", processed_count)
 
     except Exception as e:
-        conn.rollback()
+        try:
+            if 'conn' in locals() and conn:
+                conn.rollback()
+                logger.error("[WORKER-%s][RETRY-%s] batch rolled back", worker_id, retry_round)
+        except Exception:
+            logger.exception("[WORKER-%s][RETRY-%s] rollback itself failed", worker_id, retry_round)
 
         for bulk_item in sales_batch:
             sale_guid = clean_guid(bulk_item.get("saleGuid"))
@@ -1423,7 +1448,6 @@ def process_sale_batch(sales_batch: List[Dict[str, Any]], worker_id: int, retry_
     finally:
         if cur:
             cur.close()
-        conn.close()
 
 
 def run_batches(sales: List[Dict[str, Any]], retry_round: int = 0) -> None:
@@ -1480,12 +1504,13 @@ def retry_failed_saleguids() -> int:
 
 
 @router.post("/sync/skyslope-sales")
-def trigger_sales_sync():
-    global processed_count, saved_count_global, error_count_global, failed_saleguids_global, detail_cache
+def trigger_sales_sync(db=Depends(get_db)):
+    global processed_count, saved_count_global, error_count_global, failed_saleguids_global, detail_cache, last_request_ts
 
     processed_count = 0
     saved_count_global = 0
     error_count_global = 0
+    last_request_ts = 0.0
 
     with failed_saleguids_lock:
         failed_saleguids_global = set()
@@ -1493,23 +1518,29 @@ def trigger_sales_sync():
     with detail_cache_lock:
         detail_cache = {}
 
-    logger.info("Starting sync job...")
-    sales = fetch_sales_bulk()
+    logger.info("Starting sync job with DB config host=%s db=%s", DB_CONFIG.get("host"), DB_CONFIG.get("dbname"))
+    log_connection_identity(db, "FASTAPI_DEPENDENCY_CONNECTION")
+
+    last_sync_date = get_last_sync_date(db)
+    logger.info("Using last_sync_date=%s for this sync run", last_sync_date)
+
+    sales = fetch_sales_bulk(last_sync_date)
 
     if not sales:
         logger.info("No sales found to sync.")
         return {
             "message": "No sales found to sync.",
+            "last_sync_date_used": last_sync_date,
             "saved": 0,
             "errors": 0,
-            "failed_saleguids": 0
+            "failed_saleguids": 0,
         }
 
+    sales = deduplicate_sales_by_guid(sales)
     total_sales = len(sales)
-    logger.info("Found %s bulk sales to process.", total_sales)
+    logger.info("Found %s unique bulk sales to process.", total_sales)
 
     run_batches(sales, retry_round=0)
-
     unresolved_failed = retry_failed_saleguids()
 
     logger.info(
@@ -1518,15 +1549,24 @@ def trigger_sales_sync():
     )
 
     if unresolved_failed == 0:
-        update_sync_date()
+        update_sync_date(db, status="success")
     else:
         logger.warning(
             "Sync date not updated because %s saleGuids still failed after retries.",
             unresolved_failed
         )
+        try:
+            update_sync_date(
+                db,
+                status="partial_failure",
+                error_message=f"{unresolved_failed} saleGuids unresolved after retries"
+            )
+        except Exception:
+            logger.exception("Failed to persist partial failure sync tracker row")
 
     return {
         "message": "Sync completed successfully." if unresolved_failed == 0 else "Sync completed with unresolved failures.",
+        "last_sync_date_used": last_sync_date,
         "total_fetched": total_sales,
         "saved": saved_count_global,
         "errors": error_count_global,
