@@ -8,42 +8,25 @@ import pandas as pd
 from openpyxl.styles import Font, Alignment
 from openpyxl.utils import get_column_letter
 
+
 router = APIRouter()
+
 
 def norm(x):
     return str(x or "").replace("\u00A0", "").strip().lower()
 
-@router.get("/skyslope/sync_info")
-def skyslope_sync_info(conn=Depends(get_db)):
-    sync_info = get_skyslope_sync(conn)
 
-    return {
-        "sync_info": sync_info,
-    }
-
-@router.get("/skyslope_api")
-def skyslope_api(
-    page: int = Query(default=1, ge=1),
-    from_close_date: str = Query(default=None),
-    to_close_date: str = Query(default=None),
-    from_contract_date: str = Query(default=None),
-    to_contract_date: str = Query(default=None),
-    status: str = Query(default=None),
-    search: str = Query(default=None),
-    conn=Depends(get_db)
+def apply_skyslope_filters(
+    base_filter: str,
+    params: list,
+    from_close_date=None,
+    to_close_date=None,
+    from_contract_date=None,
+    to_contract_date=None,
+    status=None,
+    search=None,
+    not_in_be: bool = False,
 ):
-    cursor = conn.cursor()
-
-    limit = 50
-    offset = (page - 1) * limit
-
-    base_filter = """
-        FROM sale s
-        WHERE 1=1
-    """
-
-    params = []
-
     if status:
         base_filter += " AND LOWER(s.status) = %s"
         params.append(status.lower())
@@ -66,32 +49,93 @@ def skyslope_api(
 
     if search:
         search_value = f"%{search.lower()}%"
-
         base_filter += """
             AND (
                 EXISTS (
                     SELECT 1
                     FROM brokerage_engine be
                     WHERE be.skyslopefileid = s.saleguid
-                    AND LOWER(be.transaction_identifier_transactionid::text) LIKE %s
+                      AND LOWER(be.transaction_identifier_transactionid::text) LIKE %s
                 )
                 OR EXISTS (
                     SELECT 1
                     FROM sale_property sp
                     WHERE sp.saleguid = s.saleguid
-                    AND LOWER(
+                      AND LOWER(
                         CONCAT_WS(', ',
                             CONCAT_WS(' ', sp.streetnumber, sp.streetaddress),
                             sp.city,
                             sp.state,
                             sp.zip
                         )
-                    ) LIKE %s
+                      ) LIKE %s
                 )
                 OR LOWER(s.saleguid::text) LIKE %s
             )
         """
         params.extend([search_value, search_value, search_value])
+
+    if not_in_be:
+        base_filter += """
+            AND NOT EXISTS (
+                SELECT 1
+                FROM brokerage_engine be2
+                WHERE be2.skyslopefileid = s.saleguid
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM otherincome_transactions oit
+                WHERE oit.skyslopefileid = s.saleguid
+            )
+        """
+
+    return base_filter, params
+
+
+@router.get("/skyslope/sync_info")
+def skyslope_sync_info(conn=Depends(get_db)):
+    sync_info = get_skyslope_sync(conn)
+
+    return {
+        "sync_info": sync_info,
+    }
+
+
+@router.get("/skyslope-listing")
+def skyslope_api(
+    page: int = Query(default=1, ge=1),
+    from_close_date: str = Query(default=None),
+    to_close_date: str = Query(default=None),
+    from_contract_date: str = Query(default=None),
+    to_contract_date: str = Query(default=None),
+    status: str = Query(default=None),
+    search: str = Query(default=None),
+    not_in_be: bool = Query(default=False),
+    conn=Depends(get_db)
+):
+    cursor = conn.cursor()
+
+    limit = 50
+    offset = (page - 1) * limit
+
+    base_filter = """
+        FROM sale s
+        WHERE 1=1
+    """
+
+    params = []
+
+    base_filter, params = apply_skyslope_filters(
+        base_filter=base_filter,
+        params=params,
+        from_close_date=from_close_date,
+        to_close_date=to_close_date,
+        from_contract_date=from_contract_date,
+        to_contract_date=to_contract_date,
+        status=status,
+        search=search,
+        not_in_be=not_in_be,
+    )
 
     count_query = "SELECT COUNT(*) " + base_filter
     cursor.execute(count_query, params)
@@ -125,7 +169,7 @@ def skyslope_api(
                         )
                         FROM sale_contact sc
                         WHERE sc.saleguid = s.saleguid
-                        AND LOWER(sc.role) = 'buyer'
+                          AND LOWER(sc.role) = 'buyer'
                     ),
                     ''
                 ),
@@ -176,10 +220,12 @@ def skyslope_api(
     return {
         "total_count": total_count,
         "filters": {
-            "status_list": status_list
+            "status_list": status_list,
+            "not_in_be": not_in_be,
         },
         "data": data
     }
+
 
 @router.get("/skyslope/detail")
 def skyslope_detail(saleguid: str, conn=Depends(get_db)):
@@ -343,11 +389,39 @@ def skyslope_detail(saleguid: str, conn=Depends(get_db)):
         "otherincome_transactions": otherincome_records,
     }
 
+
 @router.get("/skyslope/download")
-def skyslope_download(conn=Depends(get_db)):
+def skyslope_download(
+    from_close_date: str = Query(default=None),
+    to_close_date: str = Query(default=None),
+    from_contract_date: str = Query(default=None),
+    to_contract_date: str = Query(default=None),
+    status: str = Query(default=None),
+    search: str = Query(default=None),
+    not_in_be: bool = Query(default=False),
+    conn=Depends(get_db)
+):
     cursor = conn.cursor()
 
-    # ───────────────────────────── SQL (sale + sale_property + stage + sale_contact + sale_commission) ─────────────────────────────
+    base_filter = """
+        FROM sale s
+        WHERE 1=1
+    """
+
+    params = []
+
+    base_filter, params = apply_skyslope_filters(
+        base_filter=base_filter,
+        params=params,
+        from_close_date=from_close_date,
+        to_close_date=to_close_date,
+        from_contract_date=from_contract_date,
+        to_contract_date=to_contract_date,
+        status=status,
+        search=search,
+        not_in_be=not_in_be,
+    )
+
     data_query = """
         SELECT
             s.saleguid AS saleguid,
@@ -386,30 +460,34 @@ def skyslope_download(conn=Depends(get_db)):
                 ''
             ) AS seller_name,
 
-            s.saleprice              AS sale_price,
-            s.listingprice           AS listing_price,
-            s.escrowclosingdate      AS escrow_close_date,
+            s.saleprice AS sale_price,
+            s.listingprice AS listing_price,
+            s.escrowclosingdate AS escrow_close_date,
             s.contractacceptancedate AS contract_date,
-            s.status                 AS status,
-            st.name                  AS stage,
-            s.dealtype               AS dealtype,
+            s.status AS status,
+            st.name AS stage,
+            s.dealtype AS dealtype,
 
             sc2."officegrosscommissiononsale" AS office_gross_commission_on_sale,
-            sc2."salecommissionamount"        AS sale_commission_amount,
-            sc2."listingcommissionamount"     AS listing_commission_amount
+            sc2."salecommissionamount" AS sale_commission_amount,
+            sc2."listingcommissionamount" AS listing_commission_amount
         FROM sale s
-        LEFT JOIN sale_property sp   ON s.saleguid = sp.saleguid
-        LEFT JOIN stage st           ON s.stageid = st.stageid
+        LEFT JOIN sale_property sp ON s.saleguid = sp.saleguid
+        LEFT JOIN stage st ON s.stageid = st.stageid
         LEFT JOIN sale_commission sc2 ON sc2.saleguid = s.saleguid
+    """
+
+    data_query += base_filter.replace("FROM sale s", "")
+
+    data_query += """
         ORDER BY s.escrowclosingdate DESC NULLS LAST, s.saleguid
     """
 
-    cursor.execute(data_query)
+    cursor.execute(data_query, params)
     columns = [desc[0] for desc in cursor.description]
     rows = cursor.fetchall()
     data = [dict(zip(columns, row)) for row in rows]
 
-    # ───────────────────────────── Map to export headers ─────────────────────────────
     columns_map = {
         "saleguid": "Sale GUID",
         "property_address": "Property Address",
@@ -448,14 +526,11 @@ def skyslope_download(conn=Depends(get_db)):
 
     df = pd.DataFrame(rows_to_export)
 
-    # ───────────────────────────── Excel generation ─────────────────────────────
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="SkySlope Report", index=False)
 
-        workbook = writer.book
         worksheet = writer.sheets["SkySlope Report"]
-
         worksheet.freeze_panes = "A2"
 
         font_header = Font(name="Segoe UI", size=11, bold=True)
@@ -464,7 +539,6 @@ def skyslope_download(conn=Depends(get_db)):
 
         worksheet.row_dimensions[1].height = 28
 
-        # Header styling
         for col_num in range(1, len(df.columns) + 1):
             cell = worksheet.cell(row=1, column=col_num)
             cell.font = font_header
@@ -491,7 +565,6 @@ def skyslope_download(conn=Depends(get_db)):
             elif any(kw in col_name_lower for kw in center_keywords):
                 center_cols.append(idx + 1)
 
-        # Body styling
         for row_num in range(2, len(df) + 2):
             worksheet.row_dimensions[row_num].height = 20
 
@@ -511,7 +584,6 @@ def skyslope_download(conn=Depends(get_db)):
                 else:
                     cell.alignment = Alignment(horizontal="left", vertical="center")
 
-        # Auto-fit columns
         for col in worksheet.columns:
             max_len = 0
             col_letter = get_column_letter(col[0].column)
