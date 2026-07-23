@@ -4,7 +4,7 @@ from datetime import timezone
 from zoneinfo import ZoneInfo
 from db import get_db
 from datetime import datetime
-from services.sync_helpers import build_row_values, INSERT_SQL
+from services.be_sync_helpers import build_row_values, INSERT_SQL
 
 router = APIRouter()
 
