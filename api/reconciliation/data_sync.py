@@ -15,7 +15,6 @@ def data_sync():
         )
         steps.append({
             "step": "brokerage_engine_sync",
-            "url": "https://roa-data-backend.vercel.app/sync/brokerage-engine",
             "status_code": api1.status_code,
             "success": api1.ok,
         })
@@ -32,7 +31,6 @@ def data_sync():
         )
         steps.append({
             "step": "other_income_sync",
-            "url": "https://roa-data-backend.vercel.app/sync/other-income",
             "status_code": api2.status_code,
             "success": api2.ok,
         })
@@ -44,12 +42,11 @@ def data_sync():
             }
 
         api3 = requests.post(
-            "https://roa-data-backend.vercel.app/sync/skyslope-sales",
+            "https://roa-data-backend.vercel.app/sync-skyslope-sales",
             timeout=300,
         )
         steps.append({
             "step": "skyslope_sales_sync",
-            "url": "https://roa-data-backend.vercel.app/sync/skyslope-sales",
             "status_code": api3.status_code,
             "success": api3.ok,
         })
