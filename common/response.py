@@ -1,56 +1,47 @@
-from typing import Any, Generic, Optional, TypeVar
-
+from __future__ import annotations
+from typing import Any, Generic, TypeVar
 from pydantic import BaseModel
-
-from common.pagination import PaginationMeta
+from fastapi.responses import JSONResponse
 
 T = TypeVar("T")
 
-
-class ErrorDetail(BaseModel):
-    code: Optional[str] = None
-    message: Optional[str] = None
-    details: Optional[Any] = None
-
-
-class ApiResponse(BaseModel, Generic[T]):
-    success: bool
-    pagination: Optional[PaginationMeta] = None
+class Response(BaseModel, Generic[T]):
+    success: bool = True
     data: T
-    error: Optional[ErrorDetail] = None
+    message: str = "Request successful"
 
 
-def build_success_response(data: Any) -> ApiResponse[Any]:
-    return ApiResponse(
-        success=True,
-        pagination=None,
-        data=data,
-        error=None,
-    )
+class ErrorResponse(BaseModel):
+    success: bool = False
+    error_code: str
+    message: str
+    details: list[dict[str, Any]] | None = None
 
-
-def build_paginated_response(items: list[Any], pagination: PaginationMeta) -> ApiResponse[list[Any]]:
-    return ApiResponse(
-        success=True,
-        pagination=pagination,
-        data=items,
-        error=None,
-    )
+class AppError(Exception):
+    def __init__(
+        self,
+        status_code: int,
+        error_code: str,
+        message: str,
+        details: list[dict[str, Any]] | None = None,
+    ):
+        self.status_code = status_code
+        self.error_code = error_code
+        self.message = message
+        self.details = details
 
 
 def build_error_response(
+    status_code: int,
+    error_code: str,
     message: str,
-    code: Optional[str] = None,
-    details: Optional[Any] = None,
-    data: Any = None,
-) -> ApiResponse[Any]:
-    return ApiResponse(
-        success=False,
-        pagination=None,
-        data=data if data is not None else {},
-        error=ErrorDetail(
-            code=code,
+    details: list[dict[str, Any]] | None = None,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content=ErrorResponse(
+            error_code=error_code,
             message=message,
             details=details,
-        ),
+        ).model_dump(),
     )

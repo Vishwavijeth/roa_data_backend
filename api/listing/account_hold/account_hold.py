@@ -1,26 +1,14 @@
-from decimal import Decimal
-from datetime import date, datetime
 from math import ceil
 from typing import Literal
-from uuid import UUID
-
+from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Query
 from psycopg2.extras import RealDictCursor
-
+from common.pagination import PaginationResponse
 from db import get_db
+from api.listing.account_hold.base import AccountHoldItem, AccountHoldSummaryData
+from common.response import Response
 
 router = APIRouter()
-
-
-def serialize_value(value):
-    if isinstance(value, Decimal):
-        return float(value)
-    if isinstance(value, (datetime, date)):
-        return value.isoformat()
-    if isinstance(value, UUID):
-        return str(value)
-    return value
-
 
 def normalize_email(value):
     if not value:
@@ -320,172 +308,15 @@ def fetch_agent_ar_balance(db, qb_customerid):
 
         return {
             "customer_id": str(row["customer_id"]),
-            "total_open_balance": serialize_value(row["total_open_balance"]),
+            "total_open_balance": row["total_open_balance"],
             "invoice_count": int(row["invoice_count"] or 0),
-            "updated_at": serialize_value(row["updated_at"]),
+            "updated_at": row["updated_at"],
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AR balance lookup failed: {str(e)}")
+    
 
-
-def fetch_agent_detail_transactions(db, email: str):
-    query = """
-        WITH target_agent AS (
-            SELECT
-                LOWER(TRIM(u.primary_emailaddress)) AS normalized_email,
-                LOWER(TRIM(u.display_name)) AS normalized_name
-            FROM brokerage_engine_users u
-            WHERE LOWER(TRIM(u.primary_emailaddress)) = LOWER(TRIM(%s))
-            LIMIT 1
-        ),
-        brokerage_engine_transactions AS (
-            SELECT
-                be.transaction_identifier_transactionid AS transaction_id,
-                be.property_address,
-                LOWER(TRIM(split_email)) AS normalized_email,
-                'brokerage_engine' AS source_name
-            FROM brokerage_engine be
-            CROSS JOIN LATERAL regexp_split_to_table(COALESCE(be.buying_agent_email, ''), ',') AS split_email
-            WHERE NULLIF(TRIM(split_email), '') IS NOT NULL
-        ),
-        otherincome_transaction_agents AS (
-            SELECT
-                oi.transaction_identifier_transactionid AS transaction_id,
-                oi.property_address,
-                LOWER(TRIM(split_agent)) AS normalized_name,
-                'otherincome_transactions' AS source_name
-            FROM otherincome_transactions oi
-            CROSS JOIN LATERAL regexp_split_to_table(COALESCE(oi.agents, ''), ',') AS split_agent
-            WHERE NULLIF(TRIM(split_agent), '') IS NOT NULL
-        ),
-        matched_be_transactions AS (
-            SELECT
-                bet.transaction_id,
-                bet.property_address,
-                bet.source_name
-            FROM brokerage_engine_transactions bet
-            JOIN target_agent ta
-              ON ta.normalized_email = bet.normalized_email
-        ),
-        matched_oi_transactions AS (
-            SELECT
-                oita.transaction_id,
-                oita.property_address,
-                oita.source_name
-            FROM otherincome_transaction_agents oita
-            JOIN target_agent ta
-              ON ta.normalized_name = oita.normalized_name
-        ),
-        matched_transactions AS (
-            SELECT DISTINCT ON (transaction_id, source_name)
-                transaction_id, property_address, source_name
-            FROM (
-                SELECT * FROM matched_be_transactions
-                UNION ALL
-                SELECT * FROM matched_oi_transactions
-            ) combined
-            ORDER BY transaction_id, source_name, property_address
-        ),
-        latest_reconciliation_data AS (
-            SELECT DISTINCT ON (rd.transactionid)
-                rd.transactionid,
-                rd.be_source_table,
-                rd.saleguid,
-                rd.be_transaction_specialist,
-                rd.skyslope_reviewer,
-                rd.be_gross_commission,
-                rd.skyslope_gross_commission,
-                rd.gross_commission_match,
-                rd.be_close_date_value,
-                rd.skyslope_close_date_value,
-                rd.close_date_match,
-                rd.be_status_value,
-                rd.skyslope_status_value,
-                rd.status_match,
-                rd.be_sale_price,
-                rd.skyslope_sale_price,
-                rd.sale_price_match
-            FROM reconciliation_data rd
-            ORDER BY rd.transactionid, rd.evaluated_at DESC NULLS LAST
-        )
-        SELECT
-            mt.transaction_id AS transaction_identifier_transactionid,
-            mt.property_address,
-            mt.source_name,
-            lrd.be_source_table,
-            lrd.saleguid,
-            lrd.be_transaction_specialist,
-            lrd.skyslope_reviewer,
-            lrd.be_gross_commission,
-            lrd.skyslope_gross_commission,
-            lrd.gross_commission_match,
-            lrd.be_close_date_value,
-            lrd.skyslope_close_date_value,
-            lrd.close_date_match,
-            lrd.be_status_value,
-            lrd.skyslope_status_value,
-            lrd.status_match,
-            lrd.be_sale_price,
-            lrd.skyslope_sale_price,
-            lrd.sale_price_match
-        FROM matched_transactions mt
-        LEFT JOIN latest_reconciliation_data lrd
-          ON lrd.transactionid = mt.transaction_id
-        ORDER BY mt.property_address, mt.transaction_id
-    """
-
-    try:
-        with db.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(query, (email,))
-            return cur.fetchall()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Detail transaction query failed: {str(e)}")
-
-
-def build_transaction_flags(row):
-    if row.get("saleguid") is None:
-        return ["no_skyslope_file_id"]
-
-    transaction_flags = []
-    match_mapping = {
-        "gross_commission_match": "gross_commission",
-        "close_date_match": "close_date",
-        "status_match": "status",
-        "sale_price_match": "sale_price",
-    }
-
-    for db_field, response_flag in match_mapping.items():
-        value = row.get(db_field)
-        if value is not None and str(value).strip().lower() != "match":
-            transaction_flags.append(response_flag)
-
-    return transaction_flags
-
-
-def build_mismatch_details(row, transaction_flags):
-    if row.get("saleguid") is None:
-        return {}
-
-    mismatch_field_map = {
-        "gross_commission": {"be_key": "be_gross_commission", "skyslope_key": "skyslope_gross_commission"},
-        "close_date": {"be_key": "be_close_date_value", "skyslope_key": "skyslope_close_date_value"},
-        "status": {"be_key": "be_status_value", "skyslope_key": "skyslope_status_value"},
-        "sale_price": {"be_key": "be_sale_price", "skyslope_key": "skyslope_sale_price"},
-    }
-
-    mismatch_details = {}
-    for flag in transaction_flags:
-        config = mismatch_field_map.get(flag)
-        if not config:
-            continue
-        mismatch_details[flag] = {
-            "be": serialize_value(row.get(config["be_key"])),
-            "skyslope": serialize_value(row.get(config["skyslope_key"])),
-        }
-
-    return mismatch_details
-
-@router.get("/account-hold/summary")
+@router.get("/account-hold/summary", response_model=Response[AccountHoldSummaryData])
 async def get_account_hold_summary(db=Depends(get_db)):
     base_cte = get_base_cte()
 
@@ -505,14 +336,15 @@ async def get_account_hold_summary(db=Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Summary query failed: {str(e)}")
 
-    return {
-        "total_agents": int(row["total_agents"] or 0),
-        "agents_with_ar_balance": int(row["agents_with_ar_balance"] or 0),
-        "agents_with_account_hold": int(row["agents_with_account_hold"] or 0),
-    }
+    return Response(
+        data=AccountHoldSummaryData(
+            total_agents=int(row["total_agents"] or 0),
+            agents_with_ar_balance=int(row["agents_with_ar_balance"] or 0),
+            agents_with_account_hold=int(row["agents_with_account_hold"] or 0),
+        )
+    )
 
-
-@router.get("/account-hold")
+@router.get("/account-hold", response_model=PaginationResponse[AccountHoldItem])
 async def get_account_hold_listing(
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=100),
@@ -559,118 +391,25 @@ async def get_account_hold_listing(
         if bool(tx_summary.get("has_transaction_mismatch", False)):
             transaction_flags.append("transaction_mismatch")
 
-        data.append({
-            "display_name": row["display_name"],
-            "primary_emailaddress": row["primary_emailaddress"],
-            "customer_id": row["qb_customerid"],
-            "transaction_count": int(tx_summary.get("transaction_count") or 0),
-            "broker_flags": broker_flags,
-            "transaction_flags": transaction_flags,
-        })
+        data.append(
+            AccountHoldItem(
+                display_name=row["display_name"],
+                primary_emailaddress=row["primary_emailaddress"],
+                customer_id=str(row["qb_customerid"]) if row.get("qb_customerid") is not None else None,
+                transaction_count=int(tx_summary.get("transaction_count") or 0),
+                broker_flags=broker_flags,
+                transaction_flags=transaction_flags,
+            )
+        )
 
     total_pages = ceil(total_count / size) if total_count else 1
 
-    return {
-        "count": len(data),
-        "total_count": total_count,
-        "page": page,
-        "size": size,
-        "total_pages": total_pages,
-        "data": data,
-    }
-
-
-@router.get("/account-hold/detail/{customer_id}")
-async def get_account_hold_detail(customer_id: int, db=Depends(get_db)):
-    try:
-        with db.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT
-                    u.display_name,
-                    u.primary_emailaddress,
-                    u.qb_customerid
-                FROM brokerage_engine_users u
-                WHERE u.qb_customerid = %s
-                LIMIT 1
-                """,
-                (customer_id,),
-            )
-            agent = cur.fetchone()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Agent lookup failed: {str(e)}")
-
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-
-    rows = fetch_agent_detail_transactions(db, agent["primary_emailaddress"])
-
-    ar_balance_row = None
-    try:
-        with db.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT abd.raw_invoice, abd.updated_at
-                FROM ar_balance_details abd
-                WHERE abd.customer_id = %s
-                ORDER BY abd.updated_at DESC NULLS LAST
-                LIMIT 1
-                """,
-                (customer_id,),
-            )
-            row = cur.fetchone()
-
-        if row and row.get("raw_invoice"):
-            raw_invoice = row["raw_invoice"]
-            open_invoices = [
-                {
-                    "balance": serialize_value(inv.get("balance")),
-                    "due_date": inv.get("due_date"),
-                    "txn_date": inv.get("txn_date"),
-                    "total_amt": serialize_value(inv.get("total_amt")),
-                    "doc_number": inv.get("doc_number"),
-                    "invoice_id": inv.get("invoice_id"),
-                }
-                for inv in (raw_invoice.get("open_invoices") or [])
-            ]
-
-            ar_balance_row = {
-                "balance": serialize_value(raw_invoice.get("balance")),
-                "open_invoices": open_invoices,
-            }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"AR balance lookup failed: {str(e)}")
-
-    transactions = []
-    seen_transactions = set()
-
-    for row in rows:
-        transaction_id = serialize_value(row["transaction_identifier_transactionid"])
-        dedupe_key = (transaction_id, row.get("source_name"))
-
-        if dedupe_key in seen_transactions:
-            continue
-
-        per_transaction_flags = build_transaction_flags(row)
-        mismatch_details = build_mismatch_details(row, per_transaction_flags)
-
-        transactions.append({
-            "transactionid": transaction_id,
-            "property_address": row["property_address"],
-            "source_table": row["be_source_table"] or row["source_name"],
-            "saleguid": serialize_value(row["saleguid"]),
-            "be_transaction_specialist": row["be_transaction_specialist"],
-            "skyslope_reviewer": row["skyslope_reviewer"],
-            "transaction_flags": per_transaction_flags,
-            "mismatch_details": mismatch_details,
-        })
-        seen_transactions.add(dedupe_key)
-
-    return {
-        "display_name": agent["display_name"],
-        "primary_emailaddress": agent["primary_emailaddress"],
-        "customer_id": agent["qb_customerid"],
-        "transaction_count": len(transactions),
-        "ar_balance": ar_balance_row,
-        "transactions": transactions,
-    }
+    return PaginationResponse(
+        data=data,
+        page=page,
+        page_size=size,
+        count=len(data),
+        total_count=total_count,
+        total_pages=total_pages,
+        has_next=page < total_pages,
+    )

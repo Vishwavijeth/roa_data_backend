@@ -1,5 +1,7 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+from common.response import AppError, build_error_response
 from api.auth import router as auth_router
 from api.dashboards.transaction_specialist import router as trans_dash_router
 from api.dashboards.reviewer import router as review_dash_router
@@ -14,7 +16,8 @@ from api.listing.other_income_sync import router as other_income_sync_router
 from api.listing.skyslope_sync import router as skyslope_sync_router
 from api.listing.skyslope_sync_logs import router as skyslope_sync_logs_router
 from api.listing.cda_sent import router as cda_sent_router
-from api.listing.account_hold import router as account_hold_router
+from api.listing.account_hold.account_hold import router as account_hold_router
+from api.listing.account_hold.account_hold_detail import router as account_hold_detail_router
 from api.listing.quickbooks import router as quickbooks_router
 from api.listing.month_closing import router as month_closing_router
 from api.listing.brokerhold import router as broker_hold_router
@@ -65,6 +68,7 @@ app.include_router(skyslope_sync_router)
 app.include_router(skyslope_sync_logs_router)
 app.include_router(cda_sent_router)
 app.include_router(account_hold_router)
+app.include_router(account_hold_detail_router)
 app.include_router(quickbooks_router)
 app.include_router(qb_customerid_population_router)
 app.include_router(month_closing_router)
@@ -89,3 +93,40 @@ app.include_router(data_sync_router)
 app.include_router(cron_router)
 app.include_router(ar_balance_details_router)
 app.include_router(broker_hold_router)
+
+@app.exception_handler(AppError)
+async def app_error_handler(request: Request, exc: AppError):
+    return build_error_response(
+        status_code=exc.status_code,
+        error_code=exc.error_code,
+        message=exc.message,
+        details=exc.details,
+    )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return build_error_response(
+        status_code=exc.status_code,
+        error_code="HTTP_ERROR",
+        message=str(exc.detail),
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return build_error_response(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        error_code="VALIDATION_ERROR",
+        message="Request validation failed",
+        details=exc.errors(),
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    return build_error_response(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        error_code="INTERNAL_SERVER_ERROR",
+        message="Something went wrong",
+    )
