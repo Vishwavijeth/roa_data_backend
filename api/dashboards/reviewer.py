@@ -25,37 +25,38 @@ def reviewer_dashboard(
 ):
     query = """
     SELECT
+        s.reviewerguid,
         COALESCE(NULLIF(TRIM(CONCAT_WS(' ', r.firstname, r.lastname)), ''), 'Unassigned') AS reviewer_full_name,
 
-        COUNT(*) FILTER (
+        COUNT(DISTINCT s.saleguid) FILTER (
             WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'expired'
         ) AS transactions_expired,
 
-        COUNT(*) FILTER (
+        COUNT(DISTINCT s.saleguid) FILTER (
             WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'pending'
         ) AS transactions_pending,
 
-        COUNT(*) FILTER (
+        COUNT(DISTINCT s.saleguid) FILTER (
             WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'closed'
         ) AS transactions_closed,
 
-        COUNT(*) FILTER (
+        COUNT(DISTINCT s.saleguid) FILTER (
             WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'archived'
         ) AS transactions_archived,
 
-        COUNT(*) FILTER (
+        COUNT(DISTINCT s.saleguid) FILTER (
             WHERE LOWER(TRIM(COALESCE(s.status, ''))) IN ('canceled/app', 'canceled/pend')
         ) AS transactions_canceled,
 
-        COUNT(*) FILTER (
+        COUNT(DISTINCT s.saleguid) FILTER (
             WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'incomplete'
         ) AS transactions_incomplete,
 
-        COUNT(*) FILTER (
+        COUNT(DISTINCT s.saleguid) FILTER (
             WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'pre-contract'
         ) AS transactions_pre_contract,
 
-        COUNT(*) FILTER (
+        COUNT(DISTINCT s.saleguid) FILTER (
             WHERE LOWER(TRIM(COALESCE(s.status, ''))) IN (
                 'archived',
                 'canceled/app',
@@ -71,8 +72,6 @@ def reviewer_dashboard(
     FROM sale s
     LEFT JOIN users r
         ON s.reviewerguid = r.userguid
-    LEFT JOIN sale_property sp
-        ON s.saleguid = sp.saleguid
     LEFT JOIN stage st
         ON s.stageid = st.stageid
     LEFT JOIN office o
@@ -84,7 +83,7 @@ def reviewer_dashboard(
 
     query, params = apply_common_filters(
         query=query,
-        params=[],
+        params=params,
         from_date=from_date,
         to_date=to_date,
         state=state,
@@ -96,7 +95,9 @@ def reviewer_dashboard(
     )
 
     query += """
-    GROUP BY reviewer_full_name
+    GROUP BY
+        s.reviewerguid,
+        COALESCE(NULLIF(TRIM(CONCAT_WS(' ', r.firstname, r.lastname)), ''), 'Unassigned')
     ORDER BY reviewer_full_name
     """
 
