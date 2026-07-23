@@ -10,5 +10,11 @@
       "src": "/(.*)",
       "dest": "api/index.py"
     }
+  ],
+  "crons": [
+    {
+      "path": "/data-sync",
+      "schedule": "0 */8 * * *"
+    }
   ]
 }
