@@ -3,18 +3,27 @@ import logging
 import time
 import psycopg2
 import requests
-
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-
 from fastapi import APIRouter, Depends
 from psycopg2.extras import execute_values
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-
-from db import get_db, get_conn, DB_CONFIG
+from db import get_db, get_conn
+from services.skyslope_sync.utils import (
+    normalize_date, clean_bool, clean_decimal, 
+    clean_guid, clean_int, clean_text, 
+    clean_url, to_json_text, get_last_sync_date, update_sync_date
+    )
+from services.skyslope_sync.insert_queries import (
+    SALE_UPSERT_SQL, SPLIT_UPSERT_SQL, DOC_UPSERT_SQL, EMD_UPSERT_SQL,
+    COMMENT_INSERT_SQL, CONTACT_UPSERT_SQL, ACTIVITY_UPSERT_SQL,
+    CO_AGENT_UPSERT_SQL, PROPERTY_UPSERT_SQL, REFERRAL_UPSERT_SQL,
+    BREAKDOWN_INSERT_SQL, COMMISSION_UPSERT_SQL, COORDINATOR_UPSERT_SQL, 
+    ACTIVITY_DOC_UPSERT_SQL, FILE_CREATOR_UPSERT_SQL
+)
 from services.session import get_session_token
 
 logging.basicConfig(
@@ -55,105 +64,6 @@ detail_cache: Dict[str, Dict[str, Any]] = {}
 last_request_ts = 0.0
 
 
-def log_connection_identity(conn, label: str) -> None:
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT
-                    current_database(),
-                    current_schema(),
-                    current_user,
-                    inet_server_addr()::text,
-                    inet_server_port()
-            """)
-            row = cur.fetchone()
-            logger.info(
-                "[%s] DB identity => database=%s schema=%s user=%s host=%s port=%s",
-                label,
-                row[0] if row else None,
-                row[1] if row else None,
-                row[2] if row else None,
-                row[3] if row else None,
-                row[4] if row else None,
-            )
-    except Exception as e:
-        logger.warning("[%s] Could not log DB identity: %s", label, e)
-
-
-def ensure_sync_table(conn) -> None:
-    with conn.cursor() as cur:
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS skyslope_sync (
-                id serial PRIMARY KEY,
-                sync_date date,
-                sync_timestamp timestamp,
-                status varchar,
-                error_message varchar
-            )
-        """)
-
-
-def get_last_sync_date(conn) -> str:
-    try:
-        ensure_sync_table(conn)
-
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT sync_date
-                FROM skyslope_sync
-                ORDER BY id DESC
-                LIMIT 1
-            """)
-            row = cur.fetchone()
-
-        if row and row[0]:
-            date_str = row[0].strftime("%Y-%m-%d")
-            logger.info("Last sync date loaded from DB: %s", date_str)
-            return date_str
-
-    except Exception as e:
-        logger.warning("Could not read sync date from DB, using default: %s", e)
-
-    logger.info("No sync date found in DB. Using default: %s", DEFAULT_SYNC_DATE)
-    return DEFAULT_SYNC_DATE
-
-
-def update_sync_date(conn, status: str = "success", error_message: Optional[str] = None) -> None:
-    now = datetime.now()
-
-    try:
-        log_connection_identity(conn, "SYNC_TRACKER_CONNECTION")
-        ensure_sync_table(conn)
-
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO skyslope_sync (
-                    sync_date,
-                    sync_timestamp,
-                    status,
-                    error_message
-                )
-                VALUES (%s, NOW(), %s, %s)
-                RETURNING id, sync_date, sync_timestamp, status
-            """, (now.date(), status, error_message))
-            inserted_row = cur.fetchone()
-
-        conn.commit()
-
-        logger.info(
-            "Sync date committed to DB: id=%s sync_date=%s sync_timestamp=%s status=%s",
-            inserted_row[0] if inserted_row else None,
-            inserted_row[1] if inserted_row else None,
-            inserted_row[2] if inserted_row else None,
-            inserted_row[3] if inserted_row else None,
-        )
-
-    except Exception as e:
-        conn.rollback()
-        logger.error("Failed to insert sync date into DB. Rolled back transaction: %s", e, exc_info=True)
-        raise
-
-
 def build_session() -> requests.Session:
     session = requests.Session()
     retry = Retry(
@@ -187,136 +97,6 @@ def wait_for_request_gap() -> None:
         if elapsed < REQUEST_GAP_SECONDS:
             time.sleep(REQUEST_GAP_SECONDS - elapsed)
         last_request_ts = time.time()
-
-
-def normalize_date(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-
-    if isinstance(value, str):
-        value = value.strip()
-        if not value:
-            return None
-
-        clean = value.split("T")[0].split(" ")[0]
-        date_formats = [
-            "%Y-%m-%d",
-            "%m/%d/%Y",
-            "%d/%m/%Y",
-            "%Y/%m/%d",
-            "%m%d%Y",
-        ]
-
-        for fmt in date_formats:
-            try:
-                dt = datetime.strptime(clean, fmt)
-                if dt.year < 1900:
-                    return None
-                return dt.strftime("%Y-%m-%d")
-            except ValueError:
-                continue
-        return None
-
-    if isinstance(value, (int, float)):
-        try:
-            dt = datetime.fromtimestamp(value)
-            return dt.strftime("%Y-%m-%d")
-        except (ValueError, OSError):
-            return None
-
-    return None
-
-
-def to_json_text(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-
-    if isinstance(value, (dict, list, tuple, set)):
-        try:
-            if isinstance(value, set):
-                value = list(value)
-            return json.dumps(value, ensure_ascii=False, default=str)
-        except Exception:
-            return str(value)
-
-    return value
-
-
-def clean_text(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-
-    value = to_json_text(value)
-    if isinstance(value, str):
-        value = value.strip()
-        return value if value else None
-
-    text = str(value).strip()
-    return text if text else None
-
-
-def clean_int(value: Any) -> Optional[int]:
-    if value is None or isinstance(value, (dict, list, tuple, set)):
-        return None
-
-    if isinstance(value, str):
-        value = value.strip()
-        if not value:
-            return None
-
-    try:
-        return int(value)
-    except (ValueError, TypeError):
-        return None
-
-
-def clean_decimal(value: Any) -> Optional[float]:
-    if value is None or isinstance(value, (dict, list, tuple, set)):
-        return None
-
-    if isinstance(value, str):
-        value = value.strip()
-        if not value:
-            return None
-
-    try:
-        return float(value)
-    except (ValueError, TypeError):
-        return None
-
-
-def clean_bool(value: Any) -> Optional[bool]:
-    if value is None or isinstance(value, (dict, list, tuple, set)):
-        return None
-
-    if isinstance(value, bool):
-        return value
-
-    if isinstance(value, str):
-        return value.strip().lower() in {"true", "1", "yes"}
-
-    if isinstance(value, (int, float)):
-        return bool(value)
-
-    return None
-
-
-def clean_guid(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    text = str(value).strip().rstrip(":")
-    return text or None
-
-
-def clean_url(value: Any) -> Optional[str]:
-    value = clean_text(value)
-    if not value:
-        return None
-
-    if value.lower() in {"null", "none", "n/a", "na"}:
-        return None
-
-    return value
 
 
 def get_rate_limit_sleep_seconds(response: requests.Response) -> float:
@@ -371,7 +151,7 @@ def fetch_api(url: str) -> Optional[Dict[str, Any]]:
 def fetch_sales_bulk(sync_date: str) -> List[Dict[str, Any]]:
     sales: List[Dict[str, Any]] = []
 
-    modified_after = f"{sync_date}T00:00:00"
+    modified_after = sync_date
     url = f"{SALES_BASE_URL}?modifiedAfter={modified_after}&type={SALES_FILTER_TYPE}"
 
     logger.info("Fetching bulk sales modified after: %s", modified_after)
@@ -735,283 +515,6 @@ def build_sale_row(sale_data: Dict[str, Any]) -> Tuple:
         sale_url,
     )
 
-
-SALE_UPSERT_SQL = """
-INSERT INTO sale (
-    transaction_type,
-    saleGuid,
-    listingGuid,
-    agentGuid,
-    createdByGuid,
-    mlsNumber,
-    Email,
-    statusId,
-    status,
-    officeGuid,
-    checklistTypeId,
-    escrowNumber,
-    escrowClosingDate,
-    actualClosingDate,
-    contractAcceptanceDate,
-    createdOn,
-    checklistModifiedOn,
-    deadDate,
-    reviewerGuid,
-    sourceId,
-    source,
-    otherSource,
-    dealType,
-    saleTypeId,
-    listingPrice,
-    salePrice,
-    isOfficeLead,
-    coBrokerCompany,
-    realPropertyType,
-    realPropertySubtype,
-    commercialLease,
-    stageId,
-    customFields,
-    fileid,
-    url
-) VALUES %s
-ON CONFLICT (saleGuid) DO UPDATE SET
-    transaction_type = EXCLUDED.transaction_type,
-    listingGuid = EXCLUDED.listingGuid,
-    agentGuid = EXCLUDED.agentGuid,
-    createdByGuid = EXCLUDED.createdByGuid,
-    mlsNumber = EXCLUDED.mlsNumber,
-    Email = EXCLUDED.Email,
-    statusId = EXCLUDED.statusId,
-    status = EXCLUDED.status,
-    officeGuid = EXCLUDED.officeGuid,
-    checklistTypeId = EXCLUDED.checklistTypeId,
-    escrowNumber = EXCLUDED.escrowNumber,
-    escrowClosingDate = EXCLUDED.escrowClosingDate,
-    actualClosingDate = EXCLUDED.actualClosingDate,
-    contractAcceptanceDate = EXCLUDED.contractAcceptanceDate,
-    createdOn = EXCLUDED.createdOn,
-    checklistModifiedOn = EXCLUDED.checklistModifiedOn,
-    deadDate = EXCLUDED.deadDate,
-    reviewerGuid = EXCLUDED.reviewerGuid,
-    sourceId = EXCLUDED.sourceId,
-    source = EXCLUDED.source,
-    otherSource = EXCLUDED.otherSource,
-    dealType = EXCLUDED.dealType,
-    saleTypeId = EXCLUDED.saleTypeId,
-    listingPrice = EXCLUDED.listingPrice,
-    salePrice = EXCLUDED.salePrice,
-    isOfficeLead = EXCLUDED.isOfficeLead,
-    coBrokerCompany = EXCLUDED.coBrokerCompany,
-    realPropertyType = EXCLUDED.realPropertyType,
-    realPropertySubtype = EXCLUDED.realPropertySubtype,
-    commercialLease = EXCLUDED.commercialLease,
-    stageId = EXCLUDED.stageId,
-    customFields = EXCLUDED.customFields,
-    fileid = EXCLUDED.fileid,
-    url = EXCLUDED.url
-"""
-
-FILE_CREATOR_UPSERT_SQL = """
-INSERT INTO sale_file_creator (
-    saleguid, guid, firstname, lastname, email, alternateemail
-) VALUES %s
-ON CONFLICT (saleguid, guid) DO UPDATE SET
-    firstname = EXCLUDED.firstname,
-    lastname = EXCLUDED.lastname,
-    email = EXCLUDED.email,
-    alternateemail = EXCLUDED.alternateemail
-"""
-
-PROPERTY_UPSERT_SQL = """
-INSERT INTO sale_property (
-    saleGuid, streetNumber, streetAddress, unit, direction,
-    city, county, state, zip, yearBuilt,
-    realPropertyTypeId, realPropertySubtypeId
-) VALUES %s
-ON CONFLICT (saleGuid) DO UPDATE SET
-    streetNumber = EXCLUDED.streetNumber,
-    streetAddress = EXCLUDED.streetAddress,
-    unit = EXCLUDED.unit,
-    direction = EXCLUDED.direction,
-    city = EXCLUDED.city,
-    county = EXCLUDED.county,
-    state = EXCLUDED.state,
-    zip = EXCLUDED.zip,
-    yearBuilt = EXCLUDED.yearBuilt,
-    realPropertyTypeId = EXCLUDED.realPropertyTypeId,
-    realPropertySubtypeId = EXCLUDED.realPropertySubtypeId
-"""
-
-COMMISSION_UPSERT_SQL = """
-INSERT INTO sale_commission (
-    saleGuid, transactionCoordinatorName, transactionCoordinatorFee,
-    adminBrokerageComp, dateOfCheck, datePostedToLogBook,
-    listingCommissionPercent, listingCommissionAmount,
-    saleCommissionPercent, saleCommissionAmount,
-    otherDeductions, personalDeal, commissionBreakdownDetails,
-    officeGrossCommissionOnSale
-) VALUES %s
-ON CONFLICT (saleGuid) DO UPDATE SET
-    transactionCoordinatorName = EXCLUDED.transactionCoordinatorName,
-    transactionCoordinatorFee = EXCLUDED.transactionCoordinatorFee,
-    adminBrokerageComp = EXCLUDED.adminBrokerageComp,
-    dateOfCheck = EXCLUDED.dateOfCheck,
-    datePostedToLogBook = EXCLUDED.datePostedToLogBook,
-    listingCommissionPercent = EXCLUDED.listingCommissionPercent,
-    listingCommissionAmount = EXCLUDED.listingCommissionAmount,
-    saleCommissionPercent = EXCLUDED.saleCommissionPercent,
-    saleCommissionAmount = EXCLUDED.saleCommissionAmount,
-    otherDeductions = EXCLUDED.otherDeductions,
-    personalDeal = EXCLUDED.personalDeal,
-    commissionBreakdownDetails = EXCLUDED.commissionBreakdownDetails,
-    officeGrossCommissionOnSale = EXCLUDED.officeGrossCommissionOnSale
-"""
-
-CONTACT_UPSERT_SQL = """
-INSERT INTO sale_contact (
-    saleGuid, contactGuid, role, firstName, lastName,
-    phoneNumber, email, company, alternatePhone,
-    streetNumber, streetName, zip, city, state,
-    fax, notes, isTrustCompanyOrOtherEntity, isCashDeal,
-    loanTypeId, loanType, loanAmount, brokerTaxId, miscContactType
-) VALUES %s
-ON CONFLICT (saleGuid, contactGuid, role) DO UPDATE SET
-    firstName = EXCLUDED.firstName,
-    lastName = EXCLUDED.lastName,
-    phoneNumber = EXCLUDED.phoneNumber,
-    email = EXCLUDED.email,
-    company = EXCLUDED.company,
-    alternatePhone = EXCLUDED.alternatePhone,
-    streetNumber = EXCLUDED.streetNumber,
-    streetName = EXCLUDED.streetName,
-    zip = EXCLUDED.zip,
-    city = EXCLUDED.city,
-    state = EXCLUDED.state,
-    fax = EXCLUDED.fax,
-    notes = EXCLUDED.notes,
-    isTrustCompanyOrOtherEntity = EXCLUDED.isTrustCompanyOrOtherEntity,
-    isCashDeal = EXCLUDED.isCashDeal,
-    loanTypeId = EXCLUDED.loanTypeId,
-    loanType = EXCLUDED.loanType,
-    loanAmount = EXCLUDED.loanAmount,
-    brokerTaxId = EXCLUDED.brokerTaxId,
-    miscContactType = EXCLUDED.miscContactType
-"""
-
-CO_AGENT_UPSERT_SQL = """
-INSERT INTO sale_co_agent (saleGuid, coAgentGuid) VALUES %s
-ON CONFLICT (saleGuid, coAgentGuid) DO NOTHING
-"""
-
-COORDINATOR_UPSERT_SQL = """
-INSERT INTO sale_transaction_coordinator (
-    saleGuid, contactGuid, firstName, lastName, fullName,
-    email, phoneNumber, notes, fee, hasAccess
-) VALUES %s
-ON CONFLICT (saleGuid, contactGuid) DO UPDATE SET
-    firstName = EXCLUDED.firstName,
-    lastName = EXCLUDED.lastName,
-    fullName = EXCLUDED.fullName,
-    email = EXCLUDED.email,
-    phoneNumber = EXCLUDED.phoneNumber,
-    notes = EXCLUDED.notes,
-    fee = EXCLUDED.fee,
-    hasAccess = EXCLUDED.hasAccess
-"""
-
-SPLIT_UPSERT_SQL = """
-INSERT INTO sale_commission_split (saleGuid, agentGuid, amount, percentage)
-VALUES %s
-ON CONFLICT (saleGuid, agentGuid) DO UPDATE SET
-    amount = EXCLUDED.amount,
-    percentage = EXCLUDED.percentage
-"""
-
-REFERRAL_UPSERT_SQL = """
-INSERT INTO sale_commission_referral (
-    saleGuid, typeId, typeName, contactGuid,
-    contactFirstName, contactLastName, contactEmail, contactPhoneNumber,
-    brokerageName, amount
-) VALUES %s
-ON CONFLICT (saleGuid) DO UPDATE SET
-    typeId = EXCLUDED.typeId,
-    typeName = EXCLUDED.typeName,
-    contactGuid = EXCLUDED.contactGuid,
-    contactFirstName = EXCLUDED.contactFirstName,
-    contactLastName = EXCLUDED.contactLastName,
-    contactEmail = EXCLUDED.contactEmail,
-    contactPhoneNumber = EXCLUDED.contactPhoneNumber,
-    brokerageName = EXCLUDED.brokerageName,
-    amount = EXCLUDED.amount
-"""
-
-EMD_UPSERT_SQL = """
-INSERT INTO sale_earnest_money_deposit (
-    saleGuid, isEarnestMoneyHeld, depositAmount, depositDueDate,
-    datePostedToLogBook, dateOfCheck, additionalDepositAmount, additionalDepositDueDate
-) VALUES %s
-ON CONFLICT (saleGuid) DO UPDATE SET
-    isEarnestMoneyHeld = EXCLUDED.isEarnestMoneyHeld,
-    depositAmount = EXCLUDED.depositAmount,
-    depositDueDate = EXCLUDED.depositDueDate,
-    datePostedToLogBook = EXCLUDED.datePostedToLogBook,
-    dateOfCheck = EXCLUDED.dateOfCheck,
-    additionalDepositAmount = EXCLUDED.additionalDepositAmount,
-    additionalDepositDueDate = EXCLUDED.additionalDepositDueDate
-"""
-
-ACTIVITY_UPSERT_SQL = """
-INSERT INTO sale_checklist_activity (
-    saleGuid, activityId, "order", activityName, dateAssigned,
-    typeId, typeName, status, help, modifiedOn
-) VALUES %s
-ON CONFLICT (saleGuid, activityId) DO UPDATE SET
-    "order" = EXCLUDED."order",
-    activityName = EXCLUDED.activityName,
-    dateAssigned = EXCLUDED.dateAssigned,
-    typeId = EXCLUDED.typeId,
-    typeName = EXCLUDED.typeName,
-    status = EXCLUDED.status,
-    help = EXCLUDED.help,
-    modifiedOn = EXCLUDED.modifiedOn
-"""
-
-DOC_UPSERT_SQL = """
-INSERT INTO sale_checklist_doc (
-    saleGuid, activityId, docId, name, url,
-    documentServiceKey, modifiedDate, uploadDate, fileName,
-    extension, fileSize, pages
-) VALUES %s
-ON CONFLICT (docId, saleGuid) DO UPDATE SET
-    activityId = EXCLUDED.activityId,
-    name = EXCLUDED.name,
-    url = EXCLUDED.url,
-    documentServiceKey = EXCLUDED.documentServiceKey,
-    modifiedDate = EXCLUDED.modifiedDate,
-    uploadDate = EXCLUDED.uploadDate,
-    fileName = EXCLUDED.fileName,
-    extension = EXCLUDED.extension,
-    fileSize = EXCLUDED.fileSize,
-    pages = EXCLUDED.pages
-"""
-
-ACTIVITY_DOC_UPSERT_SQL = """
-INSERT INTO sale_checklist_activity_docs (saleGuid, activityId, fileName)
-VALUES %s
-ON CONFLICT (saleGuid, activityId, fileName) DO NOTHING
-"""
-
-BREAKDOWN_INSERT_SQL = """
-INSERT INTO sale_commission_breakdown (saleGuid, name, details, amount)
-VALUES %s
-"""
-
-COMMENT_INSERT_SQL = """
-INSERT INTO sale_checklist_comment (activityId, saleGuid, comment, createdOn, createdBy)
-VALUES %s
-"""
-
-
 def register_failed_saleguid(sale_guid: str) -> None:
     if not sale_guid:
         return
@@ -1038,7 +541,6 @@ def process_sale_batch(sales_batch: List[Dict[str, Any]], worker_id: int, retry_
 
     try:
         with get_conn() as conn:
-            log_connection_identity(conn, f"WORKER_{worker_id}_CONNECTION")
             cur = conn.cursor()
 
             users_to_ensure = set()
@@ -1180,12 +682,12 @@ def process_sale_batch(sales_batch: List[Dict[str, Any]], worker_id: int, retry_
                     ))
 
                 for contact in data.get("contacts", []):
-                    c_guid = clean_text(contact.get("contactGuid"))
+                    cguid = clean_text(contact.get("contactGuid"))
                     role = clean_text(contact.get("role"))
-                    if c_guid and role:
+                    if cguid and role:
                         contact_rows.append((
                             sale_guid,
-                            c_guid,
+                            cguid,
                             role,
                             clean_text(contact.get("firstName")),
                             clean_text(contact.get("lastName")),
@@ -1252,12 +754,12 @@ def process_sale_batch(sales_batch: List[Dict[str, Any]], worker_id: int, retry_
 
                 rd = data.get("referral", {}) or {}
                 if rd:
-                    t_obj = rd.get("type", {}) or {}
+                    type_obj = rd.get("type", {}) or {}
                     referral_rows.append((
                         sale_guid,
-                        clean_int(t_obj.get("id")) or clean_int(rd.get("typeId")),
-                        clean_text(t_obj.get("name")) or clean_text(rd.get("typeName")),
-                        clean_text(rd.get("contactGuid")) or clean_text(rd.get("agentGuid")),
+                        clean_int(type_obj.get("id") or rd.get("typeId")),
+                        clean_text(type_obj.get("name") or rd.get("typeName")),
+                        clean_text(rd.get("contactGuid") or rd.get("agentGuid")),
                         clean_text(rd.get("contactFirstName")),
                         clean_text(rd.get("contactLastName")),
                         clean_text(rd.get("contactEmail")),
@@ -1334,17 +836,14 @@ def process_sale_batch(sales_batch: List[Dict[str, Any]], worker_id: int, retry_
 
             if sample_no_guid:
                 logger.info("[WORKER-%s][RETRY-%s] sample skipped_no_guid: %s", worker_id, retry_round, sample_no_guid)
-
             if sample_detail_missing:
                 logger.info("[WORKER-%s][RETRY-%s] sample skipped_detail_missing: %s", worker_id, retry_round, sample_detail_missing)
-
             if sample_process_sale_none:
                 logger.info("[WORKER-%s][RETRY-%s] sample skipped_process_sale: %s", worker_id, retry_round, sample_process_sale_none)
 
             if not sales_rows:
                 logger.warning(
-                    "[WORKER-%s][RETRY-%s] No sales_rows built. batch_size=%s, skipped_no_guid=%s, "
-                    "skipped_detail_missing=%s, skipped_process_sale=%s",
+                    "[WORKER-%s][RETRY-%s] No sales_rows built. batch_size=%s, skipped_no_guid=%s, skipped_detail_missing=%s, skipped_process_sale=%s",
                     worker_id, retry_round, len(sales_batch), skipped_no_guid, skipped_detail_missing, skipped_process_sale
                 )
                 return
@@ -1406,19 +905,10 @@ def process_sale_batch(sales_batch: List[Dict[str, Any]], worker_id: int, retry_
             bulk_execute_values(cur, COMMENT_INSERT_SQL, comment_rows, "sale_checklist_comment")
 
             conn.commit()
-
             logger.info(
-                "[WORKER-%s][RETRY-%s] batch committed successfully: input=%s, valid_sales=%s, skipped_no_guid=%s, "
-                "skipped_detail_missing=%s, skipped_process_sale=%s, sale_rows=%s, sale_rows_after_dedup=%s",
-                worker_id,
-                retry_round,
-                len(sales_batch),
-                batch_saved,
-                skipped_no_guid,
-                skipped_detail_missing,
-                skipped_process_sale,
-                len(sales_rows),
-                len(sales_rows_dedup),
+                "[WORKER-%s][RETRY-%s] batch committed successfully. input=%s, valid_sales=%s, skipped_no_guid=%s, skipped_detail_missing=%s, skipped_process_sale=%s, sale_rows=%s, sale_rows_after_dedup=%s",
+                worker_id, retry_round, len(sales_batch), batch_saved, skipped_no_guid, skipped_detail_missing,
+                skipped_process_sale, len(sales_rows), len(sales_rows_dedup)
             )
 
             with progress_lock:
@@ -1431,7 +921,7 @@ def process_sale_batch(sales_batch: List[Dict[str, Any]], worker_id: int, retry_
         try:
             if 'conn' in locals() and conn:
                 conn.rollback()
-                logger.error("[WORKER-%s][RETRY-%s] batch rolled back", worker_id, retry_round)
+            logger.error("[WORKER-%s][RETRY-%s] batch rolled back", worker_id, retry_round)
         except Exception:
             logger.exception("[WORKER-%s][RETRY-%s] rollback itself failed", worker_id, retry_round)
 
@@ -1443,7 +933,7 @@ def process_sale_batch(sales_batch: List[Dict[str, Any]], worker_id: int, retry_
         with progress_lock:
             error_count_global += len(sales_batch)
 
-        logger.error("[WORKER-%s][RETRY-%s BATCH ERROR] %s", worker_id, retry_round, e, exc_info=True)
+        logger.error("[WORKER-%s][RETRY-%s] BATCH ERROR: %s", worker_id, retry_round, e, exc_info=True)
 
     finally:
         if cur:
@@ -1466,7 +956,7 @@ def run_batches(sales: List[Dict[str, Any]], retry_round: int = 0) -> None:
             try:
                 future.result()
             except Exception as e:
-                logger.error("[RETRY-%s] Batch processing error: %s", retry_round, e, exc_info=True)
+                logger.error("RETRY-%s Batch processing error: %s", retry_round, e, exc_info=True)
 
 
 def retry_failed_saleguids() -> int:
@@ -1481,11 +971,7 @@ def retry_failed_saleguids() -> int:
             logger.info("No failed saleGuids to retry on round %s.", retry_round)
             return 0
 
-        logger.info(
-            "Retry round %s started for %s failed saleGuids.",
-            retry_round, len(current_failed)
-        )
-
+        logger.info("Retry round %s started for %s failed saleGuids.", retry_round, len(current_failed))
         retry_sales = build_retry_sales_from_failed_guids(current_failed)
         run_batches(retry_sales, retry_round=retry_round)
 
@@ -1503,7 +989,7 @@ def retry_failed_saleguids() -> int:
     return unresolved_failed_count
 
 
-@router.post("/sync/skyslope-sales")
+@router.post("/sync-skyslope-sales")
 def trigger_sales_sync(db=Depends(get_db)):
     global processed_count, saved_count_global, error_count_global, failed_saleguids_global, detail_cache, last_request_ts
 
@@ -1518,14 +1004,11 @@ def trigger_sales_sync(db=Depends(get_db)):
     with detail_cache_lock:
         detail_cache = {}
 
-    logger.info("Starting sync job with DB config host=%s db=%s", DB_CONFIG.get("host"), DB_CONFIG.get("dbname"))
-    log_connection_identity(db, "FASTAPI_DEPENDENCY_CONNECTION")
 
     last_sync_date = get_last_sync_date(db)
     logger.info("Using last_sync_date=%s for this sync run", last_sync_date)
 
     sales = fetch_sales_bulk(last_sync_date)
-
     if not sales:
         logger.info("No sales found to sync.")
         return {
@@ -1538,6 +1021,7 @@ def trigger_sales_sync(db=Depends(get_db)):
 
     sales = deduplicate_sales_by_guid(sales)
     total_sales = len(sales)
+
     logger.info("Found %s unique bulk sales to process.", total_sales)
 
     run_batches(sales, retry_round=0)
