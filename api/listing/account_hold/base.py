@@ -36,7 +36,7 @@ class TransactionItem(BaseModel):
     property_address: str | None = None
     source_table: str | None = None
     status: str | None = None
-    saleguid: str | int | None = None
+    skyslope_url: str = None
     be_transaction_specialist: str | None = None
     skyslope_reviewer: str | None = None
     transaction_flags: list[str] = Field(default_factory=list)
