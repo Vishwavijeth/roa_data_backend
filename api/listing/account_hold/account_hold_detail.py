@@ -120,6 +120,7 @@ def fetch_agent_detail_transactions(db, email: str):
             mt.source_status,
             lrd.be_source_table,
             lrd.saleguid,
+            s.url AS skyslope_url,
             lrd.be_transaction_specialist,
             lrd.skyslope_reviewer,
             lrd.be_gross_commission,
@@ -137,6 +138,8 @@ def fetch_agent_detail_transactions(db, email: str):
         FROM matched_transactions mt
         LEFT JOIN latest_reconciliation_data lrd
           ON lrd.transactionid = mt.transaction_id
+        LEFT JOIN sale s
+          ON s.saleguid = lrd.saleguid
         ORDER BY mt.property_address, mt.transaction_id
     """
 
@@ -146,7 +149,6 @@ def fetch_agent_detail_transactions(db, email: str):
             return cur.fetchall()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Detail transaction query failed: {str(e)}")
-
 
 def build_transaction_flags(row):
     if row.get("saleguid") is None:
@@ -303,7 +305,7 @@ async def get_account_hold_detail(customer_id: int, db=Depends(get_db)):
                 property_address=row["property_address"],
                 source_table=row["be_source_table"] or row["source_name"],
                 status=row["source_status"],
-                saleguid=row["saleguid"],
+                skyslope_url=row["skyslope_url"],
                 be_transaction_specialist=row["be_transaction_specialist"],
                 skyslope_reviewer=row["skyslope_reviewer"],
                 transaction_flags=per_transaction_flags,
