@@ -23,6 +23,8 @@ def apply_skyslope_filters(
     params: list,
     from_close_date: Optional[str] = None,
     to_close_date: Optional[str] = None,
+    year_built_from: Optional[int] = None,
+    year_built_to: Optional[int] = None,
     status: Optional[List[str]] = None,
     stage: Optional[List[str]] = None,
     search: Optional[str] = None,
@@ -50,6 +52,14 @@ def apply_skyslope_filters(
         base_filter += " AND s.escrowclosingdate <= %s"
         params.append(to_close_date)
 
+    if year_built_from is not None:
+        base_filter += " AND sp.yearbuilt IS NOT NULL AND sp.yearbuilt >= %s"
+        params.append(year_built_from)
+
+    if year_built_to is not None:
+        base_filter += " AND sp.yearbuilt IS NOT NULL AND sp.yearbuilt <= %s"
+        params.append(year_built_to)
+
     if search:
         search_value = f"%{search.lower().strip()}%"
         base_filter += """
@@ -59,6 +69,12 @@ def apply_skyslope_filters(
                     FROM brokerage_engine be_search
                     WHERE be_search.skyslopefileid = s.saleguid
                       AND LOWER(be_search.transaction_identifier_transactionid::text) LIKE %s
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM otherincome_transactions oit_search
+                    WHERE oit_search.skyslopefileid = s.saleguid
+                      AND LOWER(COALESCE(oit_search.transaction_identifier_transactionid::text, '')) LIKE %s
                 )
                 OR EXISTS (
                     SELECT 1
@@ -74,9 +90,10 @@ def apply_skyslope_filters(
                       ) LIKE %s
                 )
                 OR LOWER(s.saleguid::text) LIKE %s
+                OR CAST(COALESCE(sp.yearbuilt, 0) AS text) LIKE %s
             )
         """
-        params.extend([search_value, search_value, search_value])
+        params.extend([search_value, search_value, search_value, search_value, search_value])
 
     if not_in_be:
         base_filter += """
@@ -127,11 +144,25 @@ def skyslope_listing_filters(conn=Depends(get_db)):
     cursor.execute(stage_query)
     stage_list = [row[0] for row in cursor.fetchall()]
 
+    year_query = """
+        SELECT
+            MIN(sp.yearbuilt) AS min_yearbuilt,
+            MAX(sp.yearbuilt) AS max_yearbuilt
+        FROM sale_property sp
+        WHERE sp.yearbuilt IS NOT NULL
+    """
+    cursor.execute(year_query)
+    year_row = cursor.fetchone()
+    min_yearbuilt = year_row[0] if year_row else None
+    max_yearbuilt = year_row[1] if year_row else None
+
     return FilterResponse(
         filters={
             "status_list": status_list,
             "stage_list": stage_list,
             "not_in_be": False,
+            "year_built_from": min_yearbuilt,
+            "year_built_to": max_yearbuilt,
         }
     )
 
@@ -141,6 +172,8 @@ def skyslope_api(
     page: int = Query(default=1, ge=1),
     from_close_date: Optional[str] = Query(default=None),
     to_close_date: Optional[str] = Query(default=None),
+    year_built_from: Optional[int] = Query(default=None, ge=0),
+    year_built_to: Optional[int] = Query(default=None, ge=0),
     status: Optional[List[str]] = Query(default=None),
     stage: Optional[List[str]] = Query(default=None),
     search: Optional[str] = Query(default=None),
@@ -166,6 +199,8 @@ def skyslope_api(
         params=count_params,
         from_close_date=from_close_date,
         to_close_date=to_close_date,
+        year_built_from=year_built_from,
+        year_built_to=year_built_to,
         status=status,
         stage=stage,
         search=search,
@@ -185,6 +220,7 @@ def skyslope_api(
                 sp.state,
                 sp.zip
             ) AS propertyaddress,
+            sp.yearbuilt AS yearbuilt,
             s.escrowclosingdate AS close_date,
             TRIM(s.status) AS status,
             TRIM(st.name) AS stage_name,
@@ -245,6 +281,8 @@ def skyslope_api(
         params=data_params,
         from_close_date=from_close_date,
         to_close_date=to_close_date,
+        year_built_from=year_built_from,
+        year_built_to=year_built_to,
         status=status,
         stage=stage,
         search=search,
@@ -291,6 +329,7 @@ def skyslope_detail(saleguid: str, conn=Depends(get_db)):
                 sp.state,
                 sp.zip
             ) AS propertyaddress,
+            sp.yearbuilt AS yearbuilt,
             s.listingprice,
             s.saleprice,
             s.mlsnumber,
@@ -422,6 +461,7 @@ def skyslope_detail(saleguid: str, conn=Depends(get_db)):
         "skyslope": {
             "saleguid": skyslope_data["skyslope_saleguid"],
             "propertyaddress": skyslope_data["propertyaddress"],
+            "yearbuilt": skyslope_data["yearbuilt"],
             "listingprice": skyslope_data["listingprice"],
             "saleprice": skyslope_data["saleprice"],
             "mlsnumber": skyslope_data["mlsnumber"],
@@ -444,6 +484,8 @@ def skyslope_detail(saleguid: str, conn=Depends(get_db)):
 def skyslope_download(
     from_close_date: Optional[str] = Query(default=None),
     to_close_date: Optional[str] = Query(default=None),
+    year_built_from: Optional[int] = Query(default=None, ge=0),
+    year_built_to: Optional[int] = Query(default=None, ge=0),
     status: Optional[List[str]] = Query(default=None),
     stage: Optional[List[str]] = Query(default=None),
     search: Optional[str] = Query(default=None),
@@ -467,6 +509,8 @@ def skyslope_download(
         params=sale_params,
         from_close_date=from_close_date,
         to_close_date=to_close_date,
+        year_built_from=year_built_from,
+        year_built_to=year_built_to,
         status=status,
         stage=stage,
         search=search,
@@ -477,13 +521,32 @@ def skyslope_download(
         SELECT
             'sale' AS record_source,
             s.saleguid AS saleguid,
-            NULL::text AS transactionid,
+            COALESCE(
+                (
+                    SELECT be.transaction_identifier_transactionid::text
+                    FROM brokerage_engine be
+                    WHERE be.skyslopefileid = s.saleguid
+                      AND be.transaction_identifier_transactionid IS NOT NULL
+                    ORDER BY be.closed_date DESC NULLS LAST
+                    LIMIT 1
+                ),
+                (
+                    SELECT oit.transaction_identifier_transactionid::text
+                    FROM otherincome_transactions oit
+                    WHERE oit.skyslopefileid = s.saleguid
+                      AND oit.transaction_identifier_transactionid IS NOT NULL
+                    ORDER BY oit.finalized_date DESC NULLS LAST,
+                             oit.income_received_date DESC NULLS LAST
+                    LIMIT 1
+                )
+            ) AS transactionid,
             CONCAT_WS(', ',
                 CONCAT_WS(' ', sp.streetnumber, sp.streetaddress),
                 sp.city,
                 sp.state,
                 sp.zip
             ) AS property_address,
+            sp.yearbuilt AS yearbuilt,
             NULLIF(
                 (
                     SELECT STRING_AGG(
@@ -539,6 +602,7 @@ def skyslope_download(
             oit.skyslopefileid AS saleguid,
             oit.transaction_identifier_transactionid::text AS transactionid,
             oit.property_address,
+            NULL::integer AS yearbuilt,
             NULL::text AS buyer_name,
             oit.client_name AS seller_name,
             NULL::numeric AS sale_price,
@@ -606,6 +670,7 @@ def skyslope_download(
         "saleguid": "Sale GUID",
         "transactionid": "Transaction ID",
         "property_address": "Property Address",
+        "yearbuilt": "Year Built",
         "buyer_name": "Buyer Name",
         "seller_name": "Seller Name",
         "sale_price": "Sale Price",
@@ -687,6 +752,7 @@ def skyslope_download(
             "record source",
             "sale guid",
             "transaction id",
+            "year built",
             "status",
             "stage",
             "deal type",
