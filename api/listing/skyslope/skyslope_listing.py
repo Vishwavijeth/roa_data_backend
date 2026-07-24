@@ -435,12 +435,11 @@ def skyslope_detail(saleguid: str, conn=Depends(get_db)):
 
 @router.get("/skyslope/download")
 def skyslope_download(
-    from_close_date: str = Query(default=None),
-    to_close_date: str = Query(default=None),
-    from_contract_date: str = Query(default=None),
-    to_contract_date: str = Query(default=None),
-    status: str = Query(default=None),
-    search: str = Query(default=None),
+    from_close_date: Optional[str] = Query(default=None),
+    to_close_date: Optional[str] = Query(default=None),
+    status: Optional[List[str]] = Query(default=None),
+    stage: Optional[List[str]] = Query(default=None),
+    search: Optional[str] = Query(default=None),
     not_in_be: bool = Query(default=False),
     conn=Depends(get_db)
 ):
@@ -448,6 +447,9 @@ def skyslope_download(
 
     base_filter = """
         FROM sale s
+        LEFT JOIN sale_property sp ON s.saleguid = sp.saleguid
+        LEFT JOIN stage st ON s.stageid = st.stageid
+        LEFT JOIN sale_commission sc2 ON sc2.saleguid = s.saleguid
         WHERE 1=1
     """
 
@@ -458,14 +460,13 @@ def skyslope_download(
         params=params,
         from_close_date=from_close_date,
         to_close_date=to_close_date,
-        from_contract_date=from_contract_date,
-        to_contract_date=to_contract_date,
         status=status,
+        stage=stage,
         search=search,
         not_in_be=not_in_be,
     )
 
-    data_query = """
+    data_query = f"""
         SELECT
             s.saleguid AS saleguid,
             CONCAT_WS(', ',
@@ -506,23 +507,13 @@ def skyslope_download(
             s.saleprice AS sale_price,
             s.listingprice AS listing_price,
             s.escrowclosingdate AS escrow_close_date,
-            s.contractacceptancedate AS contract_date,
-            s.status AS status,
-            st.name AS stage,
+            TRIM(s.status) AS status,
+            TRIM(st.name) AS stage,
             s.dealtype AS dealtype,
-
             sc2."officegrosscommissiononsale" AS office_gross_commission_on_sale,
             sc2."salecommissionamount" AS sale_commission_amount,
             sc2."listingcommissionamount" AS listing_commission_amount
-        FROM sale s
-        LEFT JOIN sale_property sp ON s.saleguid = sp.saleguid
-        LEFT JOIN stage st ON s.stageid = st.stageid
-        LEFT JOIN sale_commission sc2 ON sc2.saleguid = s.saleguid
-    """
-
-    data_query += base_filter.replace("FROM sale s", "")
-
-    data_query += """
+        {base_filter}
         ORDER BY s.escrowclosingdate DESC NULLS LAST, s.saleguid
     """
 
@@ -539,7 +530,6 @@ def skyslope_download(
         "sale_price": "Sale Price",
         "listing_price": "Listing Price",
         "escrow_close_date": "Escrow Close Date",
-        "contract_date": "Contract Date",
         "status": "Status",
         "stage": "Stage",
         "dealtype": "Deal Type",
