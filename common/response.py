@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Any, Generic, TypeVar
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi.responses import JSONResponse
 
 T = TypeVar("T")
@@ -8,6 +8,11 @@ T = TypeVar("T")
 class Response(BaseModel, Generic[T]):
     success: bool = True
     data: T
+    message: str = "Request successful"
+
+class FilterResponse(BaseModel):
+    success: bool = True
+    filters: dict[str, Any] = Field(default_factory=dict)
     message: str = "Request successful"
 
 

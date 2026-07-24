@@ -5,8 +5,11 @@ import io
 import datetime
 from decimal import Decimal
 import pandas as pd
+from typing import List, Optional
 from openpyxl.styles import Font, Alignment
 from openpyxl.utils import get_column_letter
+from common.pagination import PaginationResponseWithCount, PaginationData
+from common.response import FilterResponse
 
 
 router = APIRouter()
@@ -19,17 +22,26 @@ def norm(x):
 def apply_skyslope_filters(
     base_filter: str,
     params: list,
-    from_close_date=None,
-    to_close_date=None,
-    from_contract_date=None,
-    to_contract_date=None,
-    status=None,
-    search=None,
+    from_close_date: Optional[str] = None,
+    to_close_date: Optional[str] = None,
+    status: Optional[List[str]] = None,
+    stage: Optional[List[str]] = None,
+    search: Optional[str] = None,
     not_in_be: bool = False,
 ):
     if status:
-        base_filter += " AND LOWER(s.status) = %s"
-        params.append(status.lower())
+        cleaned_status = [s.strip().lower() for s in status if s and s.strip()]
+        if cleaned_status:
+            placeholders = ", ".join(["%s"] * len(cleaned_status))
+            base_filter += f" AND LOWER(TRIM(s.status)) IN ({placeholders})"
+            params.extend(cleaned_status)
+
+    if stage:
+        cleaned_stage = [s.strip().lower() for s in stage if s and s.strip()]
+        if cleaned_stage:
+            placeholders = ", ".join(["%s"] * len(cleaned_stage))
+            base_filter += f" AND LOWER(TRIM(st.name)) IN ({placeholders})"
+            params.extend(cleaned_stage)
 
     if from_close_date:
         base_filter += " AND s.escrowclosingdate >= %s"
@@ -39,34 +51,26 @@ def apply_skyslope_filters(
         base_filter += " AND s.escrowclosingdate <= %s"
         params.append(to_close_date)
 
-    if from_contract_date:
-        base_filter += " AND s.contractacceptancedate >= %s"
-        params.append(from_contract_date)
-
-    if to_contract_date:
-        base_filter += " AND s.contractacceptancedate <= %s"
-        params.append(to_contract_date)
-
     if search:
-        search_value = f"%{search.lower()}%"
+        search_value = f"%{search.lower().strip()}%"
         base_filter += """
             AND (
                 EXISTS (
                     SELECT 1
-                    FROM brokerage_engine be
-                    WHERE be.skyslopefileid = s.saleguid
-                      AND LOWER(be.transaction_identifier_transactionid::text) LIKE %s
+                    FROM brokerage_engine be_search
+                    WHERE be_search.skyslopefileid = s.saleguid
+                      AND LOWER(be_search.transaction_identifier_transactionid::text) LIKE %s
                 )
                 OR EXISTS (
                     SELECT 1
-                    FROM sale_property sp
-                    WHERE sp.saleguid = s.saleguid
+                    FROM sale_property sp_search
+                    WHERE sp_search.saleguid = s.saleguid
                       AND LOWER(
                         CONCAT_WS(', ',
-                            CONCAT_WS(' ', sp.streetnumber, sp.streetaddress),
-                            sp.city,
-                            sp.state,
-                            sp.zip
+                            CONCAT_WS(' ', sp_search.streetnumber, sp_search.streetaddress),
+                            sp_search.city,
+                            sp_search.state,
+                            sp_search.zip
                         )
                       ) LIKE %s
                 )
@@ -100,16 +104,47 @@ def skyslope_sync_info(conn=Depends(get_db)):
         "sync_info": sync_info,
     }
 
+@router.get("/skyslope-listing-filters", response_model=FilterResponse)
+def skyslope_listing_filters(conn=Depends(get_db)):
+    cursor = conn.cursor()
 
-@router.get("/skyslope-listing")
+    status_query = """
+        SELECT DISTINCT TRIM(status) AS status
+        FROM sale
+        WHERE status IS NOT NULL
+          AND TRIM(status) <> ''
+        ORDER BY TRIM(status)
+    """
+    cursor.execute(status_query)
+    status_list = [row[0] for row in cursor.fetchall()]
+
+    stage_query = """
+        SELECT DISTINCT TRIM(name) AS name
+        FROM stage
+        WHERE name IS NOT NULL
+          AND TRIM(name) <> ''
+        ORDER BY TRIM(name)
+    """
+    cursor.execute(stage_query)
+    stage_list = [row[0] for row in cursor.fetchall()]
+
+    return FilterResponse(
+        filters={
+            "status_list": status_list,
+            "stage_list": stage_list,
+            "not_in_be": False,
+        }
+    )
+
+
+@router.get("/skyslope-listing", response_model=PaginationResponseWithCount[dict])
 def skyslope_api(
     page: int = Query(default=1, ge=1),
-    from_close_date: str = Query(default=None),
-    to_close_date: str = Query(default=None),
-    from_contract_date: str = Query(default=None),
-    to_contract_date: str = Query(default=None),
-    status: str = Query(default=None),
-    search: str = Query(default=None),
+    from_close_date: Optional[str] = Query(default=None),
+    to_close_date: Optional[str] = Query(default=None),
+    status: Optional[List[str]] = Query(default=None),
+    stage: Optional[List[str]] = Query(default=None),
+    search: Optional[str] = Query(default=None),
     not_in_be: bool = Query(default=False),
     conn=Depends(get_db)
 ):
@@ -118,27 +153,28 @@ def skyslope_api(
     limit = 50
     offset = (page - 1) * limit
 
-    base_filter = """
+    count_base_filter = """
         FROM sale s
+        LEFT JOIN sale_property sp ON s.saleguid = sp.saleguid
+        LEFT JOIN brokerage_engine be ON be.skyslopefileid = s.saleguid
+        LEFT JOIN stage st ON s.stageid = st.stageid
         WHERE 1=1
     """
+    count_params = []
 
-    params = []
-
-    base_filter, params = apply_skyslope_filters(
-        base_filter=base_filter,
-        params=params,
+    count_base_filter, count_params = apply_skyslope_filters(
+        base_filter=count_base_filter,
+        params=count_params,
         from_close_date=from_close_date,
         to_close_date=to_close_date,
-        from_contract_date=from_contract_date,
-        to_contract_date=to_contract_date,
         status=status,
+        stage=stage,
         search=search,
         not_in_be=not_in_be,
     )
 
-    count_query = "SELECT COUNT(*) " + base_filter
-    cursor.execute(count_query, params)
+    count_query = "SELECT COUNT(DISTINCT s.saleguid) " + count_base_filter
+    cursor.execute(count_query, count_params)
     total_count = cursor.fetchone()[0]
 
     data_query = """
@@ -152,6 +188,7 @@ def skyslope_api(
             ) AS propertyaddress,
             s.escrowclosingdate AS close_date,
             s.status,
+            st.name AS stage_name,
             CASE
                 WHEN be.transaction_identifier_transactionid IS NULL
                 THEN 'No related BE data'
@@ -183,48 +220,54 @@ def skyslope_api(
                 ),
                 ''
             ) AS buyer_agent_name,
-            s.contractacceptancedate AS contract_date,
             NULLIF(
                 TRIM(COALESCE(r.firstname, '') || ' ' || COALESCE(r.lastname, '')),
                 ''
             ) AS reviewer
         FROM sale s
-        LEFT JOIN users u ON s.agentguid = u.userguid
         LEFT JOIN users r ON s.reviewerguid = r.userguid
         LEFT JOIN sale_property sp ON s.saleguid = sp.saleguid
         LEFT JOIN brokerage_engine be ON be.skyslopefileid = s.saleguid
+        LEFT JOIN stage st ON s.stageid = st.stageid
+        WHERE 1=1
     """
+    data_params = []
 
-    data_query += base_filter.replace("FROM sale s", "")
+    data_query, data_params = apply_skyslope_filters(
+        base_filter=data_query,
+        params=data_params,
+        from_close_date=from_close_date,
+        to_close_date=to_close_date,
+        status=status,
+        stage=stage,
+        search=search,
+        not_in_be=not_in_be,
+    )
 
     data_query += """
         ORDER BY s.escrowclosingdate DESC NULLS LAST
         LIMIT %s OFFSET %s
     """
-
-    cursor.execute(data_query, params + [limit, offset])
+    cursor.execute(data_query, data_params + [limit, offset])
 
     columns = [desc[0] for desc in cursor.description]
     rows = cursor.fetchall()
     data = [dict(zip(columns, row)) for row in rows]
 
-    status_query = """
-        SELECT DISTINCT status
-        FROM sale
-        WHERE status IS NOT NULL
-        ORDER BY status
-    """
-    cursor.execute(status_query)
-    status_list = [row[0] for row in cursor.fetchall()]
+    total_pages = (total_count + limit - 1) // limit if total_count else 1
+    has_next = page < total_pages
 
-    return {
-        "total_count": total_count,
-        "filters": {
-            "status_list": status_list,
-            "not_in_be": not_in_be,
-        },
-        "data": data
-    }
+    return PaginationResponseWithCount[dict](
+        data=PaginationData[dict](
+            total_count=total_count,
+            items=data
+        ),
+        page=page,
+        page_size=limit,
+        count=len(data),
+        total_pages=total_pages,
+        has_next=has_next,
+    )
 
 
 @router.get("/skyslope/detail")
