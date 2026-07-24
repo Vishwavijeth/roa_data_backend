@@ -11,7 +11,6 @@ from openpyxl.utils import get_column_letter
 from common.pagination import PaginationResponseWithCount, PaginationData
 from common.response import FilterResponse
 
-
 router = APIRouter()
 
 
@@ -99,10 +98,10 @@ def apply_skyslope_filters(
 @router.get("/skyslope/sync_info")
 def skyslope_sync_info(conn=Depends(get_db)):
     sync_info = get_skyslope_sync(conn)
-
     return {
         "sync_info": sync_info,
     }
+
 
 @router.get("/skyslope-listing-filters", response_model=FilterResponse)
 def skyslope_listing_filters(conn=Depends(get_db)):
@@ -187,13 +186,21 @@ def skyslope_api(
                 sp.zip
             ) AS propertyaddress,
             s.escrowclosingdate AS close_date,
-            s.status,
-            st.name AS stage_name,
-            CASE
-                WHEN be.transaction_identifier_transactionid IS NULL
-                THEN 'No related BE data'
-                ELSE be.transaction_identifier_transactionid::text
-            END AS transaction_id,
+            TRIM(s.status) AS status,
+            TRIM(st.name) AS stage_name,
+            COALESCE(
+                be.transaction_identifier_transactionid::text,
+                (
+                    SELECT oit.transaction_identifier_transactionid::text
+                    FROM otherincome_transactions oit
+                    WHERE oit.skyslopefileid = s.saleguid
+                      AND oit.transaction_identifier_transactionid IS NOT NULL
+                    ORDER BY oit.finalized_date DESC NULLS LAST,
+                             oit.income_received_date DESC NULLS LAST
+                    LIMIT 1
+                ),
+                'No related transaction data'
+            ) AS transaction_id,
             NULLIF(
                 COALESCE(
                     (
@@ -289,12 +296,11 @@ def skyslope_detail(saleguid: str, conn=Depends(get_db)):
             s.mlsnumber,
             s.contractacceptancedate,
             s.escrowclosingdate,
-            s.status,
-
+            TRIM(s.status) AS status,
+            TRIM(st.name) AS stage_name,
             COALESCE(u.firstname || ' ' || u.lastname, NULL) AS buyer_agent_name,
             COALESCE(u.email, NULL) AS buyer_agent_email,
             COALESCE(r.firstname || ' ' || r.lastname, NULL) AS reviewer,
-
             COALESCE(
                 (
                     SELECT STRING_AGG(
@@ -310,7 +316,6 @@ def skyslope_detail(saleguid: str, conn=Depends(get_db)):
                 ),
                 NULL
             ) AS buyer,
-
             COALESCE(
                 (
                     SELECT STRING_AGG(
@@ -330,6 +335,7 @@ def skyslope_detail(saleguid: str, conn=Depends(get_db)):
         LEFT JOIN users u ON s.agentguid = u.userguid
         LEFT JOIN users r ON s.reviewerguid = r.userguid
         LEFT JOIN sale_property sp ON s.saleguid = sp.saleguid
+        LEFT JOIN stage st ON s.stageid = st.stageid
         WHERE s.saleguid = %s
     """
 
@@ -425,6 +431,7 @@ def skyslope_detail(saleguid: str, conn=Depends(get_db)):
             "buyer_agent_email": skyslope_data["buyer_agent_email"],
             "reviewer": skyslope_data["reviewer"],
             "status": skyslope_data["status"],
+            "stage": skyslope_data["stage_name"],
             "contractacceptancedate": skyslope_data["contractacceptancedate"],
             "escrowclosingdate": skyslope_data["escrowclosingdate"]
         },
@@ -445,7 +452,7 @@ def skyslope_download(
 ):
     cursor = conn.cursor()
 
-    base_filter = """
+    sale_base_filter = """
         FROM sale s
         LEFT JOIN sale_property sp ON s.saleguid = sp.saleguid
         LEFT JOIN stage st ON s.stageid = st.stageid
@@ -453,11 +460,11 @@ def skyslope_download(
         WHERE 1=1
     """
 
-    params = []
+    sale_params = []
 
-    base_filter, params = apply_skyslope_filters(
-        base_filter=base_filter,
-        params=params,
+    sale_base_filter, sale_params = apply_skyslope_filters(
+        base_filter=sale_base_filter,
+        params=sale_params,
         from_close_date=from_close_date,
         to_close_date=to_close_date,
         status=status,
@@ -466,16 +473,17 @@ def skyslope_download(
         not_in_be=not_in_be,
     )
 
-    data_query = f"""
+    sale_query = f"""
         SELECT
+            'sale' AS record_source,
             s.saleguid AS saleguid,
+            NULL::text AS transactionid,
             CONCAT_WS(', ',
                 CONCAT_WS(' ', sp.streetnumber, sp.streetaddress),
                 sp.city,
                 sp.state,
                 sp.zip
             ) AS property_address,
-
             NULLIF(
                 (
                     SELECT STRING_AGG(
@@ -489,7 +497,6 @@ def skyslope_download(
                 ),
                 ''
             ) AS buyer_name,
-
             NULLIF(
                 (
                     SELECT STRING_AGG(
@@ -503,7 +510,6 @@ def skyslope_download(
                 ),
                 ''
             ) AS seller_name,
-
             s.saleprice AS sale_price,
             s.listingprice AS listing_price,
             s.escrowclosingdate AS escrow_close_date,
@@ -512,18 +518,93 @@ def skyslope_download(
             s.dealtype AS dealtype,
             sc2."officegrosscommissiononsale" AS office_gross_commission_on_sale,
             sc2."salecommissionamount" AS sale_commission_amount,
-            sc2."listingcommissionamount" AS listing_commission_amount
-        {base_filter}
-        ORDER BY s.escrowclosingdate DESC NULLS LAST, s.saleguid
+            sc2."listingcommissionamount" AS listing_commission_amount,
+            NULL::text AS income_type,
+            NULL::date AS income_received_date,
+            NULL::numeric AS income_received,
+            NULL::numeric AS gross_commission,
+            NULL::numeric AS agent_net,
+            NULL::numeric AS brokerage_net,
+            NULL::text AS client_type,
+            NULL::text AS client_name,
+            NULL::text AS client_email,
+            NULL::text AS transaction_status,
+            NULL::text AS transaction_specialist
+        {sale_base_filter}
     """
 
-    cursor.execute(data_query, params)
+    other_income_query = """
+        SELECT
+            'other_income' AS record_source,
+            oit.skyslopefileid AS saleguid,
+            oit.transaction_identifier_transactionid::text AS transactionid,
+            oit.property_address,
+            NULL::text AS buyer_name,
+            oit.client_name AS seller_name,
+            NULL::numeric AS sale_price,
+            NULL::numeric AS listing_price,
+            oit.finalized_date AS escrow_close_date,
+            NULL::text AS status,
+            NULL::text AS stage,
+            NULL::text AS dealtype,
+            NULL::numeric AS office_gross_commission_on_sale,
+            NULL::numeric AS sale_commission_amount,
+            NULL::numeric AS listing_commission_amount,
+            oit.income_type,
+            oit.income_received_date,
+            oit.income_received,
+            oit.gross_commission,
+            oit.agent_net,
+            oit.brokerage_net,
+            oit.client_type,
+            oit.client_name,
+            oit.client_email,
+            oit.transaction_status,
+            oit.transaction_specialist
+        FROM otherincome_transactions oit
+        WHERE 1=1
+    """
+
+    oi_params = []
+
+    if search:
+        search_value = f"%{search.lower().strip()}%"
+        other_income_query += """
+            AND (
+                LOWER(COALESCE(oit.transaction_identifier_transactionid::text, '')) LIKE %s
+                OR LOWER(COALESCE(oit.property_address, '')) LIKE %s
+                OR LOWER(COALESCE(oit.client_name, '')) LIKE %s
+                OR LOWER(COALESCE(oit.client_email, '')) LIKE %s
+                OR LOWER(COALESCE(oit.skyslopefileid::text, '')) LIKE %s
+            )
+        """
+        oi_params.extend([search_value, search_value, search_value, search_value, search_value])
+
+    if not_in_be:
+        other_income_query += """
+            AND NOT EXISTS (
+                SELECT 1
+                FROM sale s
+                WHERE s.saleguid = oit.skyslopefileid
+            )
+        """
+
+    final_query = f"""
+        {sale_query}
+        UNION ALL
+        {other_income_query}
+        ORDER BY escrow_close_date DESC NULLS LAST, saleguid, transactionid
+    """
+
+    cursor.execute(final_query, sale_params + oi_params)
     columns = [desc[0] for desc in cursor.description]
     rows = cursor.fetchall()
     data = [dict(zip(columns, row)) for row in rows]
 
     columns_map = {
+        "record_source": "Record Source",
         "saleguid": "Sale GUID",
+        "transactionid": "Transaction ID",
         "property_address": "Property Address",
         "buyer_name": "Buyer Name",
         "seller_name": "Seller Name",
@@ -536,6 +617,17 @@ def skyslope_download(
         "office_gross_commission_on_sale": "Office Gross Commission On Sale",
         "sale_commission_amount": "Sale Commission Amount",
         "listing_commission_amount": "Listing Commission Amount",
+        "income_type": "Income Type",
+        "income_received_date": "Income Received Date",
+        "income_received": "Income Received",
+        "gross_commission": "Gross Commission",
+        "agent_net": "Agent Net",
+        "brokerage_net": "Brokerage Net",
+        "client_type": "Client Type",
+        "client_name": "Client Name",
+        "client_email": "Client Email",
+        "transaction_status": "Transaction Status",
+        "transaction_specialist": "Transaction Specialist",
     }
 
     rows_to_export = []
@@ -585,9 +677,23 @@ def skyslope_download(
             "sale price",
             "listing price",
             "commission",
+            "income received",
+            "gross commission",
+            "agent net",
+            "brokerage net",
         ]
         date_keywords = ["date"]
-        center_keywords = ["sale guid", "status", "stage", "deal type"]
+        center_keywords = [
+            "record source",
+            "sale guid",
+            "transaction id",
+            "status",
+            "stage",
+            "deal type",
+            "client type",
+            "transaction status",
+            "transaction specialist",
+        ]
 
         for idx, col_name in enumerate(df.columns):
             col_name_lower = col_name.lower()
