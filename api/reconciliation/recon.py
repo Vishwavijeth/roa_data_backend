@@ -10,9 +10,7 @@ import io
 import datetime
 from decimal import Decimal
 
-
 router = APIRouter()
-
 
 BASE_QUERY = """
 WITH base_reconciliation AS (
@@ -190,7 +188,6 @@ LEFT JOIN latest_review lr
     ON lr.transactionid = cs.transactionid
 """
 
-
 DETAIL_QUERY = """
 SELECT
     rd.transactionid,
@@ -243,7 +240,6 @@ SELECT
 FROM reconciliation_data rd
 WHERE rd.transactionid = :transaction_id
 """
-
 
 PARAMETER_DISPLAY_NAMES = {
     "gross_commission": "Gross Commission",
@@ -364,7 +360,6 @@ EXPORT_PARAMETER_CONFIG = {
     },
 }
 
-
 def parse_mismatch_params(mismatch_parameter: Optional[List[str]]) -> List[str]:
     parsed = []
     if mismatch_parameter:
@@ -374,7 +369,6 @@ def parse_mismatch_params(mismatch_parameter: Optional[List[str]]) -> List[str]:
                 if normalized:
                     parsed.append(normalized)
     return parsed
-
 
 def parse_source_table_params(source_table: Optional[List[str]]) -> List[str]:
     parsed = []
@@ -387,7 +381,6 @@ def parse_source_table_params(source_table: Optional[List[str]]) -> List[str]:
                     parsed.append(mapped_value)
     return parsed
 
-
 def parse_text_list_params(values: Optional[List[str]]) -> List[str]:
     parsed = []
     if values:
@@ -397,7 +390,6 @@ def parse_text_list_params(values: Optional[List[str]]) -> List[str]:
                 if normalized:
                     parsed.append(normalized)
     return parsed
-
 
 def build_where_clause(
     search: Optional[str],
@@ -414,17 +406,16 @@ def build_where_clause(
     otherincome_no_skyslopefileid: Optional[bool] = None,
 ):
     conditions = []
-    params = []
+    params = {}
 
     if search:
         conditions.append("""
             (
-                CAST(cs.transactionid AS TEXT) ILIKE %s
-                OR cs.propertyaddress ILIKE %s
+                CAST(cs.transactionid AS TEXT) ILIKE :search_term
+                OR cs.propertyaddress ILIKE :search_term
             )
         """)
-        search_term = f"%{search}%"
-        params.extend([search_term, search_term])
+        params["search_term"] = f"%{search}%"
 
     if parsed_source_tables:
         source_table_conditions = []
@@ -448,24 +439,24 @@ def build_where_clause(
             conditions.append(f"({' OR '.join(source_table_conditions)})")
 
     if from_close_date:
-        conditions.append("cs.be_close_date >= CAST(%s AS DATE)")
-        params.append(from_close_date)
+        conditions.append("cs.be_close_date >= CAST(:from_close_date AS DATE)")
+        params["from_close_date"] = from_close_date
 
     if to_close_date:
-        conditions.append("cs.be_close_date <= CAST(%s AS DATE)")
-        params.append(to_close_date)
+        conditions.append("cs.be_close_date <= CAST(:to_close_date AS DATE)")
+        params["to_close_date"] = to_close_date
 
     if status:
         normalized_status = [s.strip().lower() for s in status if s and s.strip()]
         if normalized_status:
-            conditions.append("LOWER(cs.be_status) = ANY(%s)")
-            params.append(normalized_status)
+            conditions.append("LOWER(cs.be_status) = ANY(:status)")
+            params["status"] = normalized_status
 
     if skyslope_stage:
         normalized_stages = [s.strip().lower() for s in skyslope_stage if s and s.strip()]
         if normalized_stages:
-            conditions.append("LOWER(cs.skyslope_stage) = ANY(%s)")
-            params.append(normalized_stages)
+            conditions.append("LOWER(cs.skyslope_stage) = ANY(:skyslope_stage)")
+            params["skyslope_stage"] = normalized_stages
 
     if review_status:
         normalized_review_filters = [s.strip().lower() for s in review_status if s and s.strip()]
@@ -492,13 +483,13 @@ def build_where_clause(
             ]
             if non_unassigned_specialists:
                 specialist_conditions.append(
-                    "LOWER(TRIM(cs.be_transaction_specialist)) = ANY(%s)"
+                    "LOWER(TRIM(cs.be_transaction_specialist)) = ANY(:specialists)"
                 )
-                params.append(non_unassigned_specialists)
+                params["specialists"] = non_unassigned_specialists
             conditions.append(f"({' OR '.join(specialist_conditions)})")
         else:
-            conditions.append("LOWER(TRIM(cs.be_transaction_specialist)) = ANY(%s)")
-            params.append(parsed_specialists)
+            conditions.append("LOWER(TRIM(cs.be_transaction_specialist)) = ANY(:specialists)")
+            params["specialists"] = parsed_specialists
 
     parsed_reviewers = parse_text_list_params(reviewer)
     if parsed_reviewers:
@@ -509,13 +500,13 @@ def build_where_clause(
             ]
             if non_unassigned_reviewers:
                 reviewer_conditions.append(
-                    "LOWER(TRIM(cs.skyslope_reviewer)) = ANY(%s)"
+                    "LOWER(TRIM(cs.skyslope_reviewer)) = ANY(:reviewers)"
                 )
-                params.append(non_unassigned_reviewers)
+                params["reviewers"] = non_unassigned_reviewers
             conditions.append(f"({' OR '.join(reviewer_conditions)})")
         else:
-            conditions.append("LOWER(TRIM(cs.skyslope_reviewer)) = ANY(%s)")
-            params.append(parsed_reviewers)
+            conditions.append("LOWER(TRIM(cs.skyslope_reviewer)) = ANY(:reviewers)")
+            params["reviewers"] = parsed_reviewers
 
     if parsed_mismatch_params:
         active_filters = [
@@ -550,7 +541,6 @@ def build_where_clause(
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
     return where_clause, params
 
-
 def get_mismatched_parameters_from_row(row):
     parameter_to_column = {
         "gross_commission": "gross_commission_match",
@@ -570,7 +560,6 @@ def get_mismatched_parameters_from_row(row):
         for parameter, column_name in parameter_to_column.items()
         if row.get(column_name) == "mismatch"
     ]
-
 
 def get_summary_counts(db: Session):
     row = db.execute(text("""
@@ -605,7 +594,6 @@ def get_summary_counts(db: Session):
     """)).mappings().one()
     return row
 
-
 def get_status_filters(db: Session):
     query = """
         SELECT DISTINCT be_status AS status
@@ -617,7 +605,6 @@ def get_status_filters(db: Session):
     rows = db.execute(text(query)).mappings().all()
     return [row["status"] for row in rows]
 
-
 def get_specialist_filters(db: Session):
     query = """
         SELECT DISTINCT
@@ -628,7 +615,6 @@ def get_specialist_filters(db: Session):
     rows = db.execute(text(query)).mappings().all()
     return [row["specialist"] for row in rows]
 
-
 def get_reviewer_filters(db: Session):
     query = """
         SELECT DISTINCT
@@ -638,7 +624,6 @@ def get_reviewer_filters(db: Session):
     """
     rows = db.execute(text(query)).mappings().all()
     return [row["reviewer"] for row in rows]
-
 
 @router.get("/reconciliation/transactions")
 def get_reconciliation_transactions(
@@ -711,7 +696,7 @@ def get_reconciliation_transactions(
     """
 
     offset = (page - 1) * limit
-    data_params = {**dict(params), "limit": limit, "offset": offset}
+    data_params = {**params, "limit": limit, "offset": offset}
     rows = db.execute(text(data_query), data_params).mappings().all()
 
     total_count = rows[0]["_total_count"] if rows else 0
@@ -775,7 +760,6 @@ def get_reconciliation_transactions(
         },
         "data": results,
     }
-
 
 @router.get("/reconciliation/transaction/{transaction_id}")
 def get_reconciliation_transaction_details(
@@ -856,7 +840,6 @@ def get_reconciliation_transaction_details(
         "skyslope_status": row.get("skyslope_status"),
         "parameters": detailed_parameters,
     }
-
 
 @router.get("/recon-data/download")
 def download_recon_data(
