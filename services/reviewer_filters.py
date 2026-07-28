@@ -14,12 +14,12 @@ def apply_common_filters(
     reviewer_expr="COALESCE(NULLIF(TRIM(CONCAT_WS(' ', r.firstname, r.lastname)), ''), 'Unassigned')",
 ):
     if from_date:
-        query += f" AND {date_field} >= %s"
-        params.append(from_date)
+        query += f" AND {date_field} >= :from_date"
+        params["from_date"] = from_date
 
     if to_date:
-        query += f" AND {date_field} <= %s"
-        params.append(to_date)
+        query += f" AND {date_field} <= :to_date"
+        params["to_date"] = to_date
 
     if state:
         cleaned_states = sorted({
@@ -40,22 +40,22 @@ def apply_common_filters(
             })
 
             if mapped_offices:
-                query += " AND TRIM(COALESCE(o.officename, '')) = ANY(%s)"
-                params.append(mapped_offices)
+                query += " AND TRIM(COALESCE(o.officename, '')) = ANY(:mapped_offices)"
+                params["mapped_offices"] = mapped_offices
             else:
                 query += " AND 1=0"
 
     if stage_name:
         cleaned_stage_names = [x.strip() for x in stage_name if x and x.strip()]
         if cleaned_stage_names:
-            query += " AND st.name = ANY(%s)"
-            params.append(cleaned_stage_names)
+            query += " AND st.name = ANY(:stage_names)"
+            params["stage_names"] = cleaned_stage_names
 
     if status:
         cleaned_status = [x.strip() for x in status if x and x.strip()]
         if cleaned_status:
-            query += " AND s.status = ANY(%s)"
-            params.append(cleaned_status)
+            query += " AND s.status = ANY(:status_list)"
+            params["status_list"] = cleaned_status
 
     if reviewer:
         cleaned_reviewers = [x.strip() for x in reviewer if x and x.strip()]
@@ -66,8 +66,8 @@ def apply_common_filters(
             reviewer_conditions = []
 
             if non_unassigned_reviewers:
-                reviewer_conditions.append(f"{reviewer_expr} = ANY(%s)")
-                params.append(non_unassigned_reviewers)
+                reviewer_conditions.append(f"{reviewer_expr} = ANY(:reviewer_list)")
+                params["reviewer_list"] = non_unassigned_reviewers
 
             if has_unassigned:
                 reviewer_conditions.append("s.reviewerguid IS NULL")
@@ -78,7 +78,7 @@ def apply_common_filters(
     if type_of_sale:
         cleaned_type_of_sale = [x.strip() for x in type_of_sale if x and x.strip()]
         if cleaned_type_of_sale:
-            query += " AND s.dealtype = ANY(%s)"
-            params.append(cleaned_type_of_sale)
+            query += " AND s.dealtype = ANY(:type_of_sale_list)"
+            params["type_of_sale_list"] = cleaned_type_of_sale
 
     return query, params

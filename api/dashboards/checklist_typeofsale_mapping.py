@@ -1,9 +1,15 @@
 from fastapi import APIRouter, Depends, Query
-from psycopg2.extras import RealDictCursor
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 from services.state_office_mapping import STATE_OFFICES_MAP
 from db import get_db
 
 router = APIRouter()
+
+def checker_filters_to_named_params(params_list, param_names):
+    """Helper to convert list params to named dict params"""
+    return dict(zip(param_names, params_list))
+
 
 def build_checklist_validation_query(
     state: list[str] | None = None,
@@ -13,7 +19,7 @@ def build_checklist_validation_query(
     checklist_type: list[str] | None = None,
     search: str | None = None,
 ):
-    params = []
+    params = {}
 
     validation_case = """
         CASE
@@ -117,28 +123,28 @@ def build_checklist_validation_query(
             })
 
             if mapped_offices:
-                base_query += " AND TRIM(COALESCE(o.officename, '')) = ANY(%s)"
-                params.append(mapped_offices)
+                base_query += " AND TRIM(COALESCE(o.officename, '')) = ANY(:checklist_offices)"
+                params["checklist_offices"] = mapped_offices
             else:
                 base_query += " AND 1=0"
 
     if stage_name:
         cleaned_stage_names = [x.strip() for x in stage_name if x and x.strip()]
         if cleaned_stage_names:
-            base_query += " AND TRIM(COALESCE(st.name, '')) = ANY(%s)"
-            params.append(cleaned_stage_names)
+            base_query += " AND TRIM(COALESCE(st.name, '')) = ANY(:checklist_stages)"
+            params["checklist_stages"] = cleaned_stage_names
 
     if status:
         cleaned_status = [x.strip() for x in status if x and x.strip()]
         if cleaned_status:
-            base_query += " AND TRIM(COALESCE(s.status, '')) = ANY(%s)"
-            params.append(cleaned_status)
+            base_query += " AND TRIM(COALESCE(s.status, '')) = ANY(:checklist_status)"
+            params["checklist_status"] = cleaned_status
 
     if type_of_sale:
         cleaned_type_of_sale = [x.strip() for x in type_of_sale if x and x.strip()]
         if cleaned_type_of_sale:
-            base_query += " AND TRIM(COALESCE(s.dealtype, '')) = ANY(%s)"
-            params.append(cleaned_type_of_sale)
+            base_query += " AND TRIM(COALESCE(s.dealtype, '')) = ANY(:checklist_dealtype)"
+            params["checklist_dealtype"] = cleaned_type_of_sale
 
     if checklist_type:
         cleaned_checklist_types = list({
@@ -147,18 +153,18 @@ def build_checklist_validation_query(
             if x and x.strip()
         })
         if cleaned_checklist_types:
-            base_query += " AND LOWER(TRIM(COALESCE(c.typename, ''))) = ANY(%s)"
-            params.append(cleaned_checklist_types)
+            base_query += " AND LOWER(TRIM(COALESCE(c.typename, ''))) = ANY(:checklist_types)"
+            params["checklist_types"] = cleaned_checklist_types
 
     if search and search.strip():
-        base_query += f" AND {property_address_expr} ILIKE %s"
-        params.append(f"%{search.strip()}%")
+        base_query += f" AND {property_address_expr} ILIKE :checklist_search"
+        params["checklist_search"] = f"%{search.strip()}%"
 
     return base_query, params, validation_case, property_address_expr
 
 
 @router.get("/checklist-type-validation/filters")
-def checklist_type_validation_filters(conn=Depends(get_db)):
+def checklist_type_validation_filters(db: Session = Depends(get_db)):
     try:
         type_of_sale_query = """
             SELECT DISTINCT TRIM(dealtype) AS dealtype
@@ -195,21 +201,11 @@ def checklist_type_validation_filters(conn=Depends(get_db)):
             ORDER BY typename
         """
 
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(type_of_sale_query)
-            type_of_sale_list = [row["dealtype"] for row in cur.fetchall()]
-
-            cur.execute(state_query)
-            state_list = [row["state"] for row in cur.fetchall()]
-
-            cur.execute(status_query)
-            status_list = [row["status"] for row in cur.fetchall()]
-
-            cur.execute(stage_query)
-            stage_list = [row["name"] for row in cur.fetchall()]
-
-            cur.execute(checklist_query)
-            checklist_type_list = [row["typename"] for row in cur.fetchall()]
+        type_of_sale_list = [row["dealtype"] for row in db.execute(text(type_of_sale_query)).mappings().all()]
+        state_list = [row["state"] for row in db.execute(text(state_query)).mappings().all()]
+        status_list = [row["status"] for row in db.execute(text(status_query)).mappings().all()]
+        stage_list = [row["name"] for row in db.execute(text(stage_query)).mappings().all()]
+        checklist_type_list = [row["typename"] for row in db.execute(text(checklist_query)).mappings().all()]
 
         return {
             "filters": {
@@ -234,7 +230,7 @@ def checklist_type_validation_data(
     type_of_sale: list[str] | None = Query(default=None),
     checklist_type: list[str] | None = Query(default=None),
     search: str | None = Query(default=None),
-    conn=Depends(get_db)
+    db: Session = Depends(get_db)
 ):
     try:
         limit = 50
@@ -266,17 +262,13 @@ def checklist_type_validation_data(
                 ({validation_case}) AS match_result
             {base_query}
             ORDER BY s.saleguid
-            LIMIT %s OFFSET %s
+            LIMIT :checklist_limit OFFSET :checklist_offset
         """
 
-        data_params = params + [limit, offset]
+        data_params = {**params, "checklist_limit": limit, "checklist_offset": offset}
 
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(count_query, params)
-            total_count = cur.fetchone()["total_count"]
-
-            cur.execute(data_query, data_params)
-            rows = cur.fetchall()
+        total_count = db.execute(text(count_query), params).scalar()
+        rows = db.execute(text(data_query), data_params).mappings().all()
 
         return {
             "total_count": total_count,
@@ -290,7 +282,7 @@ def checklist_type_validation_data(
                 "checklist_type": checklist_type,
                 "search": search,
             },
-            "data": rows
+            "data": [dict(row) for row in rows]
         }
 
     finally:

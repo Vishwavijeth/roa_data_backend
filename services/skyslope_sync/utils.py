@@ -140,20 +140,21 @@ def clean_url(value: Any) -> Optional[str]:
 
     return value
 
-def get_last_sync_date(conn) -> str:
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT sync_date, sync_timestamp
-                FROM skyslope_sync
-                ORDER BY id DESC
-                LIMIT 1
-            """)
-            row = cur.fetchone()
+from sqlalchemy.orm import Session
+from sqlalchemy import text
 
-        if row and row[0]:
-            sync_date = row[0]
-            sync_timestamp = row[1]
+def get_last_sync_date(db: Session) -> str:
+    try:
+        row = db.execute(text("""
+            SELECT sync_date, sync_timestamp
+            FROM skyslope_sync
+            ORDER BY id DESC
+            LIMIT 1
+        """)).mappings().first()
+
+        if row and row["sync_date"]:
+            sync_date = row["sync_date"]
+            sync_timestamp = row["sync_timestamp"]
 
             if sync_timestamp:
                 combined = datetime(
@@ -178,34 +179,36 @@ def get_last_sync_date(conn) -> str:
     logger.info("No sync datetime found in DB. Using default: %s", default_sync_datetime)
     return default_sync_datetime
 
-def update_sync_date(conn, status: str = "success", error_message: Optional[str] = None) -> None:
+def update_sync_date(db: Session, status: str = "success", error_message: Optional[str] = None) -> None:
     now = datetime.now()
 
     try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO skyslope_sync (
-                    sync_date,
-                    sync_timestamp,
-                    status,
-                    error_message
-                )
-                VALUES (%s, NOW(), %s, %s)
-                RETURNING id, sync_date, sync_timestamp, status
-            """, (now.date(), status, error_message))
-            inserted_row = cur.fetchone()
+        inserted_row = db.execute(text("""
+            INSERT INTO skyslope_sync (
+                sync_date,
+                sync_timestamp,
+                status,
+                error_message
+            )
+            VALUES (:sync_date, NOW(), :status, :error_message)
+            RETURNING id, sync_date, sync_timestamp, status
+        """), {
+            "sync_date": now.date(),
+            "status": status,
+            "error_message": error_message
+        }).mappings().first()
 
-        conn.commit()
+        db.commit()
 
         logger.info(
             "Sync date committed to DB: id=%s sync_date=%s sync_timestamp=%s status=%s",
-            inserted_row[0] if inserted_row else None,
-            inserted_row[1] if inserted_row else None,
-            inserted_row[2] if inserted_row else None,
-            inserted_row[3] if inserted_row else None,
+            inserted_row["id"] if inserted_row else None,
+            inserted_row["sync_date"] if inserted_row else None,
+            inserted_row["sync_timestamp"] if inserted_row else None,
+            inserted_row["status"] if inserted_row else None,
         )
 
     except Exception as e:
-        conn.rollback()
+        db.rollback()
         logger.error("Failed to insert sync date into DB. Rolled back transaction: %s", e, exc_info=True)
         raise

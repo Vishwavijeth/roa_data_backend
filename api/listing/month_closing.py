@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Query, Response, Depends
 from typing import List
-from db import get_conn, get_db
-from psycopg2.extras import RealDictCursor
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+from db import get_db
 from services.comparison import compare_names, compare_listing_price
 import io
 import pandas as pd
@@ -24,12 +25,8 @@ def fetch_month_closing_data(
     pending_subfilter: List[str] = [],
     page: int = None,
     page_size: int = None,
-    conn=None
+    db: Session = None
 ):
-    passed_conn = conn is not None
-    if not passed_conn:
-        conn = get_conn()
-
     try:
         search_clause = ""
         search_params = {}
@@ -118,13 +115,11 @@ def fetch_month_closing_data(
 
             count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
 
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(count_query, count_params)
-                total = cur.fetchone()["total"]
-                cur.execute(data_query, params)
-                rows = cur.fetchall()
+            total = db.execute(text(count_query), count_params).scalar()
+            rows = db.execute(text(data_query), params).mappings().all()
+            rows = [dict(r) for r in rows]
 
-            return {"mode": "skyslope_only", "total": total, "data": [dict(r) for r in rows]}
+            return {"mode": "skyslope_only", "total": total, "data": rows}
 
         base_cte = """
             WITH brokerage_base AS (
@@ -423,12 +418,9 @@ def fetch_month_closing_data(
 
         count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
 
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(count_query, count_params)
-            total = cur.fetchone()["total"]
-
-            cur.execute(data_query, params)
-            rows = cur.fetchall()
+        total = db.execute(text(count_query), count_params).scalar()
+        rows = db.execute(text(data_query), params).mappings().all()
+        rows = [dict(r) for r in rows]
 
         for row in rows:
             is_brokerage = row.get("source_table") == "brokerage_engine"
@@ -464,11 +456,10 @@ def fetch_month_closing_data(
             rows = [r for r in rows if has_mismatch(r)]
             total = len(rows)
 
-        return {"mode": "full_comparison", "total": total, "data": [dict(r) for r in rows]}
+        return {"mode": "full_comparison", "total": total, "data": rows}
 
     finally:
-        if not passed_conn:
-            conn.close()
+        pass
 
 
 @router.get("/month-closing/listing")
@@ -484,7 +475,7 @@ def get_month_closing(
     pending_subfilter: List[str] = Query(default=[]),
     page: int = 1,
     page_size: int = 50,
-    conn=Depends(get_db)
+    db: Session = Depends(get_db)
 ):
     return fetch_month_closing_data(
         status=status,
@@ -498,7 +489,7 @@ def get_month_closing(
         pending_subfilter=pending_subfilter,
         page=page,
         page_size=page_size,
-        conn=conn
+        db=db
     )
 
 @router.get("/month-closing/download")
@@ -512,7 +503,7 @@ def download_month_closing(
     search: str = None,
     mismatch: bool = False,
     pending_subfilter: List[str] = Query(default=[]),
-    conn=Depends(get_db)
+    db: Session = Depends(get_db)
 ):
     result = fetch_month_closing_data(
         status=status,
@@ -526,7 +517,7 @@ def download_month_closing(
         pending_subfilter=pending_subfilter,
         page=None,
         page_size=None,
-        conn=conn
+        db=db
     )
     
     data = result["data"]

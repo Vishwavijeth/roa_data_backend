@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse
 from datetime import datetime, timezone, timedelta
+from sqlalchemy.orm import Session
 from db import get_db
 from services.account_hold_helper import (
     build_frontend_redirect,
@@ -24,7 +25,8 @@ def quickbooks_login():
 
 
 @router.get("/auth/callback")
-def quickbooks_callback(request: Request, conn=Depends(get_db)):
+def quickbooks_callback(request: Request, db: Session = Depends(get_db)):
+    raw_conn = db.connection().connection
     error = request.query_params.get("error")
     code = request.query_params.get("code")
     state = request.query_params.get("state")
@@ -60,7 +62,7 @@ def quickbooks_callback(request: Request, conn=Depends(get_db)):
         token_data = exchange_code_for_tokens(code)
 
         save_quickbooks_connection(
-            conn=conn,
+            conn=raw_conn,
             realm_id=realm_id,
             access_token=token_data.get("access_token"),
             refresh_token=token_data.get("refresh_token"),
@@ -69,7 +71,7 @@ def quickbooks_callback(request: Request, conn=Depends(get_db)):
             scope=token_data.get("scope"),
         )
     except Exception:
-        conn.rollback()
+        db.rollback()
         return RedirectResponse(
             url=build_frontend_redirect(status="error", reason="token_or_db_failed"),
             status_code=302,
@@ -82,8 +84,9 @@ def quickbooks_callback(request: Request, conn=Depends(get_db)):
 
 
 @router.get("/auth/quickbooks/status")
-def quickbooks_status(conn=Depends(get_db)):
-    qb = get_valid_quickbooks_connection(conn)
+def quickbooks_status(db: Session = Depends(get_db)):
+    raw_conn = db.connection().connection
+    qb = get_valid_quickbooks_connection(raw_conn)
 
     return {
         "connected": True,
@@ -92,9 +95,10 @@ def quickbooks_status(conn=Depends(get_db)):
     }
 
 @router.get("/auth/quickbooks/token-status")
-def quickbooks_token_status(conn=Depends(get_db)):
+def quickbooks_token_status(db: Session = Depends(get_db)):
+    raw_conn = db.connection().connection
     try:
-        qb = get_latest_quickbooks_connection(conn)
+        qb = get_latest_quickbooks_connection(raw_conn)
     except Exception:
         return {
             "connected": False,
@@ -118,7 +122,7 @@ def quickbooks_token_status(conn=Depends(get_db)):
                     "message": "Access token is valid"
                 }
 
-        refresh_quickbooks_tokens(conn, qb)
+        refresh_quickbooks_tokens(raw_conn, qb)
 
         return {
             "connected": True,
@@ -128,7 +132,7 @@ def quickbooks_token_status(conn=Depends(get_db)):
         }
 
     except Exception:
-        conn.rollback()
+        db.rollback()
         return {
             "connected": False,
             "status": "reconnect_required",

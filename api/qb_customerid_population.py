@@ -5,7 +5,9 @@ import requests
 
 from db import get_db
 from fastapi import APIRouter, Depends, Query, HTTPException
-from psycopg2.extras import RealDictCursor, execute_values
+from psycopg2.extras import execute_values
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 from services.account_hold_helper import (
     get_valid_quickbooks_connection,
     split_emails,
@@ -25,7 +27,7 @@ def chunked(items: List[Tuple[str, int]], size: int):
         yield items[i:i + size]
 
 
-def get_users_without_qb_customerid(conn, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+def get_users_without_qb_customerid(db: Session, limit: Optional[int] = None) -> List[Dict[str, Any]]:
     sql = """
         SELECT personguid, primary_emailaddress
         FROM brokerage_engine_users
@@ -35,19 +37,18 @@ def get_users_without_qb_customerid(conn, limit: Optional[int] = None) -> List[D
         ORDER BY personguid
     """
 
-    params = []
+    params = {}
     if limit is not None:
-        sql += " LIMIT %s"
-        params.append(limit)
+        sql += " LIMIT :limit"
+        params["limit"] = limit
 
     logger.info(
         "Fetching brokerage_engine_users without qb_customerid",
         extra={"limit": limit},
     )
 
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(sql, params)
-        rows = cur.fetchall()
+    rows = db.execute(text(sql), params).mappings().all()
+    rows = [dict(r) for r in rows]
 
     logger.info(
         "Fetched brokerage_engine_users without qb_customerid",
@@ -254,7 +255,7 @@ def select_customer_from_email_map(
     return None
 
 
-async def populate_qb_customerids(conn, limit: Optional[int] = None) -> Dict[str, Any]:
+async def populate_qb_customerids(db: Session, limit: Optional[int] = None) -> Dict[str, Any]:
     started_at = time.perf_counter()
 
     logger.info(
@@ -262,8 +263,9 @@ async def populate_qb_customerids(conn, limit: Optional[int] = None) -> Dict[str
         extra={"limit": limit},
     )
 
-    users = get_users_without_qb_customerid(conn, limit=limit)
-    qb_email_map = await fetch_all_qb_customers_map(conn)
+    users = get_users_without_qb_customerid(db, limit=limit)
+    raw_conn = db.connection().connection
+    qb_email_map = await fetch_all_qb_customers_map(raw_conn)
 
     updates: List[Tuple[str, int]] = []
     results = []
@@ -355,7 +357,7 @@ async def populate_qb_customerids(conn, limit: Optional[int] = None) -> Dict[str
             },
         )
 
-        updated_count = bulk_update_user_qb_customerids(conn, updates)
+        updated_count = bulk_update_user_qb_customerids(raw_conn, updates)
         summary["updated"] = updated_count
 
     duration_seconds = round(time.perf_counter() - started_at, 3)
@@ -383,10 +385,10 @@ async def populate_qb_customerids(conn, limit: Optional[int] = None) -> Dict[str
 @router.post("/qb-customerid-population")
 async def qb_customerid_population(
     limit: Optional[int] = Query(default=None, ge=1),
-    conn=Depends(get_db),
+    db: Session = Depends(get_db),
 ):
     logger.info(
         "Received request for qb_customerid population",
         extra={"limit": limit},
     )
-    return await populate_qb_customerids(conn=conn, limit=limit)
+    return await populate_qb_customerids(db=db, limit=limit)

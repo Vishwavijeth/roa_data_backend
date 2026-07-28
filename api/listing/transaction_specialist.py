@@ -1,11 +1,12 @@
 from fastapi import APIRouter, Depends
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 from db import get_db
-from psycopg2.extras import RealDictCursor
 
 router = APIRouter()
 
 @router.get("/transaction_specialist_listing")
-def transaction_specialist_listing(conn=Depends(get_db)):
+def transaction_specialist_listing(db: Session = Depends(get_db)):
     query = """
     SELECT
         be.transaction_identifier_transactionid AS transactionid,
@@ -25,11 +26,9 @@ def transaction_specialist_listing(conn=Depends(get_db)):
     ORDER BY be.transaction_identifier_transactionid;
     """
 
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(query)
-        rows = cur.fetchall()
+    rows = db.execute(text(query)).mappings().all()
 
     return {
         "count": len(rows),
-        "data": rows
+        "data": [dict(row) for row in rows]
     }

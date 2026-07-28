@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Query, Response, Depends
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 from db import get_db
-from psycopg2.extras import RealDictCursor
 import io
 import pandas as pd
 from openpyxl.styles import Font
@@ -11,9 +12,9 @@ import datetime
 router = APIRouter()
 
 
-def fetch_cda_sent_data(conn, mismatch: bool = False, search: str = None, page: int = None, limit: int = None):
-    base_params = ["%CdaSent%", "%CdaSent%"]
-    extra_params = []
+def fetch_cda_sent_data(db: Session, mismatch: bool = False, search: str = None, page: int = None, limit: int = None):
+    base_params = {"tag1": "%CdaSent%", "tag2": "%CdaSent%"}
+    extra_params = {}
     where_conditions = []
 
     base_cte = """
@@ -22,14 +23,14 @@ def fetch_cda_sent_data(conn, mismatch: bool = False, search: str = None, page: 
                 be.transaction_identifier_transactionid AS transaction_id,
                 be.tags
             FROM brokerage_engine be
-            WHERE be.tags ILIKE %s
+            WHERE be.tags ILIKE :tag1
         ),
         other_income_base AS (
             SELECT
                 oit.transaction_identifier_transactionid AS transaction_id,
                 oit.tags
             FROM otherincome_transactions oit
-            WHERE oit.tags ILIKE %s
+            WHERE oit.tags ILIKE :tag2
         ),
         combined_source AS (
             SELECT * FROM brokerage_base
@@ -75,14 +76,13 @@ def fetch_cda_sent_data(conn, mismatch: bool = False, search: str = None, page: 
     if search:
         where_conditions.append("""
             (
-                CAST(transaction_id AS TEXT) ILIKE %s
-                OR property_address ILIKE %s
-                OR tags ILIKE %s
-                OR be_source_table ILIKE %s
+                CAST(transaction_id AS TEXT) ILIKE :search
+                OR property_address ILIKE :search
+                OR tags ILIKE :search
+                OR be_source_table ILIKE :search
             )
         """)
-        search_term = f"%{search}%"
-        extra_params.extend([search_term, search_term, search_term, search_term])
+        extra_params["search"] = f"%{search}%"
 
     where_clause = ""
     if where_conditions:
@@ -129,24 +129,18 @@ def fetch_cda_sent_data(conn, mismatch: bool = False, search: str = None, page: 
         ORDER BY transaction_id
     """
 
-    summary_params = base_params
-    filtered_count_params = base_params + extra_params
-    data_params = base_params + extra_params
+    all_params = {**base_params, **extra_params}
+
+    summary = db.execute(text(summary_query), base_params).mappings().one()
+    filtered_count = db.execute(text(filtered_count_query), all_params).scalar()
 
     if page is not None and limit is not None:
         offset = (page - 1) * limit
-        data_query += " LIMIT %s OFFSET %s"
-        data_params += [limit, offset]
+        data_query += " LIMIT :limit OFFSET :offset"
+        all_params["limit"] = limit
+        all_params["offset"] = offset
 
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(summary_query, summary_params)
-        summary = cur.fetchone()
-
-        cur.execute(filtered_count_query, filtered_count_params)
-        filtered_count = cur.fetchone()["count"]
-
-        cur.execute(data_query, data_params)
-        rows = cur.fetchall()
+    rows = db.execute(text(data_query), all_params).mappings().all()
 
     return {
         "summary": {
@@ -163,11 +157,11 @@ def get_cda_sent(
     mismatch: bool = Query(False, description="If true, returns only mismatch records"),
     page: int = Query(default=1, ge=1),
     search: str = Query(default=None),
-    conn=Depends(get_db)
+    db: Session = Depends(get_db)
 ):
     limit = 50
     result = fetch_cda_sent_data(
-        conn=conn,
+        db=db,
         mismatch=mismatch,
         search=search,
         page=page,
@@ -190,10 +184,10 @@ def get_cda_sent(
 def download_cda_sent(
     mismatch: bool = Query(False, description="If true, downloads only mismatch records"),
     search: str = Query(default=None),
-    conn=Depends(get_db)
+    db: Session = Depends(get_db)
 ):
     result = fetch_cda_sent_data(
-        conn=conn,
+        db=db,
         mismatch=mismatch,
         search=search
     )

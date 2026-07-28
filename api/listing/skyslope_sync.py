@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
 from psycopg2.extras import execute_values
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -990,7 +991,7 @@ def retry_failed_saleguids() -> int:
 
 
 @router.post("/sync-skyslope-sales")
-def trigger_sales_sync(db=Depends(get_db)):
+def trigger_sales_sync(db: Session = Depends(get_db)):
     global processed_count, saved_count_global, error_count_global, failed_saleguids_global, detail_cache, last_request_ts
 
     processed_count = 0

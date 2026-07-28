@@ -2,7 +2,8 @@ from math import ceil
 from typing import Literal
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Query
-from psycopg2.extras import RealDictCursor
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 from common.pagination import PaginationResponse
 from db import get_db
 from api.listing.account_hold.base import AccountHoldItem, AccountHoldSummaryData
@@ -34,14 +35,14 @@ def build_where_clause(
 ):
     search_filters = []
     combinable_filters = []
-    params = []
+    params = {}
 
     if search and search.strip():
         search_value = f"%{search.strip()}%"
         search_filters.append(
-            "(b.display_name ILIKE %s OR b.primary_emailaddress ILIKE %s)"
+            "(b.display_name ILIKE :search OR b.primary_emailaddress ILIKE :search)"
         )
-        params.extend([search_value, search_value])
+        params["search"] = search_value
 
     if account_hold is True:
         combinable_filters.append("b.has_account_hold = TRUE")
@@ -112,7 +113,7 @@ def get_base_cte():
 
 
 def fetch_agent_listing_page_base(
-    db,
+    db: Session,
     page: int,
     size: int,
     search: str | None = None,
@@ -157,23 +158,19 @@ def fetch_agent_listing_page_base(
             b.total_open_balance DESC,
             b.display_name,
             b.primary_emailaddress
-        LIMIT %s OFFSET %s
+        LIMIT :limit OFFSET :offset
     """
 
     try:
-        with db.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(count_query, params)
-            total_count = int(cur.fetchone()["total_count"])
-
-            cur.execute(data_query, params + [size, offset])
-            rows = cur.fetchall()
-
-        return total_count, rows
+        total_count = int(db.execute(text(count_query), params).scalar())
+        data_params = {**params, "limit": size, "offset": offset}
+        rows = db.execute(text(data_query), data_params).mappings().all()
+        return total_count, [dict(r) for r in rows]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Listing base query failed: {str(e)}")
 
 
-def fetch_transaction_summary_for_agents(db, agent_emails: list[str]):
+def fetch_transaction_summary_for_agents(db: Session, agent_emails: list[str]):
     if not agent_emails:
         return {}
 
@@ -185,7 +182,7 @@ def fetch_transaction_summary_for_agents(db, agent_emails: list[str]):
             FROM brokerage_engine_users u
             WHERE u.primary_emailaddress IS NOT NULL
               AND TRIM(u.primary_emailaddress) <> ''
-              AND LOWER(TRIM(u.primary_emailaddress)) = ANY(%s)
+              AND LOWER(TRIM(u.primary_emailaddress)) = ANY(:agent_emails)
         ),
         brokerage_engine_transactions AS (
             SELECT
@@ -248,9 +245,7 @@ def fetch_transaction_summary_for_agents(db, agent_emails: list[str]):
     """
 
     try:
-        with db.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(query, (agent_emails,))
-            rows = cur.fetchall()
+        rows = db.execute(text(query), {"agent_emails": agent_emails}).mappings().all()
 
         return {
             row["normalized_email"]: {
@@ -263,7 +258,7 @@ def fetch_transaction_summary_for_agents(db, agent_emails: list[str]):
         raise HTTPException(status_code=500, detail=f"Transaction summary query failed: {str(e)}")
 
 
-def fetch_agent_by_email(db, email: str):
+def fetch_agent_by_email(db: Session, email: str):
     query = """
         SELECT
             u.display_name,
@@ -271,19 +266,18 @@ def fetch_agent_by_email(db, email: str):
             u.agenttags,
             u.qb_customerid
         FROM brokerage_engine_users u
-        WHERE LOWER(TRIM(u.primary_emailaddress)) = LOWER(TRIM(%s))
+        WHERE LOWER(TRIM(u.primary_emailaddress)) = LOWER(TRIM(:email))
         LIMIT 1
     """
 
     try:
-        with db.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(query, (email,))
-            return cur.fetchone()
+        row = db.execute(text(query), {"email": email}).mappings().first()
+        return dict(row) if row else None
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Agent lookup failed: {str(e)}")
 
 
-def fetch_agent_ar_balance(db, qb_customerid):
+def fetch_agent_ar_balance(db: Session, qb_customerid):
     if qb_customerid is None:
         return None
 
@@ -294,15 +288,12 @@ def fetch_agent_ar_balance(db, qb_customerid):
             MAX(COALESCE(abd.invoice_count, 0)) AS invoice_count,
             MAX(abd.updated_at) AS updated_at
         FROM ar_balance_details abd
-        WHERE abd.customer_id = %s
+        WHERE abd.customer_id = :qb_customerid
         GROUP BY abd.customer_id
     """
 
     try:
-        with db.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(query, (qb_customerid,))
-            row = cur.fetchone()
-
+        row = db.execute(text(query), {"qb_customerid": qb_customerid}).mappings().first()
         if not row:
             return None
 
@@ -317,7 +308,7 @@ def fetch_agent_ar_balance(db, qb_customerid):
     
 
 @router.get("/account-hold/summary", response_model=Response[AccountHoldSummaryData])
-async def get_account_hold_summary(db=Depends(get_db)):
+async def get_account_hold_summary(db: Session = Depends(get_db)):
     base_cte = get_base_cte()
 
     query = f"""
@@ -330,9 +321,7 @@ async def get_account_hold_summary(db=Depends(get_db)):
     """
 
     try:
-        with db.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(query)
-            row = cur.fetchone()
+        row = db.execute(text(query)).mappings().one()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Summary query failed: {str(e)}")
 
@@ -352,7 +341,7 @@ async def get_account_hold_listing(
     ar_balance: bool | None = Query(None),
     match_mode: Literal["and", "or"] = Query("and"),
     search: str | None = Query(None, max_length=100),
-    db=Depends(get_db),
+    db: Session = Depends(get_db),
 ):
     total_count, agent_rows = fetch_agent_listing_page_base(
         db=db,

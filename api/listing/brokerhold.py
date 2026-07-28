@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Query, Depends
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 from db import get_db
-from psycopg2.extras import RealDictCursor
 
 router = APIRouter()
 
@@ -8,7 +9,7 @@ router = APIRouter()
 def broker_hold_listing(
     buying_agent_name: list[str] = Query(default=None),
     page: int = Query(default=1, ge=1),
-    conn=Depends(get_db)
+    db: Session = Depends(get_db)
 ):
     page_size = 50
     offset = (page - 1) * page_size
@@ -25,7 +26,7 @@ def broker_hold_listing(
             for idx, agent in enumerate(buying_agent_name):
                 key = f"buying_agent_name_{idx}"
                 agent_conditions.append(
-                    f"be.buying_agent_name ILIKE '%%' || %({key})s || '%%'"
+                    f"be.buying_agent_name ILIKE '%' || :{key} || '%'"
                 )
                 params[key] = agent
 
@@ -40,7 +41,7 @@ def broker_hold_listing(
                 SELECT DISTINCT TRIM(agent_name) AS buying_agent_name
                 FROM brokerage_engine,
                 LATERAL UNNEST(STRING_TO_ARRAY(buying_agent_name, ',')) AS agent_name
-                WHERE tags ILIKE '%%brokerhold%%'
+                WHERE tags ILIKE '%brokerhold%'
                   AND buying_agent_name IS NOT NULL
             ),
 
@@ -57,7 +58,7 @@ def broker_hold_listing(
                 WHERE EXISTS (
                     SELECT 1
                     FROM broker_hold_agents bha
-                    WHERE be.buying_agent_name ILIKE '%%' || bha.buying_agent_name || '%%'
+                    WHERE be.buying_agent_name ILIKE '%' || bha.buying_agent_name || '%'
                 )
                 {agent_filter}
 
@@ -73,7 +74,7 @@ def broker_hold_listing(
                     be.tags
                 FROM brokerage_engine be
                 WHERE be.buying_agent_name IS NULL
-                  AND be.tags ILIKE '%%brokerhold%%'
+                  AND be.tags ILIKE '%brokerhold%'
                   {'AND FALSE' if buying_agent_name else ''}
             ),
 
@@ -81,45 +82,39 @@ def broker_hold_listing(
                 SELECT *, COUNT(*) OVER() AS total_count
                 FROM broker_hold_records
                 ORDER BY buying_agent_name, closed_date DESC
-                LIMIT %(page_size)s OFFSET %(offset)s
+                LIMIT :page_size OFFSET :offset
             )
 
             SELECT * FROM paginated
         """
 
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(query, params)
-            rows = cur.fetchall()
+        rows = db.execute(text(query), params).mappings().all()
 
-            total_count = rows[0]["total_count"] if rows else 0
+        total_count = rows[0]["total_count"] if rows else 0
 
-            data = [
-                {k: v for k, v in row.items() if k != "total_count"}
-                for row in rows
-            ]
+        data = [
+            {k: v for k, v in row.items() if k != "total_count"}
+            for row in rows
+        ]
 
-            cur.execute("""
-                SELECT COUNT(*) AS broker_hold_count
-                FROM brokerage_engine
-                WHERE tags ILIKE '%%brokerhold%%'
-            """)
-            broker_hold_count = cur.fetchone()["broker_hold_count"]
+        broker_hold_count = db.execute(text("""
+            SELECT COUNT(*) AS broker_hold_count
+            FROM brokerage_engine
+            WHERE tags ILIKE '%brokerhold%'
+        """)).scalar()
 
-            # get distinct buying agent names for multi-select dropdown
-            cur.execute("""
+        buying_agent_names = [
+            row["buying_agent_name"]
+            for row in db.execute(text("""
                 SELECT DISTINCT TRIM(agent_name) AS buying_agent_name
                 FROM brokerage_engine,
                 LATERAL UNNEST(STRING_TO_ARRAY(buying_agent_name, ',')) AS agent_name
-                WHERE tags ILIKE '%%brokerhold%%'
+                WHERE tags ILIKE '%brokerhold%'
                   AND buying_agent_name IS NOT NULL
                   AND TRIM(agent_name) <> ''
                 ORDER BY buying_agent_name
-            """)
-
-            buying_agent_names = [
-                row["buying_agent_name"]
-                for row in cur.fetchall()
-            ]
+            """)).mappings().all()
+        ]
 
         return {
             "broker_hold_count": broker_hold_count,

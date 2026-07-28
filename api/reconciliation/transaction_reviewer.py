@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Query, Depends
-from psycopg2.extras import RealDictCursor
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 from db import get_db
 
 router = APIRouter()
@@ -35,13 +36,13 @@ def transaction_reviewer_mapping(
     no_skyslope: bool = Query(default=False),
     track_status: str = Query(default=None),
     search: str = Query(default=None),
-    conn=Depends(get_db)
+    db: Session = Depends(get_db)
 ):
     limit = 50
     offset = (page - 1) * limit
 
     conditions = []
-    params = []
+    params = {}
 
     if no_skyslope:
         conditions.append("b.match_result = 'no_skyslope_record'")
@@ -49,22 +50,21 @@ def transaction_reviewer_mapping(
     if search:
         conditions.append("""
             (
-                CAST(b.saleguid AS TEXT) ILIKE %s
-                OR CAST(b.transactionid AS TEXT) ILIKE %s
-                OR b.propertyaddress ILIKE %s
-                OR b.skyslope_reviewer_name ILIKE %s
-                OR b.be_transaction_specialist ILIKE %s
+                CAST(b.saleguid AS TEXT) ILIKE :search
+                OR CAST(b.transactionid AS TEXT) ILIKE :search
+                OR b.propertyaddress ILIKE :search
+                OR b.skyslope_reviewer_name ILIKE :search
+                OR b.be_transaction_specialist ILIKE :search
             )
         """)
-        search_term = f"%{search}%"
-        params.extend([search_term, search_term, search_term, search_term, search_term])
+        params["search"] = f"%{search}%"
 
     if track_status:
         if track_status == "open":
             conditions.append("(t.track_status IS NULL OR t.track_status = 'open')")
         else:
-            conditions.append("t.track_status = %s")
-            params.append(track_status)
+            conditions.append("t.track_status = :track_status")
+            params["track_status"] = track_status
 
     where_clause = ""
     if conditions:
@@ -100,15 +100,11 @@ def transaction_reviewer_mapping(
             AND t.parameter = 'transaction_reviewer_mapping'
         {where_clause}
         ORDER BY b.saleguid
-        LIMIT %s OFFSET %s;
+        LIMIT :limit OFFSET :offset;
     """
 
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(count_query, params)
-        count = cur.fetchone()["count"]
-
-        cur.execute(data_query, params + [limit, offset])
-        rows = cur.fetchall()
+    count = db.execute(text(count_query), params).scalar()
+    rows = db.execute(text(data_query), {**params, "limit": limit, "offset": offset}).mappings().all()
 
     return {
         "summary": {
@@ -118,5 +114,5 @@ def transaction_reviewer_mapping(
         "page": page,
         "page_size": limit,
         "total_pages": (count + limit - 1) // limit,
-        "data": rows
-    }
+        "data": [dict(row) for row in rows]
+    }

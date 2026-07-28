@@ -1,31 +1,29 @@
 from typing import List, Dict, Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from psycopg2.extras import RealDictCursor, execute_batch, Json
+from psycopg2.extras import execute_batch, Json
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 from db import get_db
 from services.account_hold_helper import fetch_ar_balance
 
 router = APIRouter()
 
 
-def get_brokerage_engine_user_rows(conn) -> List[Dict[str, Any]]:
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(
-            """
-            SELECT
-                primary_emailaddress AS email
-            FROM brokerage_engine_users
-            WHERE primary_emailaddress IS NOT NULL
-              AND TRIM(primary_emailaddress) <> ''
-            """
-        )
-        return cur.fetchall()
+def get_brokerage_engine_user_rows(db: Session) -> List[Dict[str, Any]]:
+    rows = db.execute(text("""
+        SELECT
+            primary_emailaddress AS email
+        FROM brokerage_engine_users
+        WHERE primary_emailaddress IS NOT NULL
+          AND TRIM(primary_emailaddress) <> ''
+    """)).mappings().all()
+    return [dict(r) for r in rows]
 
 
-def clear_ar_balance_details(conn) -> None:
-    with conn.cursor() as cur:
-        cur.execute("DELETE FROM ar_balance_details")
-    conn.commit()
+def clear_ar_balance_details(db: Session) -> None:
+    db.execute(text("DELETE FROM ar_balance_details"))
+    db.commit()
 
 
 def build_customer_ar_rows(enriched_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -103,11 +101,11 @@ def insert_ar_balance_details(conn, rows: List[Dict[str, Any]]) -> int:
 
 
 @router.post("/sync-ar-balances")
-async def sync_ar_balances(db=Depends(get_db)):
-    conn = db
+async def sync_ar_balances(db: Session = Depends(get_db)):
+    raw_conn = db.connection().connection
 
     try:
-        user_rows = get_brokerage_engine_user_rows(conn)
+        user_rows = get_brokerage_engine_user_rows(db)
 
         if not user_rows:
             return {
@@ -118,11 +116,11 @@ async def sync_ar_balances(db=Depends(get_db)):
                 "total_open_balance": 0.0,
             }
 
-        enriched_rows = await fetch_ar_balance(user_rows, conn)
+        enriched_rows = await fetch_ar_balance(user_rows, raw_conn)
         customer_rows = build_customer_ar_rows(enriched_rows)
 
-        clear_ar_balance_details(conn)
-        inserted_count = insert_ar_balance_details(conn, customer_rows)
+        clear_ar_balance_details(db)
+        inserted_count = insert_ar_balance_details(raw_conn, customer_rows)
 
         total_open_balance = sum(
             float(row.get("total_open_balance") or 0)
@@ -140,7 +138,7 @@ async def sync_ar_balances(db=Depends(get_db)):
     except HTTPException:
         raise
     except Exception as exc:
-        conn.rollback()
+        db.rollback()
         raise HTTPException(
             status_code=500,
             detail={

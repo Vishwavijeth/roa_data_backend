@@ -1,6 +1,7 @@
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, Query, Depends, HTTPException, Response
-from psycopg2.extras import RealDictCursor
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 from db import get_db
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
@@ -240,7 +241,7 @@ SELECT
     rd.skyslope_title_company,
     rd.title_company_match
 FROM reconciliation_data rd
-WHERE rd.transactionid = %s
+WHERE rd.transactionid = :transaction_id
 """
 
 
@@ -571,42 +572,41 @@ def get_mismatched_parameters_from_row(row):
     ]
 
 
-def get_summary_counts(conn):
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("""
-            WITH grouped_summary AS (
-                SELECT DISTINCT ON (rd.saleguid)
-                    rd.saleguid,
-                    rd.be_source_table
-                FROM reconciliation_data rd
-                WHERE rd.saleguid IS NOT NULL
-                ORDER BY
-                    rd.saleguid,
-                    CASE
-                        WHEN LOWER(rd.be_source_table) = 'other income' THEN 0
-                        WHEN LOWER(rd.be_source_table) = 'sale income' THEN 1
-                        ELSE 2
-                    END,
-                    rd.transactionid
-            )
-            SELECT
-                (
-                    (SELECT COUNT(*) FROM grouped_summary)
-                    +
-                    (SELECT COUNT(*) FROM reconciliation_data rd2 WHERE rd2.saleguid IS NULL)
-                ) AS total_record,
-                COUNT(*) FILTER (
-                    WHERE LOWER(rd.be_source_table) = 'sale income' AND rd.saleguid IS NULL
-                ) AS saleincome_no_skyslopefileid,
-                COUNT(*) FILTER (
-                    WHERE LOWER(rd.be_source_table) = 'other income' AND rd.saleguid IS NULL
-                ) AS otherincome_no_skyslopefileid
+def get_summary_counts(db: Session):
+    row = db.execute(text("""
+        WITH grouped_summary AS (
+            SELECT DISTINCT ON (rd.saleguid)
+                rd.saleguid,
+                rd.be_source_table
             FROM reconciliation_data rd
-        """)
-        return cur.fetchone()
+            WHERE rd.saleguid IS NOT NULL
+            ORDER BY
+                rd.saleguid,
+                CASE
+                    WHEN LOWER(rd.be_source_table) = 'other income' THEN 0
+                    WHEN LOWER(rd.be_source_table) = 'sale income' THEN 1
+                    ELSE 2
+                END,
+                rd.transactionid
+        )
+        SELECT
+            (
+                (SELECT COUNT(*) FROM grouped_summary)
+                +
+                (SELECT COUNT(*) FROM reconciliation_data rd2 WHERE rd2.saleguid IS NULL)
+            ) AS total_record,
+            COUNT(*) FILTER (
+                WHERE LOWER(rd.be_source_table) = 'sale income' AND rd.saleguid IS NULL
+            ) AS saleincome_no_skyslopefileid,
+            COUNT(*) FILTER (
+                WHERE LOWER(rd.be_source_table) = 'other income' AND rd.saleguid IS NULL
+            ) AS otherincome_no_skyslopefileid
+        FROM reconciliation_data rd
+    """)).mappings().one()
+    return row
 
 
-def get_status_filters(conn):
+def get_status_filters(db: Session):
     query = """
         SELECT DISTINCT be_status AS status
         FROM reconciliation_data
@@ -614,38 +614,29 @@ def get_status_filters(conn):
           AND TRIM(be_status) <> ''
         ORDER BY status
     """
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(query)
-        rows = cur.fetchall()
-
+    rows = db.execute(text(query)).mappings().all()
     return [row["status"] for row in rows]
 
 
-def get_specialist_filters(conn):
+def get_specialist_filters(db: Session):
     query = """
         SELECT DISTINCT
             COALESCE(NULLIF(TRIM(be_transaction_specialist), ''), 'unassigned') AS specialist
         FROM reconciliation_data
         ORDER BY specialist
     """
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(query)
-        rows = cur.fetchall()
-
+    rows = db.execute(text(query)).mappings().all()
     return [row["specialist"] for row in rows]
 
 
-def get_reviewer_filters(conn):
+def get_reviewer_filters(db: Session):
     query = """
         SELECT DISTINCT
             COALESCE(NULLIF(TRIM(skyslope_reviewer), ''), 'unassigned') AS reviewer
         FROM reconciliation_data
         ORDER BY reviewer
     """
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(query)
-        rows = cur.fetchall()
-
+    rows = db.execute(text(query)).mappings().all()
     return [row["reviewer"] for row in rows]
 
 
@@ -665,7 +656,7 @@ def get_reconciliation_transactions(
     reviewer: Optional[List[str]] = Query(None),
     saleincome_no_skyslopefileid: Optional[bool] = Query(default=None),
     otherincome_no_skyslopefileid: Optional[bool] = Query(default=None),
-    conn=Depends(get_db),
+    db: Session = Depends(get_db),
 ):
     parsed_mismatch_params = parse_mismatch_params(mismatch_parameter)
     parsed_source_tables = parse_source_table_params(source_table)
@@ -716,20 +707,18 @@ def get_reconciliation_transactions(
             CASE WHEN cs.saleguid IS NULL THEN 1 ELSE 0 END,
             cs.saleguid NULLS LAST,
             cs.transactionid
-        LIMIT %s OFFSET %s;
+        LIMIT :limit OFFSET :offset;
     """
 
     offset = (page - 1) * limit
-
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(data_query, params + [limit, offset])
-        rows = cur.fetchall()
+    data_params = {**dict(params), "limit": limit, "offset": offset}
+    rows = db.execute(text(data_query), data_params).mappings().all()
 
     total_count = rows[0]["_total_count"] if rows else 0
-    summary = get_summary_counts(conn)
-    status_filters = get_status_filters(conn)
-    specialist_filters = get_specialist_filters(conn)
-    reviewer_filters = get_reviewer_filters(conn)
+    summary = get_summary_counts(db)
+    status_filters = get_status_filters(db)
+    specialist_filters = get_specialist_filters(db)
+    reviewer_filters = get_reviewer_filters(db)
 
     results = []
     for row in rows:
@@ -791,11 +780,10 @@ def get_reconciliation_transactions(
 @router.get("/reconciliation/transaction/{transaction_id}")
 def get_reconciliation_transaction_details(
     transaction_id: str,
-    conn=Depends(get_db),
+    db: Session = Depends(get_db),
 ):
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(DETAIL_QUERY, (transaction_id,))
-        row = cur.fetchone()
+    row_res = db.execute(text(DETAIL_QUERY), {"transaction_id": transaction_id}).mappings().first()
+    row = dict(row_res) if row_res else None
 
     if not row:
         raise HTTPException(status_code=404, detail="Transaction not found.")
@@ -884,7 +872,7 @@ def download_recon_data(
     reviewer: Optional[List[str]] = Query(None),
     saleincome_no_skyslopefileid: Optional[bool] = Query(default=None),
     otherincome_no_skyslopefileid: Optional[bool] = Query(default=None),
-    conn=Depends(get_db),
+    db: Session = Depends(get_db),
 ):
     parsed_mismatch_params = parse_mismatch_params(mismatch_parameter)
     parsed_source_tables = parse_source_table_params(source_table)
@@ -963,9 +951,8 @@ def download_recon_data(
             cs.transactionid
     """
 
-    with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-        cursor.execute(data_query, params)
-        data = cursor.fetchall()
+    rows = db.execute(text(data_query), params).mappings().all()
+    data = [dict(r) for r in rows]
 
     rows_to_export = []
     for record in data:

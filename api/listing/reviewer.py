@@ -3,12 +3,12 @@ import io
 import datetime
 import pandas as pd
 from fastapi.responses import Response
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 from db import get_db
-from services.state_office_mapping import STATE_OFFICES_MAP
 from services.reviewer_filters import apply_common_filters
-from psycopg2.extras import RealDictCursor
 from decimal import Decimal
-from openpyxl.styles import Font, Alignment
+from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
 
@@ -24,10 +24,8 @@ def reviewer_listing(
     status: list[str] | None = Query(default=None),
     reviewer: list[str] | None = Query(default=None),
     type_of_sale: list[str] | None = Query(default=None),
-    conn=Depends(get_db)
+    db: Session = Depends(get_db)
 ):
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-
     limit = 50
     offset = (page - 1) * limit
 
@@ -44,7 +42,7 @@ def reviewer_listing(
         WHERE 1=1
     """
 
-    params = []
+    params = {}
 
     base_query, params = apply_common_filters(
         query=base_query,
@@ -60,8 +58,7 @@ def reviewer_listing(
     )
 
     count_query = "SELECT COUNT(*) AS total_count " + base_query
-    cursor.execute(count_query, params)
-    total_count = cursor.fetchone()["total_count"]
+    total_count = db.execute(text(count_query), params).scalar()
 
     data_query = """
         SELECT
@@ -85,19 +82,18 @@ def reviewer_listing(
             s.dealtype AS type_of_sale
     """ + base_query + """
         ORDER BY s.saleguid
-        LIMIT %s OFFSET %s
+        LIMIT :limit OFFSET :offset
     """
 
-    data_params = params + [limit, offset]
+    data_params = {**params, "limit": limit, "offset": offset}
 
-    cursor.execute(data_query, data_params)
-    rows = cursor.fetchall()
+    rows = db.execute(text(data_query), data_params).mappings().all()
 
     return {
         "total_count": total_count,
         "page": page,
         "page_size": limit,
-        "data": rows
+        "data": [dict(r) for r in rows]
     }
 
 @router.get("/reviewer-listing/download")
@@ -109,10 +105,8 @@ def download_reviewer_listing(
     status: list[str] | None = Query(default=None),
     reviewer: list[str] | None = Query(default=None),
     type_of_sale: list[str] | None = Query(default=None),
-    conn=Depends(get_db)
+    db: Session = Depends(get_db)
 ):
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-
     base_query = """
         FROM sale s
         LEFT JOIN sale_property sp
@@ -126,7 +120,7 @@ def download_reviewer_listing(
         WHERE 1=1
     """
 
-    params = []
+    params = {}
 
     base_query, params = apply_common_filters(
         query=base_query,
@@ -165,8 +159,8 @@ def download_reviewer_listing(
         ORDER BY s.saleguid
     """
 
-    cursor.execute(data_query, params)
-    data = cursor.fetchall()
+    rows = db.execute(text(data_query), params).mappings().all()
+    data = [dict(r) for r in rows]
 
     columns_map = {
         "saleguid": "Sale GUID",

@@ -1,4 +1,5 @@
 from fastapi import HTTPException, APIRouter, Query, Depends, Response
+from sqlalchemy.orm import Session
 from db import get_db
 from services.loaders import get_be_sync
 import pandas as pd
@@ -11,8 +12,8 @@ import datetime
 router = APIRouter()
 
 @router.get("/brokerage_engine/sync_info")
-def brokerage_engine_sync_info(conn=Depends(get_db)):
-    return get_be_sync(conn)
+def brokerage_engine_sync_info(db: Session = Depends(get_db)):
+    return get_be_sync(db)
 
 @router.get("/brokerage_engine")
 def brokerage_engine(
@@ -24,9 +25,10 @@ def brokerage_engine(
     to_contract_date: str = Query(default=None),
     status: str = Query(default=None),
     search: str = Query(default=None),
-    conn=Depends(get_db)
+    db: Session = Depends(get_db)
 ):
-    cursor = conn.cursor()
+    raw_conn = db.connection().connection
+    cursor = raw_conn.cursor()
 
     limit = 50
     offset = (page - 1) * limit
@@ -122,8 +124,9 @@ def norm(x):
     return str(x or "").replace("\u00A0", "").strip().lower()
 
 @router.get("/brokerage_engine/detail")
-def brokerage_detail(transactionid: str, conn=Depends(get_db)):
-    cursor = conn.cursor()
+def brokerage_detail(transactionid: str, db: Session = Depends(get_db)):
+    raw_conn = db.connection().connection
+    cursor = raw_conn.cursor()
 
     query = """
         SELECT
@@ -240,8 +243,9 @@ def brokerage_detail(transactionid: str, conn=Depends(get_db)):
     }
 
 @router.get("/sale/noskyslopefileid/download")
-def download_sale_no_skyslopefileid(conn=Depends(get_db)):
-    cursor = conn.cursor()
+def download_sale_no_skyslopefileid(db: Session = Depends(get_db)):
+    raw_conn = db.connection().connection
+    cursor = raw_conn.cursor()
 
     query = """
         SELECT *

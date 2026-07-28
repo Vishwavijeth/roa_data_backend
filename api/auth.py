@@ -9,7 +9,7 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 from sqlalchemy import Column, Integer, String, DateTime
 from pwdlib import PasswordHash
-from database import get_db, Base
+from db import get_db, Base
 from models.roa_data_users import RoaDataUser
 
 load_dotenv()
