@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from math import ceil
 
 from pydantic import BaseModel
@@ -66,43 +66,77 @@ def get_commission_advances_summary(db: Session = Depends(get_db)):
 def get_commission_advances_listing(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=100),
+    status: Optional[str] = Query(
+        None,
+        description="Filter by status: Pending, Paid, Wage Garnishment"
+    ),
+    search: Optional[str] = Query(
+        None,
+        description="Search by agent name"
+    ),
     db: Session = Depends(get_db),
 ):
     try:
         offset = (page - 1) * page_size
 
-        total_count = db.execute(
-            text("""
-                SELECT COUNT(*) AS total_count
-                FROM (
-                    SELECT agent_name
-                    FROM commission_advances
-                    GROUP BY agent_name
-                ) grouped_agents
-            """)
-        ).scalar() or 0
+        allowed_statuses = {"Pending", "Paid", "Wage Garnishment"}
+        if status is not None and status not in allowed_statuses:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid status. Allowed values: {', '.join(sorted(allowed_statuses))}"
+            )
 
-        rows = db.execute(
-            text("""
-                SELECT
-                    agent_name,
-                    COALESCE(SUM(amount), 0) AS total_outstanding,
-                    COUNT(*) FILTER (WHERE status = 'Pending') AS pending_count,
-                    COUNT(*) FILTER (WHERE status = 'Paid') AS paid_count,
-                    COUNT(*) FILTER (WHERE status = 'Wage Garnishment') AS wage_garnishment_count
+        where_clauses = []
+        params: Dict[str, Any] = {
+            "limit": page_size,
+            "offset": offset,
+        }
+
+        if status:
+            where_clauses.append("status = :status")
+            params["status"] = status
+
+        if search and search.strip():
+            where_clauses.append("agent_name ILIKE :search")
+            params["search"] = f"%{search.strip()}%"
+
+        where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+        total_count_query = text(f"""
+            SELECT COUNT(*) AS total_count
+            FROM (
+                SELECT agent_name
                 FROM commission_advances
+                {where_sql}
                 GROUP BY agent_name
-                ORDER BY agent_name ASC
-                LIMIT :limit OFFSET :offset
-            """),
-            {"limit": page_size, "offset": offset},
-        ).mappings().all()
+            ) grouped_agents
+        """)
+
+        total_count = db.execute(total_count_query, params).scalar() or 0
+
+        listing_query = text(f"""
+            SELECT
+                agent_name,
+                COALESCE(SUM(amount) FILTER (
+                    WHERE status IN ('Pending', 'Wage Garnishment')
+                ), 0) AS total_outstanding,
+                COUNT(*) FILTER (WHERE status = 'Pending') AS pending_count,
+                COUNT(*) FILTER (WHERE status = 'Paid') AS paid_count,
+                COUNT(*) FILTER (WHERE status = 'Wage Garnishment') AS wage_garnishment_count
+            FROM commission_advances
+            {where_sql}
+            GROUP BY agent_name
+            ORDER BY total_outstanding DESC, agent_name ASC
+            LIMIT :limit OFFSET :offset
+        """)
+
+        rows = db.execute(listing_query, params).mappings().all()
 
         items = []
         for row in rows:
             items.append({
                 "agent_name": row["agent_name"],
-                "total_outstanding": int(row["total_outstanding"] or 0),
+                "total_outstanding": float(row["total_outstanding"] or 0),
                 "status_breakdown": {
                     "pending": row["pending_count"],
                     "paid": row["paid_count"],
@@ -126,6 +160,8 @@ def get_commission_advances_listing(
             has_next=has_next,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
