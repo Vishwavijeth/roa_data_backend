@@ -1,13 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Any, Dict, Optional
 from math import ceil
-
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-
 from common.pagination import PaginationData, PaginationResponseWithCount
-from common.response import Response
+from common.response import Response, FilterResponse
+from fastapi.responses import JSONResponse
 from db import get_db
 
 
@@ -61,6 +60,35 @@ def get_commission_advances_summary(db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/status-dropdown", response_model=FilterResponse)
+def get_commission_advance_status_dropdown(db: Session = Depends(get_db)):
+    try:
+        statuses = [
+            row["status"]
+            for row in db.execute(text("""
+                SELECT DISTINCT status
+                FROM commission_advances
+                WHERE status IS NOT NULL AND TRIM(status) <> ''
+                ORDER BY status ASC
+            """)).mappings().all()
+        ]
+
+        return FilterResponse(
+            success=True,
+            filters={
+                "status": statuses,
+            },
+        )
+
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "message": "Failed to fetch commission advance status dropdown data",
+                "details": [{"error": str(e)}],
+            },
+        )
 
 @router.get("/listing", response_model=PaginationResponseWithCount[Dict[str, Any]])
 def get_commission_advances_listing(
@@ -79,7 +107,7 @@ def get_commission_advances_listing(
     try:
         offset = (page - 1) * page_size
 
-        allowed_statuses = {"Pending", "Paid", "Wage Garnishment"}
+        allowed_statuses = {"Pending", "Paid", "Wage Garnishment", "Left ROA"}
         if status is not None and status not in allowed_statuses:
             raise HTTPException(
                 status_code=400,
@@ -115,18 +143,50 @@ def get_commission_advances_listing(
         total_count = db.execute(total_count_query, params).scalar() or 0
 
         listing_query = text(f"""
+            WITH filtered_data AS (
+                SELECT
+                    agent_name,
+                    status,
+                    amount
+                FROM commission_advances
+                {where_sql}
+            ),
+            agent_totals AS (
+                SELECT
+                    agent_name,
+                    COALESCE(
+                        SUM(amount) FILTER (
+                            WHERE status IN ('Pending', 'Wage Garnishment')
+                        ),
+                        0
+                    ) AS total_outstanding
+                FROM filtered_data
+                GROUP BY agent_name
+            ),
+            status_counts AS (
+                SELECT
+                    agent_name,
+                    status,
+                    COUNT(*) AS status_count
+                FROM filtered_data
+                WHERE status IS NOT NULL AND TRIM(status) <> ''
+                GROUP BY agent_name, status
+            ),
+            status_breakdowns AS (
+                SELECT
+                    agent_name,
+                    jsonb_object_agg(status, status_count ORDER BY status) AS status_breakdown
+                FROM status_counts
+                GROUP BY agent_name
+            )
             SELECT
-                agent_name,
-                COALESCE(SUM(amount) FILTER (
-                    WHERE status IN ('Pending', 'Wage Garnishment')
-                ), 0) AS total_outstanding,
-                COUNT(*) FILTER (WHERE status = 'Pending') AS pending_count,
-                COUNT(*) FILTER (WHERE status = 'Paid') AS paid_count,
-                COUNT(*) FILTER (WHERE status = 'Wage Garnishment') AS wage_garnishment_count
-            FROM commission_advances
-            {where_sql}
-            GROUP BY agent_name
-            ORDER BY total_outstanding DESC, agent_name ASC
+                at.agent_name,
+                at.total_outstanding,
+                COALESCE(sb.status_breakdown, '{{}}'::jsonb) AS status_breakdown
+            FROM agent_totals at
+            LEFT JOIN status_breakdowns sb
+                ON at.agent_name = sb.agent_name
+            ORDER BY at.total_outstanding DESC, at.agent_name ASC
             LIMIT :limit OFFSET :offset
         """)
 
@@ -137,11 +197,7 @@ def get_commission_advances_listing(
             items.append({
                 "agent_name": row["agent_name"],
                 "total_outstanding": float(row["total_outstanding"] or 0),
-                "status_breakdown": {
-                    "pending": row["pending_count"],
-                    "paid": row["paid_count"],
-                    "wage_garnishment": row["wage_garnishment_count"],
-                },
+                "status_breakdown": dict(row["status_breakdown"] or {}),
             })
 
         total_pages = max(1, ceil(total_count / page_size)) if total_count else 1
