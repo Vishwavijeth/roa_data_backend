@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Query, Depends
-from psycopg2.extras import RealDictCursor
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 from db import get_db
 from services.comparison import compare_names
 
@@ -42,33 +43,32 @@ def compare_title_company(
     no_skyslope: bool = Query(default=False),
     track_status: str = Query(default=None),
     search: str = Query(default=None),
-    conn=Depends(get_db)
+    db: Session = Depends(get_db)
 ):
     limit = 50
     offset = (page - 1) * limit
 
     conditions = []
-    params = []
+    params = {}
 
     if search:
         conditions.append("""
             (
-                CAST(b.saleguid AS TEXT) ILIKE %s
-                OR CAST(b.transactionid AS TEXT) ILIKE %s
-                OR b.propertyaddress ILIKE %s
-                OR b.skyslope_title_company ILIKE %s
-                OR b.be_title_company ILIKE %s
+                CAST(b.saleguid AS TEXT) ILIKE :search
+                OR CAST(b.transactionid AS TEXT) ILIKE :search
+                OR b.propertyaddress ILIKE :search
+                OR b.skyslope_title_company ILIKE :search
+                OR b.be_title_company ILIKE :search
             )
         """)
-        search_term = f"%{search}%"
-        params.extend([search_term, search_term, search_term, search_term, search_term])
+        params["search"] = f"%{search}%"
 
     if track_status:
         if track_status == "open":
             conditions.append("(t.track_status IS NULL OR t.track_status = 'open')")
         else:
-            conditions.append("t.track_status = %s")
-            params.append(track_status)
+            conditions.append("t.track_status = :track_status")
+            params["track_status"] = track_status
 
     where_clause = ""
     if conditions:
@@ -97,9 +97,7 @@ def compare_title_company(
         ORDER BY b.saleguid;
     """
 
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(data_query, params)
-        rows = cur.fetchall()
+    rows = db.execute(text(data_query), params).mappings().all()
 
     results = []
     match_count = 0

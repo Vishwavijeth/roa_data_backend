@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Query, Depends, Response
 from typing import Optional, List
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 from db import get_db
 from services.state_office_mapping import STATE_OFFICES_MAP
 from services.reviewer_filters import apply_common_filters
-from psycopg2.extras import RealDictCursor
 from openpyxl.styles import Font, Alignment
 from openpyxl.utils import get_column_letter
 import pandas as pd
@@ -21,7 +22,7 @@ def reviewer_dashboard(
     status: Optional[List[str]] = Query(None),
     reviewer: Optional[List[str]] = Query(None),
     type_of_sale: Optional[List[str]] = Query(None),
-    conn=Depends(get_db)
+    db: Session = Depends(get_db)
 ):
     query = """
     SELECT
@@ -79,7 +80,7 @@ def reviewer_dashboard(
     WHERE 1=1
     """
 
-    params = []
+    params = {}
 
     query, params = apply_common_filters(
         query=query,
@@ -101,9 +102,8 @@ def reviewer_dashboard(
     ORDER BY reviewer_full_name
     """
 
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(query, tuple(params))
-        rows = cur.fetchall()
+    rows = db.execute(text(query), params).mappings().all()
+    rows = [dict(r) for r in rows]
 
     summary = {
         "count": len(rows),
@@ -133,7 +133,7 @@ def download_reviewer_dashboard(
     status: Optional[List[str]] = Query(None),
     reviewer: Optional[List[str]] = Query(None),
     type_of_sale: Optional[List[str]] = Query(None),
-    conn=Depends(get_db)
+    db: Session = Depends(get_db)
 ):
     query = """
     SELECT
@@ -192,7 +192,7 @@ def download_reviewer_dashboard(
     WHERE 1=1
     """
 
-    params = []
+    params = {}
 
     query, params = apply_common_filters(
         query=query,
@@ -212,9 +212,8 @@ def download_reviewer_dashboard(
     ORDER BY reviewer_full_name
     """
 
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(query, tuple(params))
-        rows = cur.fetchall()
+    rows = db.execute(text(query), params).mappings().all()
+    rows = [dict(r) for r in rows]
 
     rows_to_export = []
     for row in rows:
@@ -304,7 +303,7 @@ def download_reviewer_dashboard(
 
 
 @router.get("/reviewers/filters")
-def reviewer_dashboard_filters(conn=Depends(get_db)):
+def reviewer_dashboard_filters(db: Session = Depends(get_db)):
     stage_query = """
         SELECT DISTINCT name
         FROM stage
@@ -348,21 +347,11 @@ def reviewer_dashboard_filters(conn=Depends(get_db)):
         ORDER BY dealtype
     """
 
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(stage_query)
-        stage_list = [row["name"] for row in cur.fetchall()]
-
-        cur.execute(state_query)
-        state_list = [row["state"] for row in cur.fetchall()]
-
-        cur.execute(status_query)
-        status_list = [row["status"] for row in cur.fetchall()]
-
-        cur.execute(reviewer_query)
-        reviewer_list = [row["reviewer_name"] for row in cur.fetchall()]
-
-        cur.execute(type_of_sale_query)
-        type_of_sale_list = [row["dealtype"] for row in cur.fetchall()]
+    stage_list = [row["name"] for row in db.execute(text(stage_query)).mappings().all()]
+    state_list = [row["state"] for row in db.execute(text(state_query)).mappings().all()]
+    status_list = [row["status"] for row in db.execute(text(status_query)).mappings().all()]
+    reviewer_list = [row["reviewer_name"] for row in db.execute(text(reviewer_query)).mappings().all()]
+    type_of_sale_list = [row["dealtype"] for row in db.execute(text(type_of_sale_query)).mappings().all()]
 
     return {
         "stage_list": stage_list,
@@ -381,7 +370,7 @@ def download_unassigned_reviewer_state_report(
     status: Optional[List[str]] = Query(None),
     reviewer: Optional[List[str]] = Query(None),
     type_of_sale: Optional[List[str]] = Query(None),
-    conn=Depends(get_db)
+    db: Session = Depends(get_db)
 ):
     query = """
     SELECT
@@ -441,7 +430,7 @@ def download_unassigned_reviewer_state_report(
       AND s.reviewerguid IS NULL
     """
 
-    params = []
+    params = {}
 
     query, params = apply_common_filters(
         query=query,
@@ -461,9 +450,8 @@ def download_unassigned_reviewer_state_report(
     ORDER BY COALESCE(NULLIF(UPPER(TRIM(sp.state)), ''), 'UNKNOWN')
     """
 
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(query, tuple(params))
-        rows = cur.fetchall()
+    rows = db.execute(text(query), params).mappings().all()
+    rows = [dict(r) for r in rows]
 
     applied_filters = []
 

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Query, Depends
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 from db import get_db
-from psycopg2.extras import RealDictCursor
 
 router = APIRouter()
 
@@ -60,13 +61,13 @@ def listing_price(
     no_skyslope: bool = Query(default=False),
     track_status: str = Query(default=None),
     search: str = Query(default=None),
-    conn=Depends(get_db)
+    db: Session = Depends(get_db)
 ):
     limit = 50
     offset = (page - 1) * limit
 
     conditions = []
-    params = []
+    params = {}
 
     if mismatch:
         conditions.append("b.match_result = 'mismatch'")
@@ -77,20 +78,19 @@ def listing_price(
     if search:
         conditions.append("""
             (
-                CAST(b.saleguid AS TEXT) ILIKE %s
-                OR CAST(b.transactionid AS TEXT) ILIKE %s
-                OR b.propertyaddress ILIKE %s
+                CAST(b.saleguid AS TEXT) ILIKE :search
+                OR CAST(b.transactionid AS TEXT) ILIKE :search
+                OR b.propertyaddress ILIKE :search
             )
         """)
-        search_term = f"%{search}%"
-        params.extend([search_term, search_term, search_term])
+        params["search"] = f"%{search}%"
 
     if track_status:
         if track_status == "open":
             conditions.append("(t.track_status IS NULL OR t.track_status = 'open')")
         else:
-            conditions.append("t.track_status = %s")
-            params.append(track_status)
+            conditions.append("t.track_status = :track_status")
+            params["track_status"] = track_status
 
     where_clause = ""
     if conditions:
@@ -135,18 +135,12 @@ def listing_price(
             AND t.parameter = 'listing_price'
         {where_clause}
         ORDER BY b.saleguid
-        LIMIT %s OFFSET %s;
+        LIMIT :limit OFFSET :offset;
     """
 
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(summary_query)
-        summary = cur.fetchone()
-
-        cur.execute(count_query, params)
-        count = cur.fetchone()["count"]
-
-        cur.execute(data_query, params + [limit, offset])
-        rows = cur.fetchall()
+    summary = db.execute(text(summary_query)).mappings().one()
+    count = db.execute(text(count_query), params).scalar()
+    rows = db.execute(text(data_query), {**params, "limit": limit, "offset": offset}).mappings().all()
 
     match_count = summary["match_count"] or 0
     mismatch_count = summary["mismatch_count"] or 0
@@ -166,5 +160,5 @@ def listing_price(
         "page": page,
         "page_size": limit,
         "total_pages": (count + limit - 1) // limit,
-        "data": rows
+        "data": [dict(row) for row in rows]
     }

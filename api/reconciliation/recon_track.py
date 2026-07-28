@@ -1,4 +1,6 @@
 from fastapi import APIRouter, Query, Body, Depends
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 from db import get_db
 from pydantic import BaseModel
 from typing import Optional
@@ -18,42 +20,39 @@ def track_reconciliation(
     transaction_id: UUID = Query(...),
     parameter: str = Query(...),
     req: ReconTrackBody = Body(...),
-    conn=Depends(get_db)
+    db: Session = Depends(get_db)
 ):
     try:
-        query = """
-            INSERT INTO public.reconciliation_tracking (
-                transaction_id,
-                parameter,
-                track_status,
-                assigned_to,
-                notes,
-                updated_at,
-                updated_by
-            )
-            VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP, %s)
-            ON CONFLICT (transaction_id, parameter)
-            DO UPDATE SET
-                track_status = EXCLUDED.track_status,
-                assigned_to = EXCLUDED.assigned_to,
-                notes = EXCLUDED.notes,
-                updated_at = CURRENT_TIMESTAMP,
-                updated_by = EXCLUDED.updated_by;
-        """
-
-        with conn.cursor() as cur:
-            cur.execute(
-                query,
-                (
-                    str(transaction_id),
+        db.execute(
+            text("""
+                INSERT INTO public.reconciliation_tracking (
+                    transaction_id,
                     parameter,
-                    req.track_status,
-                    req.assigned_to,
-                    req.notes,
-                    req.updated_by
+                    track_status,
+                    assigned_to,
+                    notes,
+                    updated_at,
+                    updated_by
                 )
-            )
-            conn.commit()
+                VALUES (:transaction_id, :parameter, :track_status, :assigned_to, :notes, CURRENT_TIMESTAMP, :updated_by)
+                ON CONFLICT (transaction_id, parameter)
+                DO UPDATE SET
+                    track_status = EXCLUDED.track_status,
+                    assigned_to = EXCLUDED.assigned_to,
+                    notes = EXCLUDED.notes,
+                    updated_at = CURRENT_TIMESTAMP,
+                    updated_by = EXCLUDED.updated_by;
+            """),
+            {
+                "transaction_id": str(transaction_id),
+                "parameter": parameter,
+                "track_status": req.track_status,
+                "assigned_to": req.assigned_to,
+                "notes": req.notes,
+                "updated_by": req.updated_by,
+            }
+        )
+        db.commit()
 
         return {
             "status": "success",
@@ -61,7 +60,7 @@ def track_reconciliation(
         }
 
     except Exception as e:
-        conn.rollback()
+        db.rollback()
         return {
             "status": "error",
             "message": str(e)

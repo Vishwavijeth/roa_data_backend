@@ -1,83 +1,62 @@
-from db import get_conn
 from datetime import timezone
-from zoneinfo import ZoneInfo    
+from zoneinfo import ZoneInfo
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 IST = ZoneInfo("Asia/Kolkata")
 
-def get_be_sync(conn=None):
-    should_close = False
-    if conn is None:
-        conn = get_conn()
-        should_close = True
-    cur = conn.cursor()
+def get_be_sync(db: Session = None):
+    if db is None:
+        return None
 
-    try:
-        cur.execute("""
-            SELECT sync_date, sync_timestamp
-            FROM brokerage_sync
-            ORDER BY sync_timestamp DESC
-            LIMIT 1
-        """)
+    row = db.execute(text("""
+        SELECT sync_date, sync_timestamp
+        FROM brokerage_sync
+        ORDER BY sync_timestamp DESC
+        LIMIT 1
+    """)).mappings().first()
 
-        row = cur.fetchone()
+    if not row:
+        return None
 
-        if not row:
-            return None
+    sync_date = row["sync_date"]
+    sync_ts = row["sync_timestamp"]
+    sync_ts_str = None
 
-        sync_date, sync_ts = row
+    if sync_ts:
+        sync_ts = sync_ts.replace(tzinfo=timezone.utc)
+        sync_ts = sync_ts.astimezone(IST)
+        sync_ts_str = sync_ts.strftime("%H:%M:%S")
 
-        sync_ts_str = None
+    return {
+        "sync_date": sync_date,
+        "sync_timestamp": sync_ts_str
+    }
 
-        if sync_ts:
-            sync_ts = sync_ts.replace(tzinfo=timezone.utc)
-            sync_ts = sync_ts.astimezone(IST)
-            sync_ts_str = sync_ts.strftime("%H:%M:%S")
+def get_skyslope_sync(db: Session = None):
+    if db is None:
+        return None
 
-        return {
-            "sync_date": sync_date,
-            "sync_timestamp": sync_ts_str
-        }
+    row = db.execute(text("""
+        SELECT sync_date, sync_timestamp
+        FROM skyslope_sync
+        ORDER BY sync_timestamp DESC
+        LIMIT 1
+    """)).mappings().first()
 
-    finally:
-        cur.close()
-        if should_close:
-            conn.close()
+    if not row:
+        return None
 
-def get_skyslope_sync(conn=None):
-    should_close = False
-    if conn is None:
-        conn = get_conn()
-        should_close = True
-    cur = conn.cursor()
+    sync_date = row["sync_date"]
+    sync_ts = row["sync_timestamp"]
+    sync_ts_str = None
 
-    try:
-        cur.execute("""
-            SELECT sync_date, sync_timestamp
-            FROM skyslope_sync
-            ORDER BY sync_timestamp DESC
-            LIMIT 1
-        """)
+    if sync_ts:
+        sync_ts = sync_ts.replace(tzinfo=timezone.utc)
+        sync_ts = sync_ts.astimezone(IST)
+        sync_ts_str = sync_ts.strftime("%H:%M:%S")
 
-        row = cur.fetchone()
-
-        if not row:
-            return None
-
-        sync_date, sync_ts = row
-
-        sync_ts_str = None
-
-        if sync_ts:
-            sync_ts = sync_ts.replace(tzinfo=timezone.utc)
-            sync_ts = sync_ts.astimezone(IST)
-            sync_ts_str = sync_ts.strftime("%H:%M:%S")
-
-        return {
-            "sync_date": sync_date,
-            "sync_timestamp": sync_ts_str
-        }
-
-    finally:
-        cur.close()
-        if should_close:
-            conn.close()
+    return {
+        "sync_date": sync_date,
+        "sync_timestamp": sync_ts_str
+    }

@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from typing import Optional
 from psycopg2.extras import execute_batch
+from sqlalchemy.orm import Session
+from sqlalchemy import text
 from db import get_db
 
 router = APIRouter()
@@ -159,8 +161,9 @@ def build_other_income_row(row: dict):
 
 
 @router.post("/sync/other-income")
-async def sync_other_income(conn=Depends(get_db)):
-    cur = conn.cursor()
+async def sync_other_income(db: Session = Depends(get_db)):
+    raw_conn = db.connection().connection
+    cur = raw_conn.cursor()
 
     status = "failed"
     error_message = None
@@ -184,25 +187,25 @@ async def sync_other_income(conn=Depends(get_db)):
 
                 if len(batch) >= BATCH_SIZE:
                     execute_batch(cur, OTHER_INCOME_INSERT_SQL, batch, page_size=BATCH_SIZE)
-                    conn.commit()
+                    raw_conn.commit()
 
                     total_upserted += len(batch)
                     batch = []
 
             except Exception as e:
-                conn.rollback()
+                raw_conn.rollback()
                 errors.append(f"Row {row_num}: {e}")
                 batch = []
 
         if batch:
             try:
                 execute_batch(cur, OTHER_INCOME_INSERT_SQL, batch, page_size=BATCH_SIZE)
-                conn.commit()
+                raw_conn.commit()
 
                 total_upserted += len(batch)
 
             except Exception as e:
-                conn.rollback()
+                raw_conn.rollback()
                 errors.append(f"Final batch error: {e}")
 
         if errors:
@@ -212,7 +215,7 @@ async def sync_other_income(conn=Depends(get_db)):
             status = "success"
 
     except Exception as e:
-        conn.rollback()
+        raw_conn.rollback()
         traceback.print_exc()
 
         status = "failed"
@@ -237,10 +240,10 @@ async def sync_other_income(conn=Depends(get_db)):
                 error_message
             ))
 
-            conn.commit()
+            raw_conn.commit()
 
         except Exception:
-            conn.rollback()
+            raw_conn.rollback()
 
         cur.close()
 

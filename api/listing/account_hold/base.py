@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import Any
+from uuid import UUID
 
 # ----------- Summary -----------
 class AccountHoldSummaryData(BaseModel):
@@ -32,11 +33,11 @@ class ARBalanceItem(BaseModel):
 
 
 class TransactionItem(BaseModel):
-    transactionid: str | int | None = None
+    transactionid: UUID | None = None
     property_address: str | None = None
     source_table: str | None = None
     status: str | None = None
-    skyslope_url: str = None
+    skyslope_url: str | None = None
     be_transaction_specialist: str | None = None
     skyslope_reviewer: str | None = None
     transaction_flags: list[str] = Field(default_factory=list)

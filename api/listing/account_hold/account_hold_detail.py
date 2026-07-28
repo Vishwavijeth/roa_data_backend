@@ -1,6 +1,7 @@
 from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
-from psycopg2.extras import RealDictCursor
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 from db import get_db
 from common.response import Response
 from api.listing.account_hold.base import (
@@ -26,14 +27,14 @@ def has_account_hold_tag(agenttags):
     }
 
 
-def fetch_agent_detail_transactions(db, email: str):
+def fetch_agent_detail_transactions(db: Session, email: str):
     query = """
         WITH target_agent AS (
             SELECT
                 LOWER(TRIM(u.primary_emailaddress)) AS normalized_email,
                 LOWER(TRIM(u.display_name)) AS normalized_name
             FROM brokerage_engine_users u
-            WHERE LOWER(TRIM(u.primary_emailaddress)) = LOWER(TRIM(%s))
+            WHERE LOWER(TRIM(u.primary_emailaddress)) = LOWER(TRIM(:email))
             LIMIT 1
         ),
         brokerage_engine_transactions AS (
@@ -144,9 +145,8 @@ def fetch_agent_detail_transactions(db, email: str):
     """
 
     try:
-        with db.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(query, (email,))
-            return cur.fetchall()
+        rows = db.execute(text(query), {"email": email}).mappings().all()
+        return [dict(r) for r in rows]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Detail transaction query failed: {str(e)}")
 
@@ -208,23 +208,22 @@ def build_mismatch_details(row, transaction_flags):
 
 
 @router.get("/account-hold/detail/{customer_id}", response_model=Response[AccountHoldDetailData])
-async def get_account_hold_detail(customer_id: int, db=Depends(get_db)):
+async def get_account_hold_detail(customer_id: int, db: Session = Depends(get_db)):
     try:
-        with db.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
+        agent_row = db.execute(
+            text("""
                 SELECT
                     u.display_name,
                     u.primary_emailaddress,
                     u.qb_customerid,
                     u.agenttags
                 FROM brokerage_engine_users u
-                WHERE u.qb_customerid = %s
+                WHERE u.qb_customerid = :customer_id
                 LIMIT 1
-                """,
-                (customer_id,),
-            )
-            agent = cur.fetchone()
+            """),
+            {"customer_id": customer_id},
+        ).mappings().first()
+        agent = dict(agent_row) if agent_row else None
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Agent lookup failed: {str(e)}")
 
@@ -237,18 +236,17 @@ async def get_account_hold_detail(customer_id: int, db=Depends(get_db)):
     has_ar_balance = False
 
     try:
-        with db.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
+        row_res = db.execute(
+            text("""
                 SELECT abd.raw_invoice, abd.updated_at
                 FROM ar_balance_details abd
-                WHERE abd.customer_id = %s
+                WHERE abd.customer_id = :customer_id
                 ORDER BY abd.updated_at DESC NULLS LAST
                 LIMIT 1
-                """,
-                (customer_id,),
-            )
-            row = cur.fetchone()
+            """),
+            {"customer_id": customer_id},
+        ).mappings().first()
+        row = dict(row_res) if row_res else None
 
         if row and row.get("raw_invoice"):
             raw_invoice = row["raw_invoice"]

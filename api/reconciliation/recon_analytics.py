@@ -1,6 +1,7 @@
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, Query, Depends
-from psycopg2.extras import RealDictCursor
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 from db import get_db
 
 router = APIRouter()
@@ -14,39 +15,39 @@ def build_analytics_where_clause(
     status: Optional[List[str]] = None,
 ):
     conditions = []
-    params = []
+    params = {}
 
     if from_close_date:
-        conditions.append("rd.be_close_date >= CAST(%s AS DATE)")
-        params.append(from_close_date)
+        conditions.append("rd.be_close_date >= CAST(:from_close_date AS DATE)")
+        params["from_close_date"] = from_close_date
 
     if to_close_date:
-        conditions.append("rd.be_close_date <= CAST(%s AS DATE)")
-        params.append(to_close_date)
+        conditions.append("rd.be_close_date <= CAST(:to_close_date AS DATE)")
+        params["to_close_date"] = to_close_date
 
     if transaction_specialist:
         values = [s.strip().lower() for s in transaction_specialist if s and s.strip()]
         if values:
             conditions.append(
-                "LOWER(COALESCE(NULLIF(TRIM(rd.be_transaction_specialist), ''), 'unassigned')) = ANY(%s)"
+                "LOWER(COALESCE(NULLIF(TRIM(rd.be_transaction_specialist), ''), 'unassigned')) = ANY(:spec_values)"
             )
-            params.append(values)
+            params["spec_values"] = values
 
     if reviewer:
         values = [r.strip().lower() for r in reviewer if r and r.strip()]
         if values:
             conditions.append(
-                "LOWER(COALESCE(NULLIF(TRIM(rd.skyslope_reviewer), ''), 'unassigned')) = ANY(%s)"
+                "LOWER(COALESCE(NULLIF(TRIM(rd.skyslope_reviewer), ''), 'unassigned')) = ANY(:rev_values)"
             )
-            params.append(values)
+            params["rev_values"] = values
 
     if status:
         values = [s.strip().lower() for s in status if s and s.strip()]
         if values:
             conditions.append(
-                "LOWER(COALESCE(NULLIF(TRIM(rd.be_status), ''), 'unassigned')) = ANY(%s)"
+                "LOWER(COALESCE(NULLIF(TRIM(rd.be_status), ''), 'unassigned')) = ANY(:stat_values)"
             )
-            params.append(values)
+            params["stat_values"] = values
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
     return where_clause, params
@@ -59,7 +60,7 @@ def get_reconciliation_analytics(
     transaction_specialist: Optional[List[str]] = Query(None),
     reviewer: Optional[List[str]] = Query(None),
     status: Optional[List[str]] = Query(None),
-    conn=Depends(get_db),
+    db: Session = Depends(get_db),
 ):
     where_clause, params = build_analytics_where_clause(
         from_close_date=from_close_date,
@@ -184,24 +185,13 @@ def get_reconciliation_analytics(
         ORDER BY status
     """
 
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(overview_query, params)
-        overview_row = cur.fetchone()
+    overview_row = db.execute(text(overview_query), params).mappings().one()
+    status_distribution_rows = db.execute(text(status_distribution_query), params).mappings().all()
+    parameter_row = db.execute(text(parameter_breakdown_query), params).mappings().one()
 
-        cur.execute(status_distribution_query, params)
-        status_distribution_rows = cur.fetchall()
-
-        cur.execute(parameter_breakdown_query, params)
-        parameter_row = cur.fetchone()
-
-        cur.execute(specialist_filters_query)
-        specialist_filters_rows = cur.fetchall()
-
-        cur.execute(reviewer_filters_query)
-        reviewer_filters_rows = cur.fetchall()
-
-        cur.execute(status_filters_query)
-        status_filters_rows = cur.fetchall()
+    specialist_filters_rows = db.execute(text(specialist_filters_query)).mappings().all()
+    reviewer_filters_rows = db.execute(text(reviewer_filters_query)).mappings().all()
+    status_filters_rows = db.execute(text(status_filters_query)).mappings().all()
 
     specialist_filters = [row["transaction_specialist"] for row in specialist_filters_rows]
     reviewer_filters = [row["reviewer"] for row in reviewer_filters_rows]

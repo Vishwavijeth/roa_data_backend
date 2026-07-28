@@ -296,8 +296,11 @@ def build_reconciliation_data_row(row: dict) -> tuple:
     )
 
 
+from sqlalchemy.orm import Session
+
 @router.post("/reconciliation/data/populate")
-def populate_reconciliation_data(conn=Depends(get_db)):
+def populate_reconciliation_data(db: Session = Depends(get_db)):
+    conn = db.connection().connection
     select_query = f"""
         {RECONCILIATION_DATA_BASE_QUERY}
         ORDER BY transactionid

@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Query, Depends, Response
+from sqlalchemy.orm import Session
 from db import get_db
 from services.loaders import get_skyslope_sync
 import io
@@ -113,16 +114,14 @@ def apply_skyslope_filters(
 
 
 @router.get("/skyslope/sync_info")
-def skyslope_sync_info(conn=Depends(get_db)):
-    sync_info = get_skyslope_sync(conn)
-    return {
-        "sync_info": sync_info,
-    }
+def skyslope_sync_info(db: Session = Depends(get_db)):
+    return get_skyslope_sync(db)
 
 
 @router.get("/skyslope-listing-filters", response_model=FilterResponse)
-def skyslope_listing_filters(conn=Depends(get_db)):
-    cursor = conn.cursor()
+def skyslope_listing_filters(db: Session = Depends(get_db)):
+    raw_conn = db.connection().connection
+    cursor = raw_conn.cursor()
 
     status_query = """
         SELECT DISTINCT TRIM(status) AS status
@@ -178,9 +177,10 @@ def skyslope_api(
     stage: Optional[List[str]] = Query(default=None),
     search: Optional[str] = Query(default=None),
     not_in_be: bool = Query(default=False),
-    conn=Depends(get_db)
+    db: Session = Depends(get_db)
 ):
-    cursor = conn.cursor()
+    raw_conn = db.connection().connection
+    cursor = raw_conn.cursor()
 
     limit = 50
     offset = (page - 1) * limit
@@ -316,8 +316,9 @@ def skyslope_api(
 
 
 @router.get("/skyslope/detail")
-def skyslope_detail(saleguid: str, conn=Depends(get_db)):
-    cursor = conn.cursor()
+def skyslope_detail(saleguid: str, db: Session = Depends(get_db)):
+    raw_conn = db.connection().connection
+    cursor = raw_conn.cursor()
 
     skyslope_query = """
         SELECT
@@ -490,9 +491,10 @@ def skyslope_download(
     stage: Optional[List[str]] = Query(default=None),
     search: Optional[str] = Query(default=None),
     not_in_be: bool = Query(default=False),
-    conn=Depends(get_db)
+    db: Session = Depends(get_db)
 ):
-    cursor = conn.cursor()
+    raw_conn = db.connection().connection
+    cursor = raw_conn.cursor()
 
     sale_base_filter = """
         FROM sale s

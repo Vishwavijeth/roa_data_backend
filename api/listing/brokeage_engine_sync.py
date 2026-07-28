@@ -2,6 +2,8 @@ from fastapi import APIRouter, Depends
 import csv, io, httpx, os
 from datetime import timezone
 from zoneinfo import ZoneInfo
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 from db import get_db
 from datetime import datetime
 from services.be_sync_helpers import build_row_values, INSERT_SQL
@@ -13,8 +15,9 @@ BE_CSV_URL = os.getenv("BE_CSV_URL")
 
 
 @router.post("/sync/brokerage-engine")
-async def sync_brokerage_engine(conn=Depends(get_db)):
-    cur = conn.cursor()
+async def sync_brokerage_engine(db: Session = Depends(get_db)):
+    raw_conn = db.connection().connection
+    cur = raw_conn.cursor()
 
     status = "failed"
     error_message = None
@@ -22,7 +25,6 @@ async def sync_brokerage_engine(conn=Depends(get_db)):
     errors = []
 
     try:
-        # fetch CSV
         async with httpx.AsyncClient(timeout=120.0) as client:
             response = await client.get(BE_CSV_URL)
             response.raise_for_status()
@@ -30,36 +32,33 @@ async def sync_brokerage_engine(conn=Depends(get_db)):
         reader = csv.DictReader(io.StringIO(response.text))
         batch = []
 
-        # process CSV
         for row_num, row in enumerate(reader, start=1):
             try:
                 batch.append(build_row_values(row))
 
                 if len(batch) >= BATCH_SIZE:
                     cur.executemany(INSERT_SQL, batch)
-                    conn.commit()
+                    raw_conn.commit()
 
                     total_upserted += len(batch)
                     batch = []
 
             except Exception as e:
-                conn.rollback()
+                raw_conn.rollback()
                 errors.append(f"Row {row_num}: {e}")
                 batch = []
 
-        # flush remaining batch
         if batch:
             try:
                 cur.executemany(INSERT_SQL, batch)
-                conn.commit()
+                raw_conn.commit()
 
                 total_upserted += len(batch)
 
             except Exception as e:
-                conn.rollback()
+                raw_conn.rollback()
                 errors.append(f"Final batch error: {e}")
 
-        # final status
         if errors:
             status = "failed"
             error_message = "\n".join(errors)
@@ -67,7 +66,7 @@ async def sync_brokerage_engine(conn=Depends(get_db)):
             status = "success"
 
     except Exception as e:
-        conn.rollback()
+        raw_conn.rollback()
 
         status = "failed"
         error_message = str(e)
@@ -91,10 +90,10 @@ async def sync_brokerage_engine(conn=Depends(get_db)):
                 error_message
             ))
 
-            conn.commit()
+            raw_conn.commit()
 
         except Exception:
-            conn.rollback()
+            raw_conn.rollback()
 
         cur.close()
 
@@ -105,36 +104,30 @@ async def sync_brokerage_engine(conn=Depends(get_db)):
     }
 
 @router.get("/brokerage_sync_logs")
-def get_brokerage_sync_logs(conn=Depends(get_db)):
-    cur = conn.cursor()
-
+def get_brokerage_sync_logs(db: Session = Depends(get_db)):
     try:
-        cur.execute("""
+        rows = db.execute(text("""
             SELECT 
                 sync_date,
                 sync_timestamp,
                 status
             FROM brokerage_sync
             ORDER BY sync_timestamp DESC
-        """)
-
-        rows = cur.fetchall()
+        """)).mappings().all()
 
         result = []
-
         ist_timezone = ZoneInfo("Asia/Kolkata")
 
         for row in rows:
-            sync_date, sync_timestamp, status = row
+            sync_date = row["sync_date"]
+            sync_timestamp = row["sync_timestamp"]
+            status = row["status"]
 
             sync_time = None
 
             if sync_timestamp:
-                # UTC -> IST
                 utc_time = sync_timestamp.replace(tzinfo=timezone.utc)
                 ist_time = utc_time.astimezone(ist_timezone)
-
-                # only time
                 sync_time = ist_time.strftime("%H:%M:%S")
 
             result.append({
@@ -152,6 +145,3 @@ def get_brokerage_sync_logs(conn=Depends(get_db)):
         return {
             "error": str(e)
         }
-
-    finally:
-        cur.close()

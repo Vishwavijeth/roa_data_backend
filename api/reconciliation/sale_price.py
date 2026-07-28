@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Query, Depends
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 from db import get_db
-from psycopg2.extras import RealDictCursor
 
 router = APIRouter()
 
@@ -114,7 +115,7 @@ def sale_price(
     otherincome_no_skyslopefileid: bool = Query(default=False),
     track_status: str = Query(default=None),
     search: str = Query(default=None),
-    conn=Depends(get_db)
+    db: Session = Depends(get_db)
 ):
     limit = 50
     offset = (page - 1) * limit
@@ -139,105 +140,21 @@ def sale_price(
         FROM base;
     """
 
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(summary_query)
-        summary = cur.fetchone()
+    summary = db.execute(text(summary_query)).mappings().one()
 
-        if missing_mode:
-            conditions = []
-            params = []
-
-            if saleincome_no_skyslopefileid and not otherincome_no_skyslopefileid:
-                conditions.append("m.source_table = 'brokerage_engine'")
-
-            if otherincome_no_skyslopefileid and not saleincome_no_skyslopefileid:
-                conditions.append("m.source_table = 'otherincome_transactions'")
-
-            if search:
-                conditions.append("m.propertyaddress ILIKE %s")
-                search_term = f"%{search}%"
-                params.append(search_term)
-
-            where_clause = ""
-            if conditions:
-                where_clause = "WHERE " + " AND ".join(conditions)
-
-            count_query = f"""
-                {SALE_PRICE_BASE_QUERY}
-                SELECT COUNT(*) AS count
-                FROM missing_skyslopefileid_base m
-                {where_clause};
-            """
-
-            data_query = f"""
-                {SALE_PRICE_BASE_QUERY}
-                SELECT
-                    m.source_table,
-                    m.saleguid,
-                    m.transactionid,
-                    m.propertyaddress,
-                    m.skyslope_sale_price,
-                    m.be_sale_price,
-                    m.match_result,
-                    NULL::text AS status,
-                    NULL::text AS assigned_to,
-                    NULL::text AS notes,
-                    NULL::timestamp AS updated_at,
-                    NULL::text AS updated_by
-                FROM missing_skyslopefileid_base m
-                {where_clause}
-                ORDER BY m.transactionid
-                LIMIT %s OFFSET %s;
-            """
-
-            cur.execute(count_query, params)
-            count = cur.fetchone()["count"]
-
-            cur.execute(data_query, params + [limit, offset])
-            rows = cur.fetchall()
-
-            match_count = summary["match_count"] or 0
-            mismatch_count = summary["mismatch_count"] or 0
-            comparison_total = match_count + mismatch_count
-
-            match_percentage = round((match_count / comparison_total) * 100, 2) if comparison_total else 0
-            mismatch_percentage = round((mismatch_count / comparison_total) * 100, 2) if comparison_total else 0
-
-            return {
-                "summary": {
-                    "count": count,
-                    "match_percentage": match_percentage,
-                    "mismatch_percentage": mismatch_percentage,
-                    "mismatch_count": mismatch_count,
-                    "saleincome_no_skyslopefileid_count": summary["saleincome_no_skyslopefileid_count"],
-                    "otherincome_no_skyslopefileid_count": summary["otherincome_no_skyslopefileid_count"]
-                },
-                "page": page,
-                "page_size": limit,
-                "total_pages": (count + limit - 1) // limit,
-                "data": rows
-            }
-
+    if missing_mode:
         conditions = []
-        params = []
+        params = {}
 
-        if mismatch:
-            conditions.append("b.match_result = 'mismatch'")
+        if saleincome_no_skyslopefileid and not otherincome_no_skyslopefileid:
+            conditions.append("m.source_table = 'brokerage_engine'")
 
-        if no_skyslope:
-            conditions.append("b.match_result = 'no_skyslope_record'")
+        if otherincome_no_skyslopefileid and not saleincome_no_skyslopefileid:
+            conditions.append("m.source_table = 'otherincome_transactions'")
 
         if search:
-            conditions.append("b.propertyaddress ILIKE %s")
-            search_term = f"%{search}%"
-            params.append(search_term)
-
-        if track_status:
-            if track_status == "open":
-                conditions.append("(t.track_status IS NULL OR t.track_status = 'open')")
-            else:
-                conditions.append("t.track_status = %s")
-                params.append(track_status)
+            conditions.append("m.propertyaddress ILIKE :search")
+            params["search"] = f"%{search}%"
 
         where_clause = ""
         if conditions:
@@ -246,42 +163,116 @@ def sale_price(
         count_query = f"""
             {SALE_PRICE_BASE_QUERY}
             SELECT COUNT(*) AS count
-            FROM base b
-            LEFT JOIN reconciliation_tracking t
-                ON t.transaction_id = b.transactionid
-                AND t.parameter = 'sale_price'
+            FROM missing_skyslopefileid_base m
             {where_clause};
         """
 
         data_query = f"""
             {SALE_PRICE_BASE_QUERY}
             SELECT
-                b.source_table,
-                b.saleguid,
-                b.transactionid,
-                b.propertyaddress,
-                b.skyslope_sale_price,
-                b.be_sale_price,
-                b.match_result,
-                t.track_status AS status,
-                t.assigned_to,
-                t.notes,
-                t.updated_at,
-                t.updated_by
-            FROM base b
-            LEFT JOIN reconciliation_tracking t
-                ON t.transaction_id = b.transactionid
-                AND t.parameter = 'sale_price'
+                m.source_table,
+                m.saleguid,
+                m.transactionid,
+                m.propertyaddress,
+                m.skyslope_sale_price,
+                m.be_sale_price,
+                m.match_result,
+                NULL::text AS status,
+                NULL::text AS assigned_to,
+                NULL::text AS notes,
+                NULL::timestamp AS updated_at,
+                NULL::text AS updated_by
+            FROM missing_skyslopefileid_base m
             {where_clause}
-            ORDER BY b.saleguid
-            LIMIT %s OFFSET %s;
+            ORDER BY m.transactionid
+            LIMIT :limit OFFSET :offset;
         """
 
-        cur.execute(count_query, params)
-        count = cur.fetchone()["count"]
+        count = db.execute(text(count_query), params).scalar()
+        rows = db.execute(text(data_query), {**params, "limit": limit, "offset": offset}).mappings().all()
 
-        cur.execute(data_query, params + [limit, offset])
-        rows = cur.fetchall()
+        match_count = summary["match_count"] or 0
+        mismatch_count = summary["mismatch_count"] or 0
+        comparison_total = match_count + mismatch_count
+
+        match_percentage = round((match_count / comparison_total) * 100, 2) if comparison_total else 0
+        mismatch_percentage = round((mismatch_count / comparison_total) * 100, 2) if comparison_total else 0
+
+        return {
+            "summary": {
+                "count": count,
+                "match_percentage": match_percentage,
+                "mismatch_percentage": mismatch_percentage,
+                "mismatch_count": mismatch_count,
+                "saleincome_no_skyslopefileid_count": summary["saleincome_no_skyslopefileid_count"],
+                "otherincome_no_skyslopefileid_count": summary["otherincome_no_skyslopefileid_count"]
+            },
+            "page": page,
+            "page_size": limit,
+            "total_pages": (count + limit - 1) // limit,
+            "data": [dict(row) for row in rows]
+        }
+
+    conditions = []
+    params = {}
+
+    if mismatch:
+        conditions.append("b.match_result = 'mismatch'")
+
+    if no_skyslope:
+        conditions.append("b.match_result = 'no_skyslope_record'")
+
+    if search:
+        conditions.append("b.propertyaddress ILIKE :search")
+        params["search"] = f"%{search}%"
+
+    if track_status:
+        if track_status == "open":
+            conditions.append("(t.track_status IS NULL OR t.track_status = 'open')")
+        else:
+            conditions.append("t.track_status = :track_status")
+            params["track_status"] = track_status
+
+    where_clause = ""
+    if conditions:
+        where_clause = "WHERE " + " AND ".join(conditions)
+
+    count_query = f"""
+        {SALE_PRICE_BASE_QUERY}
+        SELECT COUNT(*) AS count
+        FROM base b
+        LEFT JOIN reconciliation_tracking t
+            ON t.transaction_id = b.transactionid
+            AND t.parameter = 'sale_price'
+        {where_clause};
+    """
+
+    data_query = f"""
+        {SALE_PRICE_BASE_QUERY}
+        SELECT
+            b.source_table,
+            b.saleguid,
+            b.transactionid,
+            b.propertyaddress,
+            b.skyslope_sale_price,
+            b.be_sale_price,
+            b.match_result,
+            t.track_status AS status,
+            t.assigned_to,
+            t.notes,
+            t.updated_at,
+            t.updated_by
+        FROM base b
+        LEFT JOIN reconciliation_tracking t
+            ON t.transaction_id = b.transactionid
+            AND t.parameter = 'sale_price'
+        {where_clause}
+        ORDER BY b.saleguid
+        LIMIT :limit OFFSET :offset;
+    """
+
+    count = db.execute(text(count_query), params).scalar()
+    rows = db.execute(text(data_query), {**params, "limit": limit, "offset": offset}).mappings().all()
 
     match_count = summary["match_count"] or 0
     mismatch_count = summary["mismatch_count"] or 0
@@ -302,5 +293,5 @@ def sale_price(
         "page": page,
         "page_size": limit,
         "total_pages": (count + limit - 1) // limit,
-        "data": rows
+        "data": [dict(row) for row in rows]
     }
