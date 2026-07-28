@@ -87,6 +87,7 @@ def create_commission_advance_log(
         )
 
         created_row = result.mappings().one()
+        db.commit()
 
         return Response[dict[str, Any]](
             success=True,
@@ -95,6 +96,7 @@ def create_commission_advance_log(
         )
 
     except Exception as e:
+        db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
 
