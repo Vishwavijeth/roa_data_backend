@@ -30,6 +30,7 @@ def apply_skyslope_filters(
     stage: Optional[List[str]] = None,
     search: Optional[str] = None,
     not_in_be: bool = False,
+    checklist_lead_based: Optional[bool] = None,
 ):
     if status:
         cleaned_status = [s.strip().lower() for s in status if s and s.strip()]
@@ -110,6 +111,21 @@ def apply_skyslope_filters(
             )
         """
 
+    if checklist_lead_based is not None:
+        base_filter += """
+            AND sp.yearbuilt IS NOT NULL
+            AND sp.yearbuilt BETWEEN 1900 AND 1978
+            AND (
+                EXISTS (
+                    SELECT 1
+                    FROM sale_checklist_activity sca
+                    WHERE sca.saleguid = s.saleguid
+                      AND COALESCE(sca.activityname, '') ILIKE %s
+                ) = %s
+            )
+        """
+        params.extend(["%lead%", checklist_lead_based])
+
     return base_filter, params
 
 
@@ -166,7 +182,11 @@ def skyslope_listing_filters(db: Session = Depends(get_db)):
     )
 
 
-@router.get("/skyslope-listing", response_model=PaginationResponseWithCount[dict])
+@router.get(
+    "/skyslope-listing",
+    response_model=PaginationResponseWithCount[dict],
+    response_model_exclude_none=True
+)
 def skyslope_api(
     page: int = Query(default=1, ge=1),
     from_close_date: Optional[str] = Query(default=None),
@@ -177,6 +197,7 @@ def skyslope_api(
     stage: Optional[List[str]] = Query(default=None),
     search: Optional[str] = Query(default=None),
     not_in_be: bool = Query(default=False),
+    checklist_lead_based: Optional[bool] = Query(default=None),
     db: Session = Depends(get_db)
 ):
     raw_conn = db.connection().connection
@@ -205,6 +226,7 @@ def skyslope_api(
         stage=stage,
         search=search,
         not_in_be=not_in_be,
+        checklist_lead_based=checklist_lead_based,
     )
 
     count_query = "SELECT COUNT(DISTINCT s.saleguid) " + count_base_filter
@@ -266,7 +288,18 @@ def skyslope_api(
             NULLIF(
                 TRIM(COALESCE(r.firstname, '') || ' ' || COALESCE(r.lastname, '')),
                 ''
-            ) AS reviewer
+            ) AS reviewer,
+            CASE
+                WHEN sp.yearbuilt IS NOT NULL
+                     AND sp.yearbuilt BETWEEN 1900 AND 1978
+                THEN EXISTS (
+                    SELECT 1
+                    FROM sale_checklist_activity sca
+                    WHERE sca.saleguid = s.saleguid
+                      AND COALESCE(sca.activityname, '') ILIKE %s
+                )
+                ELSE NULL
+            END AS checklist_lead_check
         FROM sale s
         LEFT JOIN users r ON s.reviewerguid = r.userguid
         LEFT JOIN sale_property sp ON s.saleguid = sp.saleguid
@@ -274,7 +307,7 @@ def skyslope_api(
         LEFT JOIN stage st ON s.stageid = st.stageid
         WHERE 1=1
     """
-    data_params = []
+    data_params = ["%lead%"]
 
     data_query, data_params = apply_skyslope_filters(
         base_filter=data_query,
@@ -287,6 +320,7 @@ def skyslope_api(
         stage=stage,
         search=search,
         not_in_be=not_in_be,
+        checklist_lead_based=checklist_lead_based,
     )
 
     data_query += """
@@ -298,6 +332,181 @@ def skyslope_api(
     columns = [desc[0] for desc in cursor.description]
     rows = cursor.fetchall()
     data = [dict(zip(columns, row)) for row in rows]
+
+    for item in data:
+        if item.get("checklist_lead_check") is None:
+            item.pop("checklist_lead_check", None)
+
+    total_pages = (total_count + limit - 1) // limit if total_count else 1
+    has_next = page < total_pages
+
+    return PaginationResponseWithCount[dict](
+        data=PaginationData[dict](
+            total_count=total_count,
+            items=data
+        ),
+        page=page,
+        page_size=limit,
+        count=len(data),
+        total_pages=total_pages,
+        has_next=has_next,
+    )
+
+
+@router.get(
+    "/skyslope-listing",
+    response_model=PaginationResponseWithCount[dict],
+    response_model_exclude_none=True
+)
+def skyslope_api(
+    page: int = Query(default=1, ge=1),
+    from_close_date: Optional[str] = Query(default=None),
+    to_close_date: Optional[str] = Query(default=None),
+    year_built_from: Optional[int] = Query(default=None, ge=0),
+    year_built_to: Optional[int] = Query(default=None, ge=0),
+    status: Optional[List[str]] = Query(default=None),
+    stage: Optional[List[str]] = Query(default=None),
+    search: Optional[str] = Query(default=None),
+    not_in_be: bool = Query(default=False),
+    checklist_lead_based: Optional[bool] = Query(default=None),
+    db: Session = Depends(get_db)
+):
+    raw_conn = db.connection().connection
+    cursor = raw_conn.cursor()
+
+    limit = 50
+    offset = (page - 1) * limit
+
+    count_base_filter = """
+        FROM sale s
+        LEFT JOIN sale_property sp ON s.saleguid = sp.saleguid
+        LEFT JOIN brokerage_engine be ON be.skyslopefileid = s.saleguid
+        LEFT JOIN stage st ON s.stageid = st.stageid
+        WHERE 1=1
+    """
+    count_params = []
+
+    count_base_filter, count_params = apply_skyslope_filters(
+        base_filter=count_base_filter,
+        params=count_params,
+        from_close_date=from_close_date,
+        to_close_date=to_close_date,
+        year_built_from=year_built_from,
+        year_built_to=year_built_to,
+        status=status,
+        stage=stage,
+        search=search,
+        not_in_be=not_in_be,
+        checklist_lead_based=checklist_lead_based,
+    )
+
+    count_query = "SELECT COUNT(DISTINCT s.saleguid) " + count_base_filter
+    cursor.execute(count_query, count_params)
+    total_count = cursor.fetchone()[0]
+
+    data_query = """
+        SELECT
+            s.saleguid,
+            CONCAT_WS(', ',
+                CONCAT_WS(' ', sp.streetnumber, sp.streetaddress),
+                sp.city,
+                sp.state,
+                sp.zip
+            ) AS propertyaddress,
+            sp.yearbuilt AS yearbuilt,
+            s.escrowclosingdate AS close_date,
+            TRIM(s.status) AS status,
+            TRIM(st.name) AS stage_name,
+            COALESCE(
+                be.transaction_identifier_transactionid::text,
+                (
+                    SELECT oit.transaction_identifier_transactionid::text
+                    FROM otherincome_transactions oit
+                    WHERE oit.skyslopefileid = s.saleguid
+                      AND oit.transaction_identifier_transactionid IS NOT NULL
+                    ORDER BY oit.finalized_date DESC NULLS LAST,
+                             oit.income_received_date DESC NULLS LAST
+                    LIMIT 1
+                ),
+                'No related transaction data'
+            ) AS transaction_id,
+            NULLIF(
+                COALESCE(
+                    (
+                        SELECT STRING_AGG(
+                            TRIM(
+                                COALESCE(sc.firstname, '') || ' ' ||
+                                COALESCE(sc.lastname, '')
+                            ),
+                            ', '
+                        )
+                        FROM sale_contact sc
+                        WHERE sc.saleguid = s.saleguid
+                          AND LOWER(sc.role) = 'buyer'
+                    ),
+                    ''
+                ),
+                ''
+            ) AS buyer_name,
+            NULLIF(
+                (
+                    SELECT TRIM(COALESCE(u.firstname, '') || ' ' || COALESCE(u.lastname, ''))
+                    FROM users u
+                    WHERE u.userguid = s.agentguid
+                ),
+                ''
+            ) AS buyer_agent_name,
+            NULLIF(
+                TRIM(COALESCE(r.firstname, '') || ' ' || COALESCE(r.lastname, '')),
+                ''
+            ) AS reviewer,
+            CASE
+                WHEN sp.yearbuilt IS NOT NULL
+                     AND sp.yearbuilt <= 1978
+                THEN EXISTS (
+                    SELECT 1
+                    FROM sale_checklist_activity sca
+                    WHERE sca.saleguid = s.saleguid
+                      AND COALESCE(sca.activityname, '') ILIKE %s
+                )
+                ELSE NULL
+            END AS checklist_lead_check
+        FROM sale s
+        LEFT JOIN users r ON s.reviewerguid = r.userguid
+        LEFT JOIN sale_property sp ON s.saleguid = sp.saleguid
+        LEFT JOIN brokerage_engine be ON be.skyslopefileid = s.saleguid
+        LEFT JOIN stage st ON s.stageid = st.stageid
+        WHERE 1=1
+    """
+    data_params = ["%lead%"]
+
+    data_query, data_params = apply_skyslope_filters(
+        base_filter=data_query,
+        params=data_params,
+        from_close_date=from_close_date,
+        to_close_date=to_close_date,
+        year_built_from=year_built_from,
+        year_built_to=year_built_to,
+        status=status,
+        stage=stage,
+        search=search,
+        not_in_be=not_in_be,
+        checklist_lead_based=checklist_lead_based,
+    )
+
+    data_query += """
+        ORDER BY s.escrowclosingdate DESC NULLS LAST
+        LIMIT %s OFFSET %s
+    """
+    cursor.execute(data_query, data_params + [limit, offset])
+
+    columns = [desc[0] for desc in cursor.description]
+    rows = cursor.fetchall()
+    data = [dict(zip(columns, row)) for row in rows]
+
+    for item in data:
+        if item.get("checklist_lead_check") is None:
+            item.pop("checklist_lead_check", None)
 
     total_pages = (total_count + limit - 1) // limit if total_count else 1
     has_next = page < total_pages
