@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Any, Dict, Optional
 from math import ceil
+from decimal import Decimal
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -26,7 +27,7 @@ def get_commission_advances_summary(db: Session = Depends(get_db)):
             text("""
                 SELECT COUNT(*) AS pending_advances
                 FROM commission_advances
-                WHERE status = 'Pending'
+                WHERE status IN ('Pending', 'Pending Partial', 'Wage Garnishment')
             """)
         ).scalar() or 0
 
@@ -42,7 +43,7 @@ def get_commission_advances_summary(db: Session = Depends(get_db)):
             text("""
                 SELECT COUNT(DISTINCT agent_name) AS agents_with_active_advances
                 FROM commission_advances
-                WHERE status = 'Pending'
+                WHERE status IN ('Pending', 'Pending Partial', 'Wage Garnishment')
             """)
         ).scalar() or 0
 
@@ -60,6 +61,7 @@ def get_commission_advances_summary(db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @router.get("/status-dropdown", response_model=FilterResponse)
 def get_commission_advance_status_dropdown(db: Session = Depends(get_db)):
     try:
@@ -69,7 +71,16 @@ def get_commission_advance_status_dropdown(db: Session = Depends(get_db)):
                 SELECT DISTINCT status
                 FROM commission_advances
                 WHERE status IS NOT NULL AND TRIM(status) <> ''
-                ORDER BY status ASC
+                ORDER BY
+                    CASE status
+                        WHEN 'Pending' THEN 1
+                        WHEN 'Pending Partial' THEN 2
+                        WHEN 'Wage Garnishment' THEN 3
+                        WHEN 'Paid' THEN 4
+                        WHEN 'Cancelled' THEN 5
+                        ELSE 6
+                    END,
+                    status ASC
             """)).mappings().all()
         ]
 
@@ -90,13 +101,14 @@ def get_commission_advance_status_dropdown(db: Session = Depends(get_db)):
             },
         )
 
+
 @router.get("/listing", response_model=PaginationResponseWithCount[Dict[str, Any]])
 def get_commission_advances_listing(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=100),
     status: Optional[str] = Query(
         None,
-        description="Filter by status: Pending, Paid, Wage Garnishment"
+        description="Filter by status: Pending, Pending Partial, Wage Garnishment, Paid, Cancelled"
     ),
     search: Optional[str] = Query(
         None,
@@ -107,7 +119,14 @@ def get_commission_advances_listing(
     try:
         offset = (page - 1) * page_size
 
-        allowed_statuses = {"Pending", "Paid", "Wage Garnishment", "Left ROA"}
+        allowed_statuses = {
+            "Pending",
+            "Pending Partial",
+            "Wage Garnishment",
+            "Paid",
+            "Cancelled",
+            "Left ROA",
+        }
         if status is not None and status not in allowed_statuses:
             raise HTTPException(
                 status_code=400,
@@ -121,11 +140,11 @@ def get_commission_advances_listing(
         }
 
         if status:
-            where_clauses.append("status = :status")
+            where_clauses.append("ca.status = :status")
             params["status"] = status
 
         if search and search.strip():
-            where_clauses.append("agent_name ILIKE :search")
+            where_clauses.append("ca.agent_name ILIKE :search")
             params["search"] = f"%{search.strip()}%"
 
         where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
@@ -133,10 +152,10 @@ def get_commission_advances_listing(
         total_count_query = text(f"""
             SELECT COUNT(*) AS total_count
             FROM (
-                SELECT agent_name
-                FROM commission_advances
+                SELECT ca.agent_name
+                FROM commission_advances ca
                 {where_sql}
-                GROUP BY agent_name
+                GROUP BY ca.agent_name
             ) grouped_agents
         """)
 
@@ -145,48 +164,86 @@ def get_commission_advances_listing(
         listing_query = text(f"""
             WITH filtered_data AS (
                 SELECT
-                    agent_name,
-                    status,
-                    amount
-                FROM commission_advances
+                    ca.agent_name,
+                    ca.status,
+                    ca.outstanding_amount
+                FROM commission_advances ca
                 {where_sql}
             ),
             agent_totals AS (
                 SELECT
-                    agent_name,
+                    fd.agent_name,
                     COALESCE(
-                        SUM(amount) FILTER (
-                            WHERE status IN ('Pending', 'Wage Garnishment')
+                        SUM(fd.outstanding_amount) FILTER (
+                            WHERE fd.status IN ('Pending', 'Pending Partial', 'Wage Garnishment')
                         ),
                         0
                     ) AS total_outstanding
-                FROM filtered_data
-                GROUP BY agent_name
+                FROM filtered_data fd
+                GROUP BY fd.agent_name
             ),
             status_counts AS (
                 SELECT
-                    agent_name,
-                    status,
+                    fd.agent_name,
+                    fd.status,
                     COUNT(*) AS status_count
-                FROM filtered_data
-                WHERE status IS NOT NULL AND TRIM(status) <> ''
-                GROUP BY agent_name, status
+                FROM filtered_data fd
+                WHERE fd.status IS NOT NULL AND TRIM(fd.status) <> ''
+                GROUP BY fd.agent_name, fd.status
             ),
             status_breakdowns AS (
                 SELECT
-                    agent_name,
-                    jsonb_object_agg(status, status_count ORDER BY status) AS status_breakdown
-                FROM status_counts
-                GROUP BY agent_name
+                    sc.agent_name,
+                    jsonb_object_agg(sc.status, sc.status_count) AS status_breakdown
+                FROM status_counts sc
+                GROUP BY sc.agent_name
+            ),
+            agent_status_priority AS (
+                SELECT
+                    fd.agent_name,
+                    SUM(CASE WHEN fd.status = 'Wage Garnishment' THEN 1 ELSE 0 END) AS wage_garnishment_count,
+                    SUM(CASE WHEN fd.status = 'Pending' THEN 1 ELSE 0 END) AS pending_count,
+                    SUM(CASE WHEN fd.status = 'Pending Partial' THEN 1 ELSE 0 END) AS pending_partial_count,
+                    SUM(CASE WHEN fd.status = 'Paid' THEN 1 ELSE 0 END) AS paid_count,
+                    SUM(CASE WHEN fd.status = 'Cancelled' THEN 1 ELSE 0 END) AS cancelled_count
+                FROM filtered_data fd
+                GROUP BY fd.agent_name
+            ),
+            agent_user_status AS (
+                SELECT
+                    beu.display_name AS agent_name,
+                    MAX(beu.agent_status) AS agent_status
+                FROM brokerage_engine_users beu
+                GROUP BY beu.display_name
             )
             SELECT
                 at.agent_name,
                 at.total_outstanding,
-                COALESCE(sb.status_breakdown, '{{}}'::jsonb) AS status_breakdown
+                COALESCE(sb.status_breakdown, '{{}}'::jsonb) AS status_breakdown,
+                aus.agent_status,
+                asp.wage_garnishment_count,
+                asp.pending_count,
+                asp.pending_partial_count,
+                asp.paid_count,
+                asp.cancelled_count
             FROM agent_totals at
             LEFT JOIN status_breakdowns sb
                 ON at.agent_name = sb.agent_name
-            ORDER BY at.total_outstanding DESC, at.agent_name ASC
+            LEFT JOIN agent_status_priority asp
+                ON at.agent_name = asp.agent_name
+            LEFT JOIN agent_user_status aus
+                ON at.agent_name = aus.agent_name
+            ORDER BY
+                CASE
+                    WHEN COALESCE(asp.wage_garnishment_count, 0) > 0 THEN 1
+                    WHEN COALESCE(asp.pending_count, 0) > 0 THEN 2
+                    WHEN COALESCE(asp.pending_partial_count, 0) > 0 THEN 3
+                    WHEN COALESCE(asp.paid_count, 0) > 0 THEN 4
+                    WHEN COALESCE(asp.cancelled_count, 0) > 0 THEN 5
+                    ELSE 6
+                END ASC,
+                at.total_outstanding DESC,
+                at.agent_name ASC
             LIMIT :limit OFFSET :offset
         """)
 
@@ -194,10 +251,18 @@ def get_commission_advances_listing(
 
         items = []
         for row in rows:
+            raw_breakdown = dict(row["status_breakdown"] or {})
+
+            ordered_status_breakdown = {}
+            for key in ["Wage Garnishment", "Pending", "Pending Partial", "Paid", "Cancelled"]:
+                if key in raw_breakdown:
+                    ordered_status_breakdown[key] = raw_breakdown[key]
+
             items.append({
                 "agent_name": row["agent_name"],
                 "total_outstanding": float(row["total_outstanding"] or 0),
-                "status_breakdown": dict(row["status_breakdown"] or {}),
+                "status_breakdown": ordered_status_breakdown,
+                "agent_status": row["agent_status"],
             })
 
         total_pages = max(1, ceil(total_count / page_size)) if total_count else 1
@@ -244,17 +309,20 @@ def get_commission_advances_detail(
         rows = db.execute(
             text("""
                 SELECT
+                    id,
                     agent_name,
                     state,
-                    amount,
                     address,
                     company,
+                    original_amount,
+                    amount_paid,
+                    outstanding_amount,
                     paid_date,
                     notes,
                     status
                 FROM commission_advances
                 WHERE agent_name = :agent_name
-                ORDER BY paid_date DESC NULLS LAST, status ASC
+                ORDER BY paid_date DESC NULLS LAST, status ASC, id DESC
                 LIMIT :limit OFFSET :offset
             """),
             {
@@ -267,11 +335,14 @@ def get_commission_advances_detail(
         items = []
         for row in rows:
             items.append({
+                "id": row["id"],
                 "agent_name": row["agent_name"],
                 "state": row["state"],
-                "amount": int(row["amount"]) if row["amount"] is not None else 0,
                 "address": row["address"],
                 "company": row["company"],
+                "original_amount": float(row["original_amount"] or 0),
+                "amount_paid": float(row["amount_paid"] or 0),
+                "outstanding_amount": float(row["outstanding_amount"] or 0),
                 "paid_date": row["paid_date"],
                 "notes": row["notes"],
                 "status": row["status"],

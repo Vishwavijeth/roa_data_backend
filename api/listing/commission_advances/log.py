@@ -1,6 +1,7 @@
-from datetime import date
+from datetime import date as DateType
 from pydantic import BaseModel, field_validator
 from typing import Any
+from decimal import Decimal
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from db import get_db
@@ -13,15 +14,13 @@ router = APIRouter(prefix="/commission-advances")
 
 class CommissionAdvanceLogRequest(BaseModel):
     agent_name: str
-    state: str
-    amount: int
-    address: str
     company: str
-    paid_date: date
+    address: str
+    amount: Decimal
+    date: DateType | None = None
     notes: str | None = None
-    status: str
 
-    @field_validator("agent_name", "state", "address", "company", "status")
+    @field_validator("agent_name", "company", "address")
     @classmethod
     def validate_not_empty(cls, value: str) -> str:
         value = value.strip()
@@ -31,18 +30,9 @@ class CommissionAdvanceLogRequest(BaseModel):
 
     @field_validator("amount")
     @classmethod
-    def validate_amount(cls, value: int) -> int:
+    def validate_amount(cls, value: Decimal) -> Decimal:
         if value < 0:
             raise ValueError("Amount must be greater than or equal to 0")
-        return value
-
-    @field_validator("status")
-    @classmethod
-    def validate_status(cls, value: str) -> str:
-        value = value.strip()
-        allowed = {"Pending", "Paid", "Wage Garnishment"}
-        if value not in allowed:
-            raise ValueError("Status must be one of: Pending, Paid, Wage Garnishment")
         return value
 
 @router.post("/log", response_model=Response[dict[str, Any]], status_code=status.HTTP_201_CREATED)
@@ -56,9 +46,9 @@ def create_commission_advance_log(
                 INSERT INTO commission_advances (
                     agent_name,
                     state,
-                    amount,
                     address,
                     company,
+                    original_amount,
                     paid_date,
                     notes,
                     status
@@ -66,24 +56,35 @@ def create_commission_advance_log(
                 VALUES (
                     :agent_name,
                     :state,
-                    :amount,
                     :address,
                     :company,
+                    :original_amount,
                     :paid_date,
                     :notes,
-                    :status
+                    'Pending'
                 )
                 RETURNING
+                    id,
                     agent_name,
                     state,
-                    amount,
                     address,
                     company,
+                    original_amount,
+                    amount_paid,
+                    outstanding_amount,
                     paid_date,
                     notes,
                     status
             """),
-            payload.model_dump(),
+            {
+                "agent_name": payload.agent_name.strip(),
+                "state": "NA",
+                "address": payload.address.strip(),
+                "company": payload.company.strip(),
+                "original_amount": payload.amount,
+                "paid_date": payload.date,
+                "notes": payload.notes.strip() if payload.notes else None,
+            },
         )
 
         created_row = result.mappings().one()
@@ -91,8 +92,20 @@ def create_commission_advance_log(
 
         return Response[dict[str, Any]](
             success=True,
-            data=dict(created_row),
-            message="Commission advance transaction created successfully",
+            data={
+                "id": created_row["id"],
+                "agent_name": created_row["agent_name"],
+                "state": created_row["state"],
+                "address": created_row["address"],
+                "company": created_row["company"],
+                "original_amount": float(created_row["original_amount"] or 0),
+                "amount_paid": float(created_row["amount_paid"] or 0),
+                "outstanding_amount": float(created_row["outstanding_amount"] or 0),
+                "paid_date": created_row["paid_date"],
+                "notes": created_row["notes"],
+                "status": created_row["status"],
+            },
+            message="Commission advance logged successfully",
         )
 
     except Exception as e:
@@ -103,16 +116,6 @@ def create_commission_advance_log(
 @router.get("/log-dropdown", response_model=FilterResponse)
 def get_commission_advance_log_dropdowns(db: Session = Depends(get_db)):
     try:
-        states = [
-            row["state"]
-            for row in db.execute(text("""
-                SELECT DISTINCT UPPER(state) AS state
-                FROM sale_property
-                WHERE state IS NOT NULL AND TRIM(state) <> ''
-                ORDER BY state ASC
-            """)).mappings().all()
-        ]
-
         companies = [
             row["company"]
             for row in db.execute(text("""
@@ -123,11 +126,20 @@ def get_commission_advance_log_dropdowns(db: Session = Depends(get_db)):
             """)).mappings().all()
         ]
 
+        statuses = [
+            "Pending",
+            "Wage Garnishment",
+            "Paid",
+            "Cancelled",
+            "Left ROA",
+            "Pending Partial",
+        ]
+
         return FilterResponse(
             success=True,
             filters={
-                "state": states,
                 "company": companies,
+                "status": statuses,
             },
         )
 
