@@ -66,12 +66,11 @@ def get_commission_advances_summary(db: Session = Depends(get_db)):
 def get_commission_advance_status_dropdown(db: Session = Depends(get_db)):
     try:
         statuses = [
-            row["status"]
-            for row in db.execute(text("""
-                SELECT DISTINCT status
-                FROM commission_advances
-                WHERE status IS NOT NULL
-            """)).mappings().all()
+            "Pending",
+            "Pending Partial",
+            "Wage Garnishment",
+            "Cancelled",
+            "Left ROA",
         ]
 
         return FilterResponse(
