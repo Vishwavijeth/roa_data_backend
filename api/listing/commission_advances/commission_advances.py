@@ -312,7 +312,18 @@ def get_commission_advances_detail(
                     status
                 FROM commission_advances
                 WHERE agent_name = :agent_name
-                ORDER BY paid_date DESC NULLS LAST, status ASC, id DESC
+                ORDER BY
+                    CASE status
+                        WHEN 'Wage Garnishment' THEN 1
+                        WHEN 'Pending' THEN 2
+                        WHEN 'Pending Partial' THEN 3
+                        WHEN 'Paid' THEN 4
+                        WHEN 'Left ROA' THEN 5
+                        WHEN 'Cancelled' THEN 6
+                        ELSE 7
+                    END ASC,
+                    paid_date DESC NULLS LAST,
+                    id DESC
                 LIMIT :limit OFFSET :offset
             """),
             {
