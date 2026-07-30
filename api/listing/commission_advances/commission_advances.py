@@ -70,17 +70,7 @@ def get_commission_advance_status_dropdown(db: Session = Depends(get_db)):
             for row in db.execute(text("""
                 SELECT DISTINCT status
                 FROM commission_advances
-                WHERE status IS NOT NULL AND TRIM(status) <> ''
-                ORDER BY
-                    CASE status
-                        WHEN 'Pending' THEN 1
-                        WHEN 'Pending Partial' THEN 2
-                        WHEN 'Wage Garnishment' THEN 3
-                        WHEN 'Paid' THEN 4
-                        WHEN 'Cancelled' THEN 5
-                        ELSE 6
-                    END,
-                    status ASC
+                WHERE status IS NOT NULL
             """)).mappings().all()
         ]
 
