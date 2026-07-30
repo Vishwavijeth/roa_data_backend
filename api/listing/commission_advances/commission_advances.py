@@ -12,8 +12,8 @@ from db import get_db
 
 
 class CommissionAdvanceSummary(BaseModel):
-    pending_advances: float
-    commission_advance_received: float
+    pending_advances: int
+    commission_advance_received: int
     agents_with_active_advances: int
 
 
@@ -25,7 +25,7 @@ def get_commission_advances_summary(db: Session = Depends(get_db)):
     try:
         pending_advances = db.execute(
             text("""
-                SELECT COALESCE(SUM(outstanding_amount), 0) AS pending_advances_total
+                SELECT COUNT(*) AS pending_advances_total
                 FROM commission_advances
                 WHERE status IN ('Pending', 'Pending Partial', 'Wage Garnishment')
             """)
@@ -33,7 +33,7 @@ def get_commission_advances_summary(db: Session = Depends(get_db)):
 
         commission_advance_received = db.execute(
             text("""
-                SELECT COALESCE(SUM(original_amount), 0) AS commission_advance_received
+                SELECT COUNT(*) AS commission_advance_received
                 FROM commission_advances
                 WHERE status = 'Paid'
             """)
@@ -71,6 +71,7 @@ def get_commission_advance_status_dropdown(db: Session = Depends(get_db)):
             "Wage Garnishment",
             "Cancelled",
             "Left ROA",
+            "Paid",
         ]
 
         return FilterResponse(
