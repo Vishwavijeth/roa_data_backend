@@ -1,15 +1,16 @@
 from datetime import date
-from decimal import Decimal
-from fastapi import APIRouter, Depends, HTTPException, Query
-from typing import Any, Dict, Optional
 from decimal import Decimal, InvalidOperation
+from fastapi import APIRouter, Depends, HTTPException
+from typing import Any, Dict, Optional
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from common.response import Response
 from db import get_db
 
+
 router = APIRouter(prefix='/commission-advances')
+
 
 class CommissionAdvanceUpdateRequest(BaseModel):
     status: Optional[str] = Field(
@@ -20,6 +21,7 @@ class CommissionAdvanceUpdateRequest(BaseModel):
     amount: Optional[Decimal] = Field(default=None, ge=0)
     paid_date: Optional[date] = None
     approved_date: Optional[date] = None  # NEW
+
 
 @router.patch("/transaction/{transaction_id}", response_model=Response[Dict[str, Any]])
 def update_commission_advance_transaction(
@@ -76,6 +78,7 @@ def update_commission_advance_transaction(
             raise HTTPException(status_code=404, detail="Transaction not found")
 
         original_amount = Decimal(existing["original_amount"] or 0)
+        existing_amount_paid = Decimal(existing["amount_paid"] or 0)
         requested_status = update_data.get("status", existing["status"])
         input_amount = update_data.get("amount")
         input_notes = update_data.get("notes") if "notes" in update_data else existing["notes"]
@@ -118,17 +121,24 @@ def update_commission_advance_transaction(
                 )
 
             try:
-                partial_paid_amount = Decimal(input_amount)
+                additional_amount = Decimal(input_amount)
             except (InvalidOperation, TypeError):
                 raise HTTPException(status_code=400, detail="Invalid amount value")
 
-            if partial_paid_amount < 0:
+            if additional_amount < 0:
                 raise HTTPException(status_code=400, detail="amount cannot be negative")
+
+            # If the transaction is already Pending Partial and status remains Pending Partial,
+            # add the new amount to the existing amount_paid. Otherwise, treat it as the first partial.
+            if existing["status"] == "Pending Partial":
+                partial_paid_amount = existing_amount_paid + additional_amount
+            else:
+                partial_paid_amount = additional_amount
 
             if partial_paid_amount >= original_amount:
                 raise HTTPException(
                     status_code=400,
-                    detail="For 'Pending Partial', amount must be less than original_amount"
+                    detail="For 'Pending Partial', cumulative amount_paid must be less than original_amount"
                 )
 
             set_clauses.append("status = :status")
