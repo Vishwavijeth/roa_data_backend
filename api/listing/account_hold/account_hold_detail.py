@@ -31,10 +31,10 @@ def fetch_agent_detail_transactions(db: Session, email: str):
     query = """
         WITH target_agent AS (
             SELECT
-                LOWER(TRIM(u.primary_emailaddress)) AS normalized_email,
+                LOWER(TRIM(u.roa_email)) AS normalized_email,
                 LOWER(TRIM(u.display_name)) AS normalized_name
             FROM brokerage_engine_users u
-            WHERE LOWER(TRIM(u.primary_emailaddress)) = LOWER(TRIM(:email))
+            WHERE LOWER(TRIM(u.roa_email)) = LOWER(TRIM(:email))
             LIMIT 1
         ),
         brokerage_engine_transactions AS (
@@ -214,7 +214,7 @@ async def get_account_hold_detail(customer_id: int, db: Session = Depends(get_db
             text("""
                 SELECT
                     u.display_name,
-                    u.primary_emailaddress,
+                    u.roa_email,
                     u.qb_customerid,
                     u.agenttags
                 FROM brokerage_engine_users u
@@ -230,7 +230,7 @@ async def get_account_hold_detail(customer_id: int, db: Session = Depends(get_db
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    rows = fetch_agent_detail_transactions(db, agent["primary_emailaddress"])
+    rows = fetch_agent_detail_transactions(db, agent["roa_email"])
 
     ar_balance_row = None
     has_ar_balance = False
@@ -315,7 +315,7 @@ async def get_account_hold_detail(customer_id: int, db: Session = Depends(get_db
     return Response(
         data=AccountHoldDetailData(
             display_name=agent["display_name"],
-            primary_emailaddress=agent["primary_emailaddress"],
+            roa_email=agent["roa_email"],
             customer_id=str(agent["qb_customerid"]) if agent.get("qb_customerid") is not None else None,
             transaction_count=len(transactions),
             broker_flags=broker_flags,

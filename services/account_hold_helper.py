@@ -324,13 +324,13 @@ def get_qb_customerids_for_emails(emails: List[str], conn) -> Dict[str, str]:
         cur.execute(
             """
             SELECT
-                LOWER(TRIM(primary_emailaddress)) AS email,
+                LOWER(TRIM(roa_email)) AS email,
                 qb_customerid
             FROM brokerage_engine_users
-            WHERE primary_emailaddress IS NOT NULL
-              AND TRIM(primary_emailaddress) <> ''
+            WHERE roa_email IS NOT NULL
+              AND TRIM(roa_email) <> ''
               AND qb_customerid IS NOT NULL
-              AND LOWER(TRIM(primary_emailaddress)) = ANY(%s)
+              AND LOWER(TRIM(roa_email)) = ANY(%s)
             """,
             (normalized_emails,),
         )

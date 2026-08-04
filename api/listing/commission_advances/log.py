@@ -14,10 +14,11 @@ router = APIRouter(prefix="/commission-advances")
 
 class CommissionAdvanceLogRequest(BaseModel):
     agent_name: str
-    company: str
     address: str
-    amount: Decimal
-    date: DateType | None = None
+    company: str
+    amount: float
+    approved_date: DateType | None = None
+    saleguid: str | None = None
     notes: str | None = None
 
     @field_validator("agent_name", "company", "address")
@@ -35,7 +36,11 @@ class CommissionAdvanceLogRequest(BaseModel):
             raise ValueError("Amount must be greater than or equal to 0")
         return value
 
-@router.post("/log", response_model=Response[dict[str, Any]], status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/log",
+    response_model=Response[dict[str, Any]],
+    status_code=status.HTTP_201_CREATED,
+)
 def create_commission_advance_log(
     payload: CommissionAdvanceLogRequest,
     db: Session = Depends(get_db),
@@ -49,7 +54,8 @@ def create_commission_advance_log(
                     address,
                     company,
                     original_amount,
-                    paid_date,
+                    approved_date,
+                    saleguid,
                     notes,
                     status
                 )
@@ -59,7 +65,8 @@ def create_commission_advance_log(
                     :address,
                     :company,
                     :original_amount,
-                    :paid_date,
+                    :approved_date,
+                    :saleguid,
                     :notes,
                     'Pending'
                 )
@@ -72,7 +79,8 @@ def create_commission_advance_log(
                     original_amount,
                     amount_paid,
                     outstanding_amount,
-                    paid_date,
+                    approved_date,
+                    saleguid,
                     notes,
                     status
             """),
@@ -82,7 +90,8 @@ def create_commission_advance_log(
                 "address": payload.address.strip(),
                 "company": payload.company.strip(),
                 "original_amount": payload.amount,
-                "paid_date": payload.date,
+                "approved_date": payload.approved_date,  # uses new field name
+                "saleguid": payload.saleguid.strip() if payload.saleguid else None,
                 "notes": payload.notes.strip() if payload.notes else None,
             },
         )
@@ -101,7 +110,8 @@ def create_commission_advance_log(
                 "original_amount": float(created_row["original_amount"] or 0),
                 "amount_paid": float(created_row["amount_paid"] or 0),
                 "outstanding_amount": float(created_row["outstanding_amount"] or 0),
-                "paid_date": created_row["paid_date"],
+                "approved_date": created_row["approved_date"],
+                "saleguid": created_row["saleguid"],
                 "notes": created_row["notes"],
                 "status": created_row["status"],
             },
@@ -174,15 +184,26 @@ def get_agent_name_suggestions(
             )
 
         agent_names = [
-            row["agent_name"]
+            {
+                "display_name": row["display_name"],
+                "agent_status": row["agent_status"],
+                "general_notes": row["general_notes"],
+                "internal_notes": row["internal_notes"],
+                "office": row["office"],
+            }
             for row in db.execute(
                 text("""
-                    SELECT DISTINCT agent_name
-                    FROM commission_advances
-                    WHERE agent_name IS NOT NULL
-                      AND TRIM(agent_name) <> ''
-                      AND agent_name ILIKE :search
-                    ORDER BY agent_name ASC
+                    SELECT DISTINCT ON (display_name)
+                        display_name,
+                        agent_status,
+                        general_notes,
+                        internal_notes,
+                        office
+                    FROM brokerage_engine_users
+                    WHERE display_name IS NOT NULL
+                      AND TRIM(display_name) <> ''
+                      AND display_name ILIKE :search
+                    ORDER BY display_name ASC
                     LIMIT :limit
                 """),
                 {"search": f"%{query_text}%", "limit": limit}
@@ -194,7 +215,7 @@ def get_agent_name_suggestions(
             filters={
                 "agent_name": agent_names,
             },
-            message="Agent name suggestions fetched successfully",
+            message="Agent suggestions fetched successfully",
         )
 
     except Exception as e:
@@ -202,7 +223,7 @@ def get_agent_name_suggestions(
             status_code=500,
             content={
                 "success": False,
-                "message": "Failed to fetch agent name suggestions",
+                "message": "Failed to fetch agent suggestions",
                 "details": [{"error": str(e)}],
             },
         )
@@ -228,25 +249,35 @@ def get_address_suggestions(
             )
 
         addresses = [
-            row["address"]
+            {
+                "address": row["address"],
+                "close_date": row["close_date"],
+                "ss_status": row["ss_status"],
+                "saleguid": row["saleguid"],
+            }
             for row in db.execute(
                 text("""
                     SELECT DISTINCT
                         CONCAT_WS(
                             ', ',
-                            CONCAT_WS(' ', streetNumber::text, streetAddress),
-                            city,
-                            state,
-                            zip
-                        ) AS address
-                    FROM sale_property
+                            CONCAT_WS(' ', sp.streetnumber::text, sp.streetaddress),
+                            sp.city,
+                            sp.state,
+                            sp.zip
+                        ) AS address,
+                        s.escrowclosingdate AS close_date,
+                        s.status AS ss_status,
+                        s.saleguid AS saleguid
+                    FROM sale_property sp
+                    LEFT JOIN sale s
+                        ON sp.saleguid = s.saleguid
                     WHERE CONCAT_WS(
                             ', ',
-                            CONCAT_WS(' ', streetNumber::text, streetAddress),
-                            city,
-                            state,
-                            zip
-                          ) ILIKE :search
+                            CONCAT_WS(' ', sp.streetnumber::text, sp.streetaddress),
+                            sp.city,
+                            sp.state,
+                            sp.zip
+                         ) ILIKE :search
                     ORDER BY address ASC
                     LIMIT :limit
                 """),

@@ -29,11 +29,11 @@ def chunked(items: List[Tuple[str, int]], size: int):
 
 def get_users_without_qb_customerid(db: Session, limit: Optional[int] = None) -> List[Dict[str, Any]]:
     sql = """
-        SELECT personguid, primary_emailaddress
+        SELECT personguid, roa_email
         FROM brokerage_engine_users
         WHERE qb_customerid IS NULL
-          AND primary_emailaddress IS NOT NULL
-          AND TRIM(primary_emailaddress) <> ''
+          AND roa_email IS NOT NULL
+          AND TRIM(roa_email) <> ''
         ORDER BY personguid
     """
 
@@ -283,18 +283,18 @@ async def populate_qb_customerids(db: Session, limit: Optional[int] = None) -> D
     for user in users:
         try:
             personguid = user["personguid"]
-            raw_email = user.get("primary_emailaddress")
+            raw_email = user.get("roa_email")
             emails = split_emails(raw_email)
 
             if not emails:
                 summary["skipped"] += 1
                 logger.debug(
-                    "Skipping user due to invalid primary_emailaddress",
+                    "Skipping user due to invalid roa_email",
                     extra={"personguid": str(personguid)},
                 )
                 results.append({
                     "personguid": str(personguid),
-                    "primary_emailaddress": raw_email,
+                    "roa_email": raw_email,
                     "status": "skipped",
                     "qb_customerid": None,
                     "reason": "no_valid_email",
@@ -311,7 +311,7 @@ async def populate_qb_customerids(db: Session, limit: Optional[int] = None) -> D
                 )
                 results.append({
                     "personguid": str(personguid),
-                    "primary_emailaddress": raw_email,
+                    "roa_email": raw_email,
                     "status": "not_found",
                     "qb_customerid": None,
                     "reason": "no_matching_customer",
@@ -324,7 +324,7 @@ async def populate_qb_customerids(db: Session, limit: Optional[int] = None) -> D
 
             results.append({
                 "personguid": str(personguid),
-                "primary_emailaddress": raw_email,
+                "roa_email": raw_email,
                 "status": "updated",
                 "qb_customerid": qb_customerid,
                 "matched_email": selected_customer.get("primary_email"),
@@ -337,12 +337,12 @@ async def populate_qb_customerids(db: Session, limit: Optional[int] = None) -> D
                 "Failed processing brokerage_engine_user during qb_customerid population",
                 extra={
                     "personguid": str(user.get("personguid")),
-                    "primary_emailaddress": user.get("primary_emailaddress"),
+                    "roa_email": user.get("roa_email"),
                 },
             )
             results.append({
                 "personguid": str(user.get("personguid")),
-                "primary_emailaddress": user.get("primary_emailaddress"),
+                "roa_email": user.get("roa_email"),
                 "status": "error",
                 "qb_customerid": None,
                 "reason": "processing_failed",

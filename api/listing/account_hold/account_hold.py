@@ -40,7 +40,7 @@ def build_where_clause(
     if search and search.strip():
         search_value = f"%{search.strip()}%"
         search_filters.append(
-            "(b.display_name ILIKE :search OR b.primary_emailaddress ILIKE :search)"
+            "(b.display_name ILIKE :search OR b.roa_email ILIKE :search)"
         )
         params["search"] = search_value
 
@@ -83,7 +83,7 @@ def get_base_cte():
         user_base AS (
             SELECT
                 u.display_name,
-                u.primary_emailaddress,
+                u.roa_email,
                 u.agenttags,
                 u.qb_customerid,
                 EXISTS (
@@ -96,7 +96,7 @@ def get_base_cte():
         b AS (
             SELECT
                 ub.display_name,
-                ub.primary_emailaddress,
+                ub.roa_email,
                 ub.agenttags,
                 ub.qb_customerid,
                 ub.has_account_hold,
@@ -142,7 +142,7 @@ def fetch_agent_listing_page_base(
         {base_cte}
         SELECT
             b.display_name,
-            b.primary_emailaddress,
+            b.roa_email,
             b.agenttags,
             b.qb_customerid,
             b.matched_customer_id,
@@ -157,7 +157,7 @@ def fetch_agent_listing_page_base(
             b.has_account_hold DESC,
             b.total_open_balance DESC,
             b.display_name,
-            b.primary_emailaddress
+            b.roa_email
         LIMIT :limit OFFSET :offset
     """
 
@@ -177,12 +177,12 @@ def fetch_transaction_summary_for_agents(db: Session, agent_emails: list[str]):
     query = """
         WITH target_agents AS (
             SELECT DISTINCT
-                LOWER(TRIM(u.primary_emailaddress)) AS normalized_email,
+                LOWER(TRIM(u.roa_email)) AS normalized_email,
                 LOWER(TRIM(u.display_name)) AS normalized_name
             FROM brokerage_engine_users u
-            WHERE u.primary_emailaddress IS NOT NULL
-              AND TRIM(u.primary_emailaddress) <> ''
-              AND LOWER(TRIM(u.primary_emailaddress)) = ANY(:agent_emails)
+            WHERE u.roa_email IS NOT NULL
+              AND TRIM(u.roa_email) <> ''
+              AND LOWER(TRIM(u.roa_email)) = ANY(:agent_emails)
         ),
         brokerage_engine_transactions AS (
             SELECT
@@ -262,11 +262,11 @@ def fetch_agent_by_email(db: Session, email: str):
     query = """
         SELECT
             u.display_name,
-            u.primary_emailaddress,
+            u.roa_email,
             u.agenttags,
             u.qb_customerid
         FROM brokerage_engine_users u
-        WHERE LOWER(TRIM(u.primary_emailaddress)) = LOWER(TRIM(:email))
+        WHERE LOWER(TRIM(u.roa_email)) = LOWER(TRIM(:email))
         LIMIT 1
     """
 
@@ -354,16 +354,16 @@ async def get_account_hold_listing(
     )
 
     agent_emails = [
-        normalize_email(row["primary_emailaddress"])
+        normalize_email(row["roa_email"])
         for row in agent_rows
-        if row.get("primary_emailaddress")
+        if row.get("roa_email")
     ]
 
     transaction_summary_map = fetch_transaction_summary_for_agents(db, agent_emails)
 
     data = []
     for row in agent_rows:
-        normalized_email = normalize_email(row.get("primary_emailaddress"))
+        normalized_email = normalize_email(row.get("roa_email"))
         tx_summary = transaction_summary_map.get(normalized_email, {})
 
         total_open_balance = float(row.get("total_open_balance") or 0)
@@ -383,7 +383,7 @@ async def get_account_hold_listing(
         data.append(
             AccountHoldItem(
                 display_name=row["display_name"],
-                primary_emailaddress=row["primary_emailaddress"],
+                roa_email=row["roa_email"],
                 customer_id=str(row["qb_customerid"]) if row.get("qb_customerid") is not None else None,
                 transaction_count=int(tx_summary.get("transaction_count") or 0),
                 broker_flags=broker_flags,

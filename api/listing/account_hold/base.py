@@ -11,7 +11,7 @@ class AccountHoldSummaryData(BaseModel):
 # ----------- Listing -----------
 class AccountHoldItem(BaseModel):
     display_name: str
-    primary_emailaddress: str | None = None
+    roa_email: str | None = None
     customer_id: str | None = None
     transaction_count: int
     broker_flags: list[str]
@@ -46,7 +46,7 @@ class TransactionItem(BaseModel):
 
 class AccountHoldDetailData(BaseModel):
     display_name: str
-    primary_emailaddress: str | None = None
+    roa_email: str | None = None
     customer_id: str | None = None
     transaction_count: int
     broker_flags: list[str] = Field(default_factory=list)
