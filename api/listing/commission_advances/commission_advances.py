@@ -307,6 +307,7 @@ def get_commission_advances_detail(
                     original_amount,
                     amount_paid,
                     outstanding_amount,
+                    approved_date,
                     paid_date,
                     notes,
                     status
@@ -344,6 +345,7 @@ def get_commission_advances_detail(
                 "original_amount": float(row["original_amount"] or 0),
                 "amount_paid": float(row["amount_paid"] or 0),
                 "outstanding_amount": float(row["outstanding_amount"] or 0),
+                "approved_date": row["approved_date"],
                 "paid_date": row["paid_date"],
                 "notes": row["notes"],
                 "status": row["status"],
