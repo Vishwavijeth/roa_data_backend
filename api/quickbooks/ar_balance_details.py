@@ -13,10 +13,10 @@ router = APIRouter()
 def get_brokerage_engine_user_rows(db: Session) -> List[Dict[str, Any]]:
     rows = db.execute(text("""
         SELECT
-            primary_emailaddress AS email
+            roa_email AS email
         FROM brokerage_engine_users
-        WHERE primary_emailaddress IS NOT NULL
-          AND TRIM(primary_emailaddress) <> ''
+        WHERE roa_email IS NOT NULL
+          AND TRIM(roa_email) <> ''
     """)).mappings().all()
     return [dict(r) for r in rows]
 

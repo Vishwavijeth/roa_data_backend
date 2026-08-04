@@ -19,6 +19,7 @@ class CommissionAdvanceUpdateRequest(BaseModel):
     notes: Optional[str] = None
     amount: Optional[Decimal] = Field(default=None, ge=0)
     paid_date: Optional[date] = None
+    approved_date: Optional[date] = None  # NEW
 
 @router.patch("/transaction/{transaction_id}", response_model=Response[Dict[str, Any]])
 def update_commission_advance_transaction(
@@ -63,7 +64,8 @@ def update_commission_advance_transaction(
                     outstanding_amount,
                     status,
                     notes,
-                    paid_date
+                    paid_date,
+                    approved_date
                 FROM commission_advances
                 WHERE id = :transaction_id
             """),
@@ -78,16 +80,22 @@ def update_commission_advance_transaction(
         input_amount = update_data.get("amount")
         input_notes = update_data.get("notes") if "notes" in update_data else existing["notes"]
         input_paid_date = update_data.get("paid_date") if "paid_date" in update_data else existing["paid_date"]
+        input_approved_date = (
+            update_data.get("approved_date")
+            if "approved_date" in update_data
+            else existing["approved_date"]
+        )
 
         set_clauses = []
         params: Dict[str, Any] = {"transaction_id": transaction_id}
 
+        # Wage Garnishment: only notes + approved_date allowed
         if requested_status == "Wage Garnishment":
             disallowed_fields = {"amount", "paid_date"} & set(update_data.keys())
             if disallowed_fields:
                 raise HTTPException(
                     status_code=400,
-                    detail="For status 'Wage Garnishment', only notes can be modified"
+                    detail="For status 'Wage Garnishment', only notes/approved_date can be modified"
                 )
 
             set_clauses.append("status = :status")
@@ -97,6 +105,11 @@ def update_commission_advance_transaction(
                 set_clauses.append("notes = :notes")
                 params["notes"] = input_notes
 
+            if "approved_date" in update_data:
+                set_clauses.append("approved_date = :approved_date")
+                params["approved_date"] = input_approved_date
+
+        # Pending Partial
         elif requested_status == "Pending Partial":
             if input_amount is None:
                 raise HTTPException(
@@ -132,11 +145,19 @@ def update_commission_advance_transaction(
                 set_clauses.append("paid_date = :paid_date")
                 params["paid_date"] = input_paid_date
 
+            if "approved_date" in update_data:
+                set_clauses.append("approved_date = :approved_date")
+                params["approved_date"] = input_approved_date
+
+        # Paid
         elif requested_status == "Paid":
             if "amount" in update_data:
                 raise HTTPException(
                     status_code=400,
-                    detail="Do not send amount when status is 'Paid'; amount_paid will be set to original_amount automatically"
+                    detail=(
+                        "Do not send amount when status is 'Paid'; "
+                        "amount_paid will be set to original_amount automatically"
+                    )
                 )
 
             set_clauses.append("status = :status")
@@ -153,6 +174,11 @@ def update_commission_advance_transaction(
                 set_clauses.append("paid_date = :paid_date")
                 params["paid_date"] = input_paid_date
 
+            if "approved_date" in update_data:
+                set_clauses.append("approved_date = :approved_date")
+                params["approved_date"] = input_approved_date
+
+        # All other statuses
         else:
             if "status" in update_data:
                 set_clauses.append("status = :status")
@@ -165,6 +191,10 @@ def update_commission_advance_transaction(
             if "paid_date" in update_data:
                 set_clauses.append("paid_date = :paid_date")
                 params["paid_date"] = input_paid_date
+
+            if "approved_date" in update_data:
+                set_clauses.append("approved_date = :approved_date")
+                params["approved_date"] = input_approved_date
 
             if "amount" in update_data:
                 try:
@@ -198,6 +228,7 @@ def update_commission_advance_transaction(
                 amount_paid,
                 outstanding_amount,
                 paid_date,
+                approved_date,
                 notes,
                 status
         """)
@@ -217,6 +248,7 @@ def update_commission_advance_transaction(
                 "amount_paid": float(updated_row["amount_paid"] or 0),
                 "outstanding_amount": float(updated_row["outstanding_amount"] or 0),
                 "paid_date": updated_row["paid_date"],
+                "approved_date": updated_row["approved_date"],
                 "notes": updated_row["notes"],
                 "status": updated_row["status"],
             },
