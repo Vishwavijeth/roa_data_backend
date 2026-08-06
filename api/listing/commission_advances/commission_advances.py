@@ -1,262 +1,305 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Any, Dict, Optional
 from math import ceil
-from decimal import Decimal
-from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+from sqlalchemy import JSON, and_, case, cast, distinct, func, literal, select
 from common.pagination import PaginationData, PaginationResponseWithCount
 from common.response import Response, FilterResponse
 from fastapi.responses import JSONResponse
+from api.listing.commission_advances.base import CommissionAdvanceSummary
+from models.commisison_advances import CommissionAdvance, CommissionAdvanceHistory
+from api.listing.commission_advances.utils import CommissionAdvanceStatus
+from models.brokerage_engine_users import BrokerageEngineUser
 from db import get_db
-
-
-class CommissionAdvanceSummary(BaseModel):
-    pending_advances: int
-    commission_advance_received: int
-    agents_with_active_advances: int
-
 
 router = APIRouter(prefix="/commission-advances")
 
+def build_listing_filters(
+    status: Optional[CommissionAdvanceStatus],
+    search: Optional[str],
+):
+    filters = []
+
+    if status:
+        filters.append(CommissionAdvance.status == status.value)
+
+    if search and search.strip():
+        filters.append(
+            CommissionAdvance.agent_name.ilike(f"%{search.strip()}%")
+        )
+
+    return filters
+
 
 @router.get("/summary", response_model=Response[CommissionAdvanceSummary])
-def get_commission_advances_summary(db: Session = Depends(get_db)):
+def get_commission_advances_summary(
+    db: Session = Depends(get_db),
+):
     try:
-        pending_advances = db.execute(
-            text("""
-                SELECT COUNT(*) AS pending_advances_total
-                FROM commission_advances
-                WHERE status IN ('Pending', 'Pending Partial', 'Wage Garnishment')
-            """)
-        ).scalar() or 0
+        ca = CommissionAdvance
 
-        commission_advance_received = db.execute(
-            text("""
-                SELECT COUNT(*) AS commission_advance_received
-                FROM commission_advances
-                WHERE status = 'Paid'
-            """)
-        ).scalar() or 0
+        pending_advances = (
+            db.execute(
+                select(func.count(ca.id)).where(
+                    ca.status.in_(
+                        CommissionAdvanceStatus.active_values()
+                    )
+                )
+            ).scalar()
+            or 0
+        )
 
-        agents_with_active_advances = db.execute(
-            text("""
-                SELECT COUNT(DISTINCT agent_name) AS agents_with_active_advances
-                FROM commission_advances
-                WHERE outstanding_amount > 0
-            """)
-        ).scalar() or 0
+        commission_advance_received = (
+            db.execute(
+                select(func.count(ca.id)).where(
+                    ca.status == CommissionAdvanceStatus.PAID.value
+                )
+            ).scalar()
+            or 0
+        )
 
-        summary = CommissionAdvanceSummary(
-            pending_advances=pending_advances,
-            commission_advance_received=commission_advance_received,
-            agents_with_active_advances=agents_with_active_advances,
+        agents_with_active_advances = (
+            db.execute(
+                select(func.count(distinct(ca.agent_name))).where(
+                    ca.outstanding_amount > 0
+                )
+            ).scalar()
+            or 0
         )
 
         return Response[CommissionAdvanceSummary](
             success=True,
-            data=summary
+            data=CommissionAdvanceSummary(
+                pending_advances=pending_advances,
+                commission_advance_received=commission_advance_received,
+                agents_with_active_advances=agents_with_active_advances,
+            ),
         )
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/status-dropdown", response_model=FilterResponse)
-def get_commission_advance_status_dropdown(db: Session = Depends(get_db)):
-    try:
-        statuses = [
-            "Pending",
-            "Pending Partial",
-            "Wage Garnishment",
-            "Cancelled",
-            "Left ROA",
-            "Paid",
-        ]
-
-        return FilterResponse(
-            success=True,
-            filters={
-                "status": statuses,
-            },
-        )
-
-    except Exception as e:
-        return JSONResponse(
+    except Exception as exc:
+        raise HTTPException(
             status_code=500,
-            content={
-                "success": False,
-                "message": "Failed to fetch commission advance status dropdown data",
-                "details": [{"error": str(e)}],
-            },
-        )
+            detail=str(exc),
+        ) from exc
+
+
+@router.get(
+    "/status-dropdown",
+    response_model=FilterResponse,
+)
+def get_commission_advance_status_dropdown():
+    return FilterResponse(
+        success=True,
+        filters={
+            "status": CommissionAdvanceStatus.values(),
+        },
+    )
 
 
 @router.get("/listing", response_model=PaginationResponseWithCount[Dict[str, Any]])
 def get_commission_advances_listing(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=100),
-    status: Optional[str] = Query(
-        None,
-        description="Filter by status: Pending, Pending Partial, Wage Garnishment, Paid, Cancelled"
-    ),
-    search: Optional[str] = Query(
-        None,
-        description="Search by agent name"
-    ),
+    status: Optional[CommissionAdvanceStatus] = Query(None),
+    search: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
     try:
+        ca = CommissionAdvance
+        beu = BrokerageEngineUser
         offset = (page - 1) * page_size
+        filters = build_listing_filters(status, search)
 
-        allowed_statuses = {
-            "Pending",
-            "Pending Partial",
-            "Wage Garnishment",
-            "Paid",
-            "Cancelled",
-            "Left ROA",
-        }
-        if status is not None and status not in allowed_statuses:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid status. Allowed values: {', '.join(sorted(allowed_statuses))}"
+        total_count = (
+            db.execute(
+                select(func.count(distinct(ca.agent_name))).where(*filters)
+            ).scalar()
+            or 0
+        )
+
+        filtered_data = (
+            select(
+                ca.agent_name,
+                ca.status,
+                ca.outstanding_amount,
             )
+            .where(*filters)
+            .cte("filtered_data")
+        )
 
-        where_clauses = []
-        params: Dict[str, Any] = {
-            "limit": page_size,
-            "offset": offset,
-        }
-
-        if status:
-            where_clauses.append("ca.status = :status")
-            params["status"] = status
-
-        if search and search.strip():
-            where_clauses.append("ca.agent_name ILIKE :search")
-            params["search"] = f"%{search.strip()}%"
-
-        where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
-
-        total_count_query = text(f"""
-            SELECT COUNT(*) AS total_count
-            FROM (
-                SELECT ca.agent_name
-                FROM commission_advances ca
-                {where_sql}
-                GROUP BY ca.agent_name
-            ) grouped_agents
-        """)
-
-        total_count = db.execute(total_count_query, params).scalar() or 0
-
-        listing_query = text(f"""
-            WITH filtered_data AS (
-                SELECT
-                    ca.agent_name,
-                    ca.status,
-                    ca.outstanding_amount
-                FROM commission_advances ca
-                {where_sql}
-            ),
-            agent_totals AS (
-                SELECT
-                    fd.agent_name,
-                    COALESCE(
-                        SUM(fd.outstanding_amount) FILTER (
-                            WHERE fd.status IN ('Pending', 'Pending Partial', 'Wage Garnishment')
-                        ),
-                        0
-                    ) AS total_outstanding
-                FROM filtered_data fd
-                GROUP BY fd.agent_name
-            ),
-            status_counts AS (
-                SELECT
-                    fd.agent_name,
-                    fd.status,
-                    COUNT(*) AS status_count
-                FROM filtered_data fd
-                WHERE fd.status IS NOT NULL AND TRIM(fd.status) <> ''
-                GROUP BY fd.agent_name, fd.status
-            ),
-            status_breakdowns AS (
-                SELECT
-                    sc.agent_name,
-                    jsonb_object_agg(sc.status, sc.status_count) AS status_breakdown
-                FROM status_counts sc
-                GROUP BY sc.agent_name
-            ),
-            agent_status_priority AS (
-                SELECT
-                    fd.agent_name,
-                    SUM(CASE WHEN fd.status = 'Wage Garnishment' THEN 1 ELSE 0 END) AS wage_garnishment_count,
-                    SUM(CASE WHEN fd.status = 'Pending' THEN 1 ELSE 0 END) AS pending_count,
-                    SUM(CASE WHEN fd.status = 'Pending Partial' THEN 1 ELSE 0 END) AS pending_partial_count,
-                    SUM(CASE WHEN fd.status = 'Paid' THEN 1 ELSE 0 END) AS paid_count,
-                    SUM(CASE WHEN fd.status = 'Cancelled' THEN 1 ELSE 0 END) AS cancelled_count
-                FROM filtered_data fd
-                GROUP BY fd.agent_name
-            ),
-            agent_user_status AS (
-                SELECT
-                    beu.display_name AS agent_name,
-                    MAX(beu.agent_status) AS agent_status
-                FROM brokerage_engine_users beu
-                GROUP BY beu.display_name
+        agent_totals = (
+            select(
+                filtered_data.c.agent_name,
+                func.coalesce(
+                    func.sum(filtered_data.c.outstanding_amount).filter(
+                        filtered_data.c.status.in_(
+                            CommissionAdvanceStatus.active_values()
+                        )
+                    ),
+                    0,
+                ).label("total_outstanding"),
             )
-            SELECT
-                at.agent_name,
-                at.total_outstanding,
-                COALESCE(sb.status_breakdown, '{{}}'::jsonb) AS status_breakdown,
-                aus.agent_status,
-                asp.wage_garnishment_count,
-                asp.pending_count,
-                asp.pending_partial_count,
-                asp.paid_count,
-                asp.cancelled_count
-            FROM agent_totals at
-            LEFT JOIN status_breakdowns sb
-                ON at.agent_name = sb.agent_name
-            LEFT JOIN agent_status_priority asp
-                ON at.agent_name = asp.agent_name
-            LEFT JOIN agent_user_status aus
-                ON at.agent_name = aus.agent_name
-            ORDER BY
-                CASE
-                    WHEN COALESCE(asp.wage_garnishment_count, 0) > 0 THEN 1
-                    WHEN COALESCE(asp.pending_count, 0) > 0 THEN 2
-                    WHEN COALESCE(asp.pending_partial_count, 0) > 0 THEN 3
-                    WHEN COALESCE(asp.paid_count, 0) > 0 THEN 4
-                    WHEN COALESCE(asp.cancelled_count, 0) > 0 THEN 5
-                    ELSE 6
-                END ASC,
-                at.total_outstanding DESC,
-                at.agent_name ASC
-            LIMIT :limit OFFSET :offset
-        """)
+            .group_by(filtered_data.c.agent_name)
+            .cte("agent_totals")
+        )
 
-        rows = db.execute(listing_query, params).mappings().all()
+        status_counts = (
+            select(
+                filtered_data.c.agent_name,
+                filtered_data.c.status,
+                func.count().label("status_count"),
+            )
+            .where(
+                filtered_data.c.status.isnot(None),
+                func.trim(filtered_data.c.status) != "",
+            )
+            .group_by(
+                filtered_data.c.agent_name,
+                filtered_data.c.status,
+            )
+            .cte("status_counts")
+        )
+
+        status_breakdowns = (
+            select(
+                status_counts.c.agent_name,
+                func.jsonb_object_agg(
+                    status_counts.c.status,
+                    status_counts.c.status_count,
+                ).label("status_breakdown"),
+            )
+            .group_by(status_counts.c.agent_name)
+            .cte("status_breakdowns")
+        )
+
+        priority_expression = case(
+            (
+                filtered_data.c.status
+                == CommissionAdvanceStatus.WAGE_GARNISHMENT.value,
+                1,
+            ),
+            (
+                filtered_data.c.status
+                == CommissionAdvanceStatus.PENDING.value,
+                2,
+            ),
+            (
+                filtered_data.c.status
+                == CommissionAdvanceStatus.PENDING_PARTIAL.value,
+                3,
+            ),
+            (
+                filtered_data.c.status
+                == CommissionAdvanceStatus.PAID.value,
+                4,
+            ),
+            (
+                filtered_data.c.status
+                == CommissionAdvanceStatus.CANCELLED.value,
+                5,
+            ),
+            (
+                filtered_data.c.status
+                == CommissionAdvanceStatus.LEFT_ROA.value,
+                6,
+            ),
+            else_=7,
+        )
+
+        agent_status_priority = (
+            select(
+                filtered_data.c.agent_name,
+                func.min(priority_expression).label("status_priority"),
+            )
+            .group_by(filtered_data.c.agent_name)
+            .cte("agent_status_priority")
+        )
+
+        agent_user_status = (
+            select(
+                beu.display_name.label("agent_name"),
+                func.max(beu.agent_status).label("agent_status"),
+            )
+            .group_by(beu.display_name)
+            .cte("agent_user_status")
+        )
+
+        empty_json_object = cast(literal({}), JSON)
+
+        listing_stmt = (
+            select(
+                agent_totals.c.agent_name,
+                agent_totals.c.total_outstanding,
+                func.coalesce(
+                    status_breakdowns.c.status_breakdown,
+                    empty_json_object,
+                ).label("status_breakdown"),
+                agent_user_status.c.agent_status,
+            )
+            .select_from(agent_totals)
+            .outerjoin(
+                status_breakdowns,
+                agent_totals.c.agent_name
+                == status_breakdowns.c.agent_name,
+            )
+            .outerjoin(
+                agent_status_priority,
+                agent_totals.c.agent_name
+                == agent_status_priority.c.agent_name,
+            )
+            .outerjoin(
+                agent_user_status,
+                agent_totals.c.agent_name
+                == agent_user_status.c.agent_name,
+            )
+            .order_by(
+                agent_status_priority.c.status_priority.asc(),
+                agent_totals.c.total_outstanding.desc(),
+                agent_totals.c.agent_name.asc(),
+            )
+            .limit(page_size)
+            .offset(offset)
+        )
+
+        rows = db.execute(listing_stmt).mappings().all()
+
+        status_order = [
+            CommissionAdvanceStatus.WAGE_GARNISHMENT.value,
+            CommissionAdvanceStatus.PENDING.value,
+            CommissionAdvanceStatus.PENDING_PARTIAL.value,
+            CommissionAdvanceStatus.PAID.value,
+            CommissionAdvanceStatus.CANCELLED.value,
+            CommissionAdvanceStatus.LEFT_ROA.value,
+        ]
 
         items = []
+
         for row in rows:
-            raw_breakdown = dict(row["status_breakdown"] or {})
+            raw_breakdown = row["status_breakdown"] or {}
 
-            ordered_status_breakdown = {}
-            for key in ["Wage Garnishment", "Pending", "Pending Partial", "Paid", "Cancelled"]:
-                if key in raw_breakdown:
-                    ordered_status_breakdown[key] = raw_breakdown[key]
+            ordered_breakdown = {
+                status_name: raw_breakdown[status_name]
+                for status_name in status_order
+                if status_name in raw_breakdown
+            }
 
-            items.append({
-                "agent_name": row["agent_name"],
-                "total_outstanding": float(row["total_outstanding"] or 0),
-                "status_breakdown": ordered_status_breakdown,
-                "agent_status": row["agent_status"],
-            })
+            items.append(
+                {
+                    "agent_name": row["agent_name"],
+                    "total_outstanding": float(
+                        row["total_outstanding"] or 0
+                    ),
+                    "status_breakdown": ordered_breakdown,
+                    "agent_status": row["agent_status"],
+                }
+            )
 
-        total_pages = max(1, ceil(total_count / page_size)) if total_count else 1
-        has_next = page < total_pages
+        total_pages = (
+            max(1, ceil(total_count / page_size))
+            if total_count
+            else 1
+        )
 
         return PaginationResponseWithCount[Dict[str, Any]](
             success=True,
@@ -268,13 +311,14 @@ def get_commission_advances_listing(
             page_size=page_size,
             count=len(items),
             total_pages=total_pages,
-            has_next=has_next,
+            has_next=page < total_pages,
         )
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        ) from exc
 
 
 @router.get("/detail", response_model=PaginationResponseWithCount[Dict[str, Any]])
@@ -285,74 +329,115 @@ def get_commission_advances_detail(
     db: Session = Depends(get_db),
 ):
     try:
+        ca = CommissionAdvance
+        history = CommissionAdvanceHistory
         offset = (page - 1) * page_size
 
         total_count = db.execute(
-            text("""
-                SELECT COUNT(*) AS total_count
-                FROM commission_advances
-                WHERE agent_name = :agent_name
-            """),
-            {"agent_name": agent_name},
+            select(func.count(ca.id)).where(
+                ca.agent_name == agent_name
+            )
         ).scalar() or 0
 
-        rows = db.execute(
-            text("""
-                SELECT
-                    id,
-                    agent_name,
-                    state,
-                    address,
-                    company,
-                    original_amount,
-                    amount_paid,
-                    outstanding_amount,
-                    approved_date,
-                    paid_date,
-                    notes,
-                    status
-                FROM commission_advances
-                WHERE agent_name = :agent_name
-                ORDER BY
-                    CASE status
-                        WHEN 'Wage Garnishment' THEN 1
-                        WHEN 'Pending' THEN 2
-                        WHEN 'Pending Partial' THEN 3
-                        WHEN 'Paid' THEN 4
-                        WHEN 'Left ROA' THEN 5
-                        WHEN 'Cancelled' THEN 6
-                        ELSE 7
-                    END ASC,
-                    paid_date DESC NULLS LAST,
-                    id DESC
-                LIMIT :limit OFFSET :offset
-            """),
-            {
-                "agent_name": agent_name,
-                "limit": page_size,
-                "offset": offset,
-            },
-        ).mappings().all()
+        status_order = case(
+            (ca.status == CommissionAdvanceStatus.WAGE_GARNISHMENT.value, 1),
+            (ca.status == CommissionAdvanceStatus.PENDING.value, 2),
+            (ca.status == CommissionAdvanceStatus.PENDING_PARTIAL.value, 3),
+            (ca.status == CommissionAdvanceStatus.PAID.value, 4),
+            (ca.status == CommissionAdvanceStatus.LEFT_ROA.value, 5),
+            (ca.status == CommissionAdvanceStatus.CANCELLED.value, 6),
+            else_=7,
+        )
 
-        items = []
+        detail_stmt = (
+            select(
+                ca.id.label("ca_id"),
+                ca.agent_name,
+                ca.state,
+                ca.address,
+                ca.company,
+                ca.original_amount,
+                ca.amount_paid,
+                ca.outstanding_amount,
+                ca.approved_date,
+                ca.paid_date,
+                ca.notes,
+                ca.status,
+                history.id.label("history_id"),
+                history.field.label("history_field"),
+                history.old_value.label("history_old_value"),
+                history.new_value.label("history_new_value"),
+                history.edited_at.label("history_edited_at"),
+            )
+            .select_from(ca)
+            .outerjoin(history, history.ca_id == ca.id)
+            .where(ca.agent_name == agent_name)
+            .order_by(
+                status_order.asc(),
+                ca.paid_date.desc().nullslast(),
+                ca.id.desc(),
+                history.edited_at.desc().nullslast(),
+                history.id.desc().nullslast(),
+            )
+            .limit(page_size)
+            .offset(offset)
+        )
+
+        rows = db.execute(detail_stmt).mappings().all()
+
+        items_by_id: Dict[int, Dict[str, Any]] = {}
+        history_by_transaction: Dict[int, Dict[Any, Dict[str, Any]]] = {}
+
         for row in rows:
-            items.append({
-                "id": row["id"],
-                "agent_name": row["agent_name"],
-                "state": row["state"],
-                "address": row["address"],
-                "company": row["company"],
-                "original_amount": float(row["original_amount"] or 0),
-                "amount_paid": float(row["amount_paid"] or 0),
-                "outstanding_amount": float(row["outstanding_amount"] or 0),
-                "approved_date": row["approved_date"],
-                "paid_date": row["paid_date"],
-                "notes": row["notes"],
-                "status": row["status"],
-            })
+            transaction_id = row["ca_id"]
+
+            if transaction_id not in items_by_id:
+                items_by_id[transaction_id] = {
+                    "id": row["ca_id"],
+                    "agent_name": row["agent_name"],
+                    "state": row["state"],
+                    "address": row["address"],
+                    "company": row["company"],
+                    "original_amount": float(row["original_amount"] or 0),
+                    "amount_paid": float(row["amount_paid"] or 0),
+                    "outstanding_amount": float(row["outstanding_amount"] or 0),
+                    "approved_date": row["approved_date"],
+                    "paid_date": row["paid_date"],
+                    "notes": row["notes"],
+                    "status": row["status"],
+                    "history": [],
+                }
+
+                history_by_transaction[transaction_id] = {}
+
+            if row["history_id"] is None:
+                continue
+
+            edited_at = row["history_edited_at"]
+            transaction_history = history_by_transaction[transaction_id]
+
+            if edited_at not in transaction_history:
+                transaction_history[edited_at] = {
+                    "edited_at": edited_at,
+                    "changes": [],
+                }
+
+            transaction_history[edited_at]["changes"].append(
+                {
+                    "field": row["history_field"],
+                    "old_value": row["history_old_value"],
+                    "new_value": row["history_new_value"],
+                }
+            )
+
+        for transaction_id, grouped_history in history_by_transaction.items():
+            items_by_id[transaction_id]["history"] = list(
+                grouped_history.values()
+            )
+
+        items = list(items_by_id.values())
 
         total_pages = max(1, ceil(total_count / page_size)) if total_count else 1
-        has_next = page < total_pages
 
         return PaginationResponseWithCount[Dict[str, Any]](
             success=True,
@@ -364,8 +449,11 @@ def get_commission_advances_detail(
             page_size=page_size,
             count=len(items),
             total_pages=total_pages,
-            has_next=has_next,
+            has_next=page < total_pages,
         )
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        ) from exc
