@@ -1,272 +1,218 @@
 from datetime import date
-from decimal import Decimal, InvalidOperation
-from fastapi import APIRouter, Depends, HTTPException
+from decimal import Decimal
 from typing import Any, Dict, Optional
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import text
+from sqlalchemy import select
 from sqlalchemy.orm import Session
+from api.listing.commission_advances.utils import CommissionAdvanceStatus
+from models.commisison_advances import CommissionAdvance, CommissionAdvanceHistory
 from common.response import Response
 from db import get_db
 
 
-router = APIRouter(prefix='/commission-advances')
+router = APIRouter(prefix="/commission-advances")
 
 
 class CommissionAdvanceUpdateRequest(BaseModel):
-    status: Optional[str] = Field(
-        default=None,
-        description="Pending, Pending Partial, Wage Garnishment, Paid, Cancelled"
-    )
+    status: Optional[CommissionAdvanceStatus] = Field(default=None, description="Pending, Pending Partial, Wage Garnishment, Paid, Cancelled, Left ROA")
     notes: Optional[str] = None
     amount: Optional[Decimal] = Field(default=None, ge=0)
     paid_date: Optional[date] = None
-    approved_date: Optional[date] = None  # NEW
+    approved_date: Optional[date] = None
+    edited_by: Optional[str] = Field(default=None, max_length=255)
+
+
+def serialize_value(value: Any) -> str | None:
+    return None if value is None else str(value)
+
+
+def serialize_commission_advance(transaction: CommissionAdvance) -> Dict[str, Any]:
+    return {
+        "id": transaction.id,
+        "agent_name": transaction.agent_name,
+        "state": transaction.state,
+        "address": transaction.address,
+        "company": transaction.company,
+        "original_amount": float(transaction.original_amount or 0),
+        "amount_paid": float(transaction.amount_paid or 0),
+        "outstanding_amount": float(transaction.outstanding_amount or 0),
+        "paid_date": transaction.paid_date,
+        "approved_date": transaction.approved_date,
+        "notes": transaction.notes,
+        "status": transaction.status,
+    }
 
 
 @router.patch("/transaction/{transaction_id}", response_model=Response[Dict[str, Any]])
-def update_commission_advance_transaction(
-    transaction_id: int,
-    payload: CommissionAdvanceUpdateRequest,
-    db: Session = Depends(get_db),
-):
+def update_commission_advance_transaction(transaction_id: int, payload: CommissionAdvanceUpdateRequest, db: Session = Depends(get_db)):
     try:
-        allowed_statuses = {
-            "Pending",
-            "Pending Partial",
-            "Wage Garnishment",
-            "Paid",
-            "Cancelled",
-            "Left ROA",
-        }
-
-        update_data = payload.model_dump(exclude_unset=True)
+        update_data = payload.model_dump(exclude_unset=True, exclude={"edited_by"})
 
         if not update_data:
-            raise HTTPException(
-                status_code=400,
-                detail="No fields provided for update"
-            )
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No fields provided for update")
 
-        if "status" in update_data and update_data["status"] not in allowed_statuses:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid status. Allowed values: {', '.join(sorted(allowed_statuses))}"
-            )
+        transaction = db.execute(
+            select(CommissionAdvance)
+            .where(CommissionAdvance.id == transaction_id)
+            .with_for_update()
+        ).scalar_one_or_none()
 
-        existing = db.execute(
-            text("""
-                SELECT
-                    id,
-                    agent_name,
-                    state,
-                    address,
-                    company,
-                    original_amount,
-                    amount_paid,
-                    outstanding_amount,
-                    status,
-                    notes,
-                    paid_date,
-                    approved_date
-                FROM commission_advances
-                WHERE id = :transaction_id
-            """),
-            {"transaction_id": transaction_id},
-        ).mappings().first()
+        if transaction is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
 
-        if not existing:
-            raise HTTPException(status_code=404, detail="Transaction not found")
+        history_fields = ["status", "notes", "original_amount", "amount_paid", "paid_date", "approved_date"]
 
-        original_amount = Decimal(existing["original_amount"] or 0)
-        existing_amount_paid = Decimal(existing["amount_paid"] or 0)
-        requested_status = update_data.get("status", existing["status"])
+        old_values = {
+            field_name: getattr(transaction, field_name)
+            for field_name in history_fields
+        }
+
+        requested_status = update_data.get("status", transaction.status)
+
+        if isinstance(requested_status, CommissionAdvanceStatus):
+            requested_status = requested_status.value
+
+        original_amount = Decimal(transaction.original_amount or 0)
+        existing_amount_paid = Decimal(transaction.amount_paid or 0)
         input_amount = update_data.get("amount")
-        input_notes = update_data.get("notes") if "notes" in update_data else existing["notes"]
-        input_paid_date = update_data.get("paid_date") if "paid_date" in update_data else existing["paid_date"]
-        input_approved_date = (
-            update_data.get("approved_date")
-            if "approved_date" in update_data
-            else existing["approved_date"]
-        )
 
-        set_clauses = []
-        params: Dict[str, Any] = {"transaction_id": transaction_id}
-
-        # Wage Garnishment: only notes + approved_date allowed
-        if requested_status == "Wage Garnishment":
+        if requested_status == CommissionAdvanceStatus.WAGE_GARNISHMENT.value:
             disallowed_fields = {"amount", "paid_date"} & set(update_data.keys())
+
             if disallowed_fields:
                 raise HTTPException(
-                    status_code=400,
-                    detail="For status 'Wage Garnishment', only notes/approved_date can be modified"
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="For status 'Wage Garnishment', only notes and approved_date can be modified",
                 )
 
-            set_clauses.append("status = :status")
-            params["status"] = "Wage Garnishment"
+            transaction.status = CommissionAdvanceStatus.WAGE_GARNISHMENT.value
 
             if "notes" in update_data:
-                set_clauses.append("notes = :notes")
-                params["notes"] = input_notes
+                transaction.notes = update_data["notes"]
 
             if "approved_date" in update_data:
-                set_clauses.append("approved_date = :approved_date")
-                params["approved_date"] = input_approved_date
+                transaction.approved_date = update_data["approved_date"]
 
-        # Pending Partial
-        elif requested_status == "Pending Partial":
+        elif requested_status == CommissionAdvanceStatus.PENDING_PARTIAL.value:
             if input_amount is None:
                 raise HTTPException(
-                    status_code=400,
-                    detail="amount is required when changing status to 'Pending Partial'"
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="amount is required when changing status to 'Pending Partial'",
                 )
 
-            try:
-                additional_amount = Decimal(input_amount)
-            except (InvalidOperation, TypeError):
-                raise HTTPException(status_code=400, detail="Invalid amount value")
+            additional_amount = Decimal(input_amount)
 
-            if additional_amount < 0:
-                raise HTTPException(status_code=400, detail="amount cannot be negative")
-
-            # If the transaction is already Pending Partial and status remains Pending Partial,
-            # add the new amount to the existing amount_paid. Otherwise, treat it as the first partial.
-            if existing["status"] == "Pending Partial":
+            if transaction.status == CommissionAdvanceStatus.PENDING_PARTIAL.value:
                 partial_paid_amount = existing_amount_paid + additional_amount
             else:
                 partial_paid_amount = additional_amount
 
             if partial_paid_amount >= original_amount:
                 raise HTTPException(
-                    status_code=400,
-                    detail="For 'Pending Partial', cumulative amount_paid must be less than original_amount"
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="For 'Pending Partial', cumulative amount_paid must be less than original_amount",
                 )
 
-            set_clauses.append("status = :status")
-            params["status"] = "Pending Partial"
-
-            set_clauses.append("amount_paid = :amount_paid")
-            params["amount_paid"] = partial_paid_amount
+            transaction.status = CommissionAdvanceStatus.PENDING_PARTIAL.value
+            transaction.amount_paid = partial_paid_amount
 
             if "notes" in update_data:
-                set_clauses.append("notes = :notes")
-                params["notes"] = input_notes
+                transaction.notes = update_data["notes"]
 
             if "paid_date" in update_data:
-                set_clauses.append("paid_date = :paid_date")
-                params["paid_date"] = input_paid_date
+                transaction.paid_date = update_data["paid_date"]
 
             if "approved_date" in update_data:
-                set_clauses.append("approved_date = :approved_date")
-                params["approved_date"] = input_approved_date
+                transaction.approved_date = update_data["approved_date"]
 
-        # Paid
-        elif requested_status == "Paid":
+        elif requested_status == CommissionAdvanceStatus.PAID.value:
             if "amount" in update_data:
                 raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "Do not send amount when status is 'Paid'; "
-                        "amount_paid will be set to original_amount automatically"
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Do not send amount when status is 'Paid'; amount_paid is set automatically",
+                )
+
+            transaction.status = CommissionAdvanceStatus.PAID.value
+            transaction.amount_paid = original_amount
+
+            if "notes" in update_data:
+                transaction.notes = update_data["notes"]
+
+            if "paid_date" in update_data:
+                transaction.paid_date = update_data["paid_date"]
+
+            if "approved_date" in update_data:
+                transaction.approved_date = update_data["approved_date"]
+
+        else:
+            if "status" in update_data:
+                transaction.status = requested_status
+
+            if "notes" in update_data:
+                transaction.notes = update_data["notes"]
+
+            if "paid_date" in update_data:
+                transaction.paid_date = update_data["paid_date"]
+
+            if "approved_date" in update_data:
+                transaction.approved_date = update_data["approved_date"]
+
+            if "amount" in update_data:
+                transaction.original_amount = input_amount
+
+        db.flush()
+        db.refresh(transaction)
+
+        new_values = {
+            field_name: getattr(transaction, field_name)
+            for field_name in history_fields
+        }
+
+        edited_by = (
+            payload.edited_by.strip()
+            if payload.edited_by and payload.edited_by.strip()
+            else "System"
+        )
+
+        history_records = []
+
+        for field_name in history_fields:
+            old_value = serialize_value(old_values[field_name])
+            new_value = serialize_value(new_values[field_name])
+
+            if old_value != new_value:
+                history_records.append(
+                    CommissionAdvanceHistory(
+                        ca_id=transaction.id,
+                        field=field_name,
+                        old_value=old_value,
+                        new_value=new_value,
+                        action="UPDATE",
+                        edited_by=edited_by,
                     )
                 )
 
-            set_clauses.append("status = :status")
-            params["status"] = "Paid"
+        if history_records:
+            db.add_all(history_records)
 
-            set_clauses.append("amount_paid = :amount_paid")
-            params["amount_paid"] = original_amount
-
-            if "notes" in update_data:
-                set_clauses.append("notes = :notes")
-                params["notes"] = input_notes
-
-            if "paid_date" in update_data:
-                set_clauses.append("paid_date = :paid_date")
-                params["paid_date"] = input_paid_date
-
-            if "approved_date" in update_data:
-                set_clauses.append("approved_date = :approved_date")
-                params["approved_date"] = input_approved_date
-
-        # All other statuses
-        else:
-            if "status" in update_data:
-                set_clauses.append("status = :status")
-                params["status"] = requested_status
-
-            if "notes" in update_data:
-                set_clauses.append("notes = :notes")
-                params["notes"] = input_notes
-
-            if "paid_date" in update_data:
-                set_clauses.append("paid_date = :paid_date")
-                params["paid_date"] = input_paid_date
-
-            if "approved_date" in update_data:
-                set_clauses.append("approved_date = :approved_date")
-                params["approved_date"] = input_approved_date
-
-            if "amount" in update_data:
-                try:
-                    amount_value = Decimal(input_amount)
-                except (InvalidOperation, TypeError):
-                    raise HTTPException(status_code=400, detail="Invalid amount value")
-
-                if amount_value < 0:
-                    raise HTTPException(status_code=400, detail="amount cannot be negative")
-
-                set_clauses.append("original_amount = :original_amount")
-                params["original_amount"] = amount_value
-
-        if not set_clauses:
-            raise HTTPException(
-                status_code=400,
-                detail="No valid fields to update for the selected status"
-            )
-
-        update_query = text(f"""
-            UPDATE commission_advances
-            SET {', '.join(set_clauses)}
-            WHERE id = :transaction_id
-            RETURNING
-                id,
-                agent_name,
-                state,
-                address,
-                company,
-                original_amount,
-                amount_paid,
-                outstanding_amount,
-                paid_date,
-                approved_date,
-                notes,
-                status
-        """)
-
-        updated_row = db.execute(update_query, params).mappings().first()
         db.commit()
+        db.refresh(transaction)
 
         return Response[Dict[str, Any]](
             success=True,
-            data={
-                "id": updated_row["id"],
-                "agent_name": updated_row["agent_name"],
-                "state": updated_row["state"],
-                "address": updated_row["address"],
-                "company": updated_row["company"],
-                "original_amount": float(updated_row["original_amount"] or 0),
-                "amount_paid": float(updated_row["amount_paid"] or 0),
-                "outstanding_amount": float(updated_row["outstanding_amount"] or 0),
-                "paid_date": updated_row["paid_date"],
-                "approved_date": updated_row["approved_date"],
-                "notes": updated_row["notes"],
-                "status": updated_row["status"],
-            },
+            data=serialize_commission_advance(transaction),
             message="Commission advance transaction updated successfully",
         )
 
     except HTTPException:
-        raise
-    except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise
+
+    except Exception as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
