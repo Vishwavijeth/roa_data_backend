@@ -1,12 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Any, Dict, Optional
 from math import ceil
-from sqlalchemy import text
 from sqlalchemy.orm import Session
-from sqlalchemy import JSON, and_, case, cast, distinct, func, literal, select
+from sqlalchemy import case, cast, distinct, func, literal, select
 from common.pagination import PaginationData, PaginationResponseWithCount
+from sqlalchemy.dialects.postgresql import JSONB
 from common.response import Response, FilterResponse
-from fastapi.responses import JSONResponse
 from api.listing.commission_advances.base import CommissionAdvanceSummary
 from models.commisison_advances import CommissionAdvance, CommissionAdvanceHistory
 from api.listing.commission_advances.utils import CommissionAdvanceStatus
@@ -225,7 +224,7 @@ def get_commission_advances_listing(
             .cte("agent_user_status")
         )
 
-        empty_json_object = cast(literal({}), JSON)
+        empty_json_object = cast(literal("{}"), JSONB)
 
         listing_stmt = (
             select(
