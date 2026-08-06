@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Any, Dict, Optional
 from math import ceil
 from sqlalchemy.orm import Session
-from sqlalchemy import case, cast, distinct, func, literal, select
+from sqlalchemy import case, cast, distinct, func, literal, select, or_
 from common.pagination import PaginationData, PaginationResponseWithCount
 from sqlalchemy.dialects.postgresql import JSONB
 from common.response import Response, FilterResponse
@@ -18,14 +18,24 @@ def build_listing_filters(
     status: Optional[CommissionAdvanceStatus],
     search: Optional[str],
 ):
+    """
+    Build filters for commission advance listing.
+    
+    - search: searches both agent_name AND address (OR logic)
+    """
     filters = []
 
     if status:
         filters.append(CommissionAdvance.status == status.value)
 
     if search and search.strip():
+        search_term = search.strip()
+        # Search in both agent_name AND address (OR logic)
         filters.append(
-            CommissionAdvance.agent_name.ilike(f"%{search.strip()}%")
+            or_(
+                CommissionAdvance.agent_name.ilike(f"%{search_term}%"),
+                CommissionAdvance.address.ilike(f"%{search_term}%"),
+            )
         )
 
     return filters
