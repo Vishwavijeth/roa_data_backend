@@ -143,6 +143,8 @@ def brokerage_detail(transactionid: str, db: Session = Depends(get_db)):
             be.seller_name,
             be.buying_agent_name,
             be.total_gross_commission,
+            be.listing_side_gross_commission,
+            be.buying_side_gross_commission,
             be.transaction_specialist,
             be.property_address,
             be.da_title_company,
@@ -221,7 +223,12 @@ def brokerage_detail(transactionid: str, db: Session = Depends(get_db)):
             "tags": data.get("tags"),
             "status": data.get("transaction_status"),
             "transaction_specialist": data.get("transaction_specialist"),
-            "skyslopefileid": data.get("skyslopefileid")    
+            "skyslopefileid": data.get("skyslopefileid"),
+
+            # New commission fields
+            "total_gross_commission": data.get("total_gross_commission"),
+            "listing_side_gross_commission": data.get("listing_side_gross_commission"),
+            "buying_side_gross_commission": data.get("buying_side_gross_commission"),
         },
         "skyslope": {
             "match": skyslope_match,
@@ -238,8 +245,8 @@ def brokerage_detail(transactionid: str, db: Session = Depends(get_db)):
             "contractacceptancedate": data.get("contractacceptancedate"),
             "escrowclosingdate": data.get("escrowclosingdate"),
             "canceldate": data.get("canceldate"),
-            "officegrosscommissiononsale": data.get("officegrosscommissiononsale")
-        }
+            "officegrosscommissiononsale": data.get("officegrosscommissiononsale"),
+        },
     }
 
 @router.get("/sale/noskyslopefileid/download")

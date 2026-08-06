@@ -529,6 +529,7 @@ def skyslope_detail(saleguid: str, db: Session = Depends(get_db)):
     raw_conn = db.connection().connection
     cursor = raw_conn.cursor()
 
+    # Skyslope + sale_commission
     skyslope_query = """
         SELECT
             s.saleguid,
@@ -579,12 +580,14 @@ def skyslope_detail(saleguid: str, db: Session = Depends(get_db)):
                       AND LOWER(sc.role) = 'seller'
                 ),
                 NULL
-            ) AS seller
+            ) AS seller,
+            sc.officegrosscommissiononsale
         FROM sale s
         LEFT JOIN users u ON s.agentguid = u.userguid
         LEFT JOIN users r ON s.reviewerguid = r.userguid
         LEFT JOIN sale_property sp ON s.saleguid = sp.saleguid
         LEFT JOIN stage st ON s.stageid = st.stageid
+        LEFT JOIN sale_commission sc ON s.saleguid = sc.saleguid
         WHERE s.saleguid = %s
     """
 
@@ -597,6 +600,7 @@ def skyslope_detail(saleguid: str, db: Session = Depends(get_db)):
     columns = [desc[0] for desc in cursor.description]
     skyslope_data = dict(zip(columns, row))
 
+    # Brokerage engine
     be_query = """
         SELECT
             be.transaction_identifier_transactionid::text AS transactionid,
@@ -614,11 +618,8 @@ def skyslope_detail(saleguid: str, db: Session = Depends(get_db)):
             be.transaction_specialist,
             be.skyslopefileid,
             be.total_gross_commission,
-            CASE
-                WHEN LOWER(be.transaction_status) = 'cancelled'
-                    THEN 'ignored_cancelled_duplicate'
-                ELSE 'active'
-            END AS record_role
+            be.listing_side_gross_commission,
+            be.buying_side_gross_commission
         FROM brokerage_engine be
         WHERE be.skyslopefileid = %s
         ORDER BY
@@ -634,6 +635,7 @@ def skyslope_detail(saleguid: str, db: Session = Depends(get_db)):
     be_columns = [desc[0] for desc in cursor.description]
     brokerage_engine_records = [dict(zip(be_columns, r)) for r in be_rows]
 
+    # Other income
     other_income_query = """
         SELECT
             oit.transaction_identifier_transactionid::text AS transactionid,
@@ -683,7 +685,8 @@ def skyslope_detail(saleguid: str, db: Session = Depends(get_db)):
             "status": skyslope_data["status"],
             "stage": skyslope_data["stage_name"],
             "contractacceptancedate": skyslope_data["contractacceptancedate"],
-            "escrowclosingdate": skyslope_data["escrowclosingdate"]
+            "escrowclosingdate": skyslope_data["escrowclosingdate"],
+            "officegrosscommissiononsale": skyslope_data.get("officegrosscommissiononsale"),
         },
         "brokerage_engine_records": brokerage_engine_records,
         "otherincome_transactions": otherincome_records,
