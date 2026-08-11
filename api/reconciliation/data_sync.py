@@ -10,7 +10,7 @@ def data_sync():
 
     try:
         api1 = requests.post(
-            "https://roa-data-backend.vercel.app/sync/brokerage-engine",
+            "https://roa-analytics-backend-gamma.vercel.app/sync/brokerage-engine",
             timeout=300,
         )
         steps.append({
@@ -26,7 +26,7 @@ def data_sync():
             }
 
         api2 = requests.post(
-            "https://roa-data-backend.vercel.app/sync/other-income",
+            "https://roa-analytics-backend-gamma.vercel.app/sync/other-income",
             timeout=300,
         )
         steps.append({
@@ -42,7 +42,7 @@ def data_sync():
             }
 
         api3 = requests.post(
-            "https://roa-data-backend.vercel.app/sync-skyslope-sales",
+            "https://roa-analytics-backend-gamma.vercel.app/sync-skyslope-sales",
             timeout=300,
         )
         steps.append({
@@ -58,12 +58,12 @@ def data_sync():
             }
 
         api4 = requests.post(
-            "https://roa-data-backend.vercel.app/reconciliation/data/populate",
+            "https://roa-analytics-backend-gamma.vercel.app/reconciliation/data/populate",
             timeout=300,
         )
         steps.append({
             "step": "reconciliation_data_populate",
-            "url": "https://roa-data-backend.vercel.app/reconciliation/data/populate",
+            "url": "https://roa-analytics-backend-gamma.vercel.app/reconciliation/data/populate",
             "status_code": api4.status_code,
             "success": api4.ok,
         })

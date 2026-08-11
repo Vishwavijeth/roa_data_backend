@@ -10,7 +10,8 @@ from db import get_db
 from api.listing.commission_advances.utils import CommissionAdvanceStatus
 from models.brokerage_engine_users import BrokerageEngineUser
 from models.commisison_advances import CommissionAdvance
-from models.skyslope import Sale, SaleProperty
+from models.skyslope.sale import Sale
+from models.skyslope.property import SaleProperty
 
 
 router = APIRouter(prefix="/commission-advances")

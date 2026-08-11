@@ -9,12 +9,12 @@ def cron_job():
 
     try:
         api1 = requests.post(
-            "https://roa-data-backend.vercel.app/sync/brokerage-engine",
+            "https://roa-analytics-backend-gamma.vercel.app/sync/brokerage-engine",
             timeout=300,
         )
         steps.append({
             "step": "brokerage_engine_sync",
-            "url": "https://roa-data-backend.vercel.app/sync/brokerage-engine",
+            "url": "https://roa-analytics-backend-gamma.vercel.app/sync/brokerage-engine",
             "status_code": api1.status_code,
             "success": api1.ok,
         })
@@ -26,12 +26,12 @@ def cron_job():
             }
 
         api2 = requests.post(
-            "https://roa-data-backend.vercel.app/sync/other-income",
+            "https://roa-analytics-backend-gamma.vercel.app/sync/other-income",
             timeout=300,
         )
         steps.append({
             "step": "other_income_sync",
-            "url": "https://roa-data-backend.vercel.app/sync/other-income",
+            "url": "https://roa-analytics-backend-gamma.vercel.app/sync/other-income",
             "status_code": api2.status_code,
             "success": api2.ok,
         })
@@ -43,12 +43,12 @@ def cron_job():
             }
 
         api3 = requests.post(
-            "https://roa-data-backend.vercel.app/sync/skyslope-sales",
+            "https://roa-analytics-backend-gamma.vercel.app/sync/skyslope-sales",
             timeout=300,
         )
         steps.append({
             "step": "skyslope_sales_sync",
-            "url": "https://roa-data-backend.vercel.app/sync/skyslope-sales",
+            "url": "https://roa-analytics-backend-gamma.vercel.app/sync/skyslope-sales",
             "status_code": api3.status_code,
             "success": api3.ok,
         })
@@ -60,12 +60,12 @@ def cron_job():
             }
 
         api4 = requests.post(
-            "https://roa-data-backend.vercel.app/reconciliation/data/populate",
+            "https://roa-analytics-backend-gamma.vercel.app/reconciliation/data/populate",
             timeout=300,
         )
         steps.append({
             "step": "reconciliation_data_populate",
-            "url": "https://roa-data-backend.vercel.app/reconciliation/data/populate",
+            "url": "https://roa-analytics-backend-gamma.vercel.app/reconciliation/data/populate",
             "status_code": api4.status_code,
             "success": api4.ok,
         })

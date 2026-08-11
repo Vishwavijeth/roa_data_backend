@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import Any
 from uuid import UUID
+from datetime import date
 
 # ----------- Summary -----------
 class AccountHoldSummaryData(BaseModel):
@@ -20,8 +21,8 @@ class AccountHoldItem(BaseModel):
 # ----------- Detail -----------
 class OpenInvoiceItem(BaseModel):
     balance: Any | None = None
-    due_date: str | None = None
-    txn_date: str | None = None
+    due_date: date | None = None
+    txn_date: date | None = None
     total_amt: Any | None = None
     doc_number: str | None = None
     invoice_id: str | int | None = None

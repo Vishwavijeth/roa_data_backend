@@ -19,6 +19,7 @@ from api.listing.cda_sent import router as cda_sent_router
 from api.listing.account_hold.account_hold import router as account_hold_router
 from api.listing.account_hold.account_hold_detail import router as account_hold_detail_router
 from api.listing.quickbooks import router as quickbooks_router
+from api.listing.account_hold.qb_webhook import router as qb_webhook_router
 from api.listing.month_closing import router as month_closing_router
 from api.listing.brokerhold import router as broker_hold_router
 from api.reconciliation.sale_price import router as sale_price_router
@@ -39,8 +40,7 @@ from api.reconciliation.recon_review import router as recon_review_router
 from api.reconciliation.recon_analytics import router as recon_analytics_router
 from api.reconciliation.recon_data_population import router as recon_data_populate_router
 from api.reconciliation.data_sync import router as data_sync_router
-from api.qb_customerid_population import router as qb_customerid_population_router
-from api.quickbooks.ar_balance_details import router as ar_balance_details_router
+from api.quickbooks.qb_customerid_population import router as qb_customerid_population_router
 from api.listing.commission_advances.commission_advances import router as commission_advances_router
 from api.listing.commission_advances.log import router as commission_advances_log_router
 from api.listing.commission_advances.update import router as commisison_advances_update_router
@@ -73,6 +73,7 @@ app.include_router(cda_sent_router)
 app.include_router(account_hold_router)
 app.include_router(account_hold_detail_router)
 app.include_router(quickbooks_router)
+app.include_router(qb_webhook_router)
 app.include_router(qb_customerid_population_router)
 app.include_router(month_closing_router)
 app.include_router(sale_price_router)
@@ -94,7 +95,6 @@ app.include_router(recon_analytics_router)
 app.include_router(recon_data_populate_router)
 app.include_router(data_sync_router)
 app.include_router(cron_router)
-app.include_router(ar_balance_details_router)
 app.include_router(commission_advances_router)
 app.include_router(commission_advances_log_router)
 app.include_router(commisison_advances_update_router)
