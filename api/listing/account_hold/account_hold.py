@@ -1,329 +1,214 @@
+from __future__ import annotations
+
 from math import ceil
 from typing import Literal
-from pydantic import BaseModel
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import text
+
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import String, and_, cast, desc, func, or_, select
 from sqlalchemy.orm import Session
-from common.pagination import PaginationResponse
+
 from db import get_db
-from api.listing.account_hold.base import AccountHoldItem, AccountHoldSummaryData
+from common.pagination import PaginationResponse
 from common.response import Response
+
+from api.listing.account_hold.base import (
+    AccountHoldItem,
+    AccountHoldSummaryData,
+)
+
+from models.brokerage_engine_users import BrokerageEngineUser
+from models.quickbooks import QuickbooksInvoice
+
+from api.listing.account_hold.utils import (
+    build_matched_transactions_subquery,
+    build_latest_reconciliation_subquery,
+    build_mismatch_expression,
+)
+
 
 router = APIRouter()
 
-def normalize_email(value):
-    if not value:
-        return None
-    return str(value).strip().lower()
+
+def account_hold_expression():
+    return func.coalesce(BrokerageEngineUser.agenttags, "").contains("AccountHold")
 
 
-def has_account_hold_tag(agenttags):
-    if not agenttags:
-        return False
-    return "accounthold" in {
-        tag.strip().lower()
-        for tag in str(agenttags).split(",")
-        if tag.strip()
-    }
+def build_invoice_summary_subquery():
+    return (
+        select(
+            QuickbooksInvoice.customer_id.label("customer_id"),
+            func.coalesce(func.sum(QuickbooksInvoice.balance), 0).label("total_open_balance"),
+            func.count(QuickbooksInvoice.invoice_id).label("invoice_count"),
+            func.max(QuickbooksInvoice.updated_at).label("ar_updated_at"),
+        )
+        .group_by(QuickbooksInvoice.customer_id)
+        .subquery("invoice_summary")
+    )
 
 
-def build_where_clause(
+def build_agent_base_subquery():
+    invoice_summary = build_invoice_summary_subquery()
+
+    customer_join_condition = (
+        cast(BrokerageEngineUser.qb_customerid, String) == invoice_summary.c.customer_id
+    )
+
+    total_open_balance = func.coalesce(invoice_summary.c.total_open_balance, 0)
+    invoice_count = func.coalesce(invoice_summary.c.invoice_count, 0)
+    has_account_hold = account_hold_expression()
+    has_ar_balance = total_open_balance > 0
+
+    return (
+        select(
+            BrokerageEngineUser.agent_identifier.label("agent_identifier"),
+            BrokerageEngineUser.display_name.label("display_name"),
+            BrokerageEngineUser.roa_email.label("roa_email"),
+            BrokerageEngineUser.agenttags.label("agenttags"),
+            BrokerageEngineUser.qb_customerid.label("qb_customerid"),
+            invoice_summary.c.customer_id.label("matched_customer_id"),
+            total_open_balance.label("total_open_balance"),
+            invoice_count.label("invoice_count"),
+            invoice_summary.c.ar_updated_at.label("ar_updated_at"),
+            has_account_hold.label("has_account_hold"),
+            has_ar_balance.label("has_ar_balance"),
+        )
+        .select_from(BrokerageEngineUser)
+        .outerjoin(invoice_summary, customer_join_condition)
+        .subquery("agent_base")
+    )
+
+
+def apply_listing_filters(
+    statement,
+    base,
     search: str | None = None,
     account_hold: bool | None = None,
     ar_balance: bool | None = None,
-    match_mode: str = "and",
+    match_mode: Literal["and", "or"] = "and",
 ):
-    search_filters = []
-    combinable_filters = []
-    params = {}
+    filters = []
 
     if search and search.strip():
         search_value = f"%{search.strip()}%"
-        search_filters.append(
-            "(b.display_name ILIKE :search OR b.roa_email ILIKE :search)"
+        filters.append(
+            or_(
+                base.c.display_name.ilike(search_value),
+                base.c.roa_email.ilike(search_value),
+            )
         )
-        params["search"] = search_value
+
+    boolean_filters = []
 
     if account_hold is True:
-        combinable_filters.append("b.has_account_hold = TRUE")
+        boolean_filters.append(base.c.has_account_hold.is_(True))
     elif account_hold is False:
-        combinable_filters.append("b.has_account_hold = FALSE")
+        boolean_filters.append(base.c.has_account_hold.is_(False))
 
     if ar_balance is True:
-        combinable_filters.append("COALESCE(b.total_open_balance, 0) > 0")
+        boolean_filters.append(base.c.has_ar_balance.is_(True))
     elif ar_balance is False:
-        combinable_filters.append("COALESCE(b.total_open_balance, 0) <= 0")
+        boolean_filters.append(base.c.has_ar_balance.is_(False))
 
-    clauses = []
-    if search_filters:
-        clauses.append(" AND ".join(search_filters))
+    if boolean_filters:
+        filters.append(or_(*boolean_filters) if match_mode == "or" else and_(*boolean_filters))
 
-    if combinable_filters:
-        joiner = " AND " if match_mode == "and" else " OR "
-        combined = joiner.join(combinable_filters)
-        if len(combinable_filters) > 1:
-            combined = f"({combined})"
-        clauses.append(combined)
+    if filters:
+        statement = statement.where(and_(*filters))
 
-    where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    return where_clause, params
+    return statement
 
 
-def get_base_cte():
-    return """
-        WITH ar_summary AS (
-            SELECT
-                abd.customer_id AS customer_id,
-                MAX(COALESCE(abd.total_open_balance, 0)) AS total_open_balance,
-                MAX(COALESCE(abd.invoice_count, 0)) AS invoice_count,
-                MAX(abd.updated_at) AS ar_updated_at
-            FROM ar_balance_details abd
-            GROUP BY abd.customer_id
-        ),
-        user_base AS (
-            SELECT
-                u.display_name,
-                u.roa_email,
-                u.agenttags,
-                u.qb_customerid,
-                EXISTS (
-                    SELECT 1
-                    FROM regexp_split_to_table(COALESCE(u.agenttags, ''), ',') AS tag
-                    WHERE LOWER(TRIM(tag)) = 'accounthold'
-                ) AS has_account_hold
-            FROM brokerage_engine_users u
-        ),
-        b AS (
-            SELECT
-                ub.display_name,
-                ub.roa_email,
-                ub.agenttags,
-                ub.qb_customerid,
-                ub.has_account_hold,
-                ar.customer_id AS matched_customer_id,
-                COALESCE(ar.total_open_balance, 0) AS total_open_balance,
-                COALESCE(ar.invoice_count, 0) AS invoice_count,
-                ar.ar_updated_at,
-                (COALESCE(ar.total_open_balance, 0) > 0) AS has_ar_balance
-            FROM user_base ub
-            LEFT JOIN ar_summary ar
-              ON ar.customer_id = ub.qb_customerid
-        )
-    """
+def fetch_agent_transaction_summary(db: Session, agent_rows: list[dict]) -> dict[str, dict]:
+    target_emails = [row["roa_email"] for row in agent_rows if row.get("roa_email")]
+    target_names = [row["display_name"] for row in agent_rows if row.get("display_name")]
 
-
-def fetch_agent_listing_page_base(
-    db: Session,
-    page: int,
-    size: int,
-    search: str | None = None,
-    account_hold: bool | None = None,
-    ar_balance: bool | None = None,
-    match_mode: str = "and",
-):
-    offset = (page - 1) * size
-    where_clause, params = build_where_clause(
-        search=search,
-        account_hold=account_hold,
-        ar_balance=ar_balance,
-        match_mode=match_mode,
-    )
-
-    base_cte = get_base_cte()
-
-    count_query = f"""
-        {base_cte}
-        SELECT COUNT(*) AS total_count
-        FROM b
-        {where_clause}
-    """
-
-    data_query = f"""
-        {base_cte}
-        SELECT
-            b.display_name,
-            b.roa_email,
-            b.agenttags,
-            b.qb_customerid,
-            b.matched_customer_id,
-            b.total_open_balance,
-            b.invoice_count,
-            b.ar_updated_at,
-            b.has_account_hold,
-            b.has_ar_balance
-        FROM b
-        {where_clause}
-        ORDER BY
-            b.has_account_hold DESC,
-            b.total_open_balance DESC,
-            b.display_name,
-            b.roa_email
-        LIMIT :limit OFFSET :offset
-    """
-
-    try:
-        total_count = int(db.execute(text(count_query), params).scalar())
-        data_params = {**params, "limit": size, "offset": offset}
-        rows = db.execute(text(data_query), data_params).mappings().all()
-        return total_count, [dict(r) for r in rows]
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Listing base query failed: {str(e)}")
-
-
-def fetch_transaction_summary_for_agents(db: Session, agent_emails: list[str]):
-    if not agent_emails:
+    if not target_emails and not target_names:
         return {}
 
-    query = """
-        WITH target_agents AS (
-            SELECT DISTINCT
-                LOWER(TRIM(u.roa_email)) AS normalized_email,
-                LOWER(TRIM(u.display_name)) AS normalized_name
-            FROM brokerage_engine_users u
-            WHERE u.roa_email IS NOT NULL
-              AND TRIM(u.roa_email) <> ''
-              AND LOWER(TRIM(u.roa_email)) = ANY(:agent_emails)
-        ),
-        brokerage_engine_transactions AS (
-            SELECT
-                be.transaction_identifier_transactionid AS transaction_id,
-                LOWER(TRIM(split_email)) AS normalized_email
-            FROM brokerage_engine be
-            CROSS JOIN LATERAL regexp_split_to_table(COALESCE(be.buying_agent_email, ''), ',') AS split_email
-            WHERE NULLIF(TRIM(split_email), '') IS NOT NULL
-        ),
-        otherincome_transaction_agents AS (
-            SELECT
-                oi.transaction_identifier_transactionid AS transaction_id,
-                LOWER(TRIM(split_agent)) AS normalized_name
-            FROM otherincome_transactions oi
-            CROSS JOIN LATERAL regexp_split_to_table(COALESCE(oi.agents, ''), ',') AS split_agent
-            WHERE NULLIF(TRIM(split_agent), '') IS NOT NULL
-        ),
-        matched_be_transactions AS (
-            SELECT DISTINCT ta.normalized_email, bet.transaction_id
-            FROM target_agents ta
-            JOIN brokerage_engine_transactions bet
-              ON bet.normalized_email = ta.normalized_email
-        ),
-        matched_oi_transactions AS (
-            SELECT DISTINCT ta.normalized_email, oita.transaction_id
-            FROM target_agents ta
-            JOIN otherincome_transaction_agents oita
-              ON oita.normalized_name = ta.normalized_name
-        ),
-        matched_transactions AS (
-            SELECT normalized_email, transaction_id FROM matched_be_transactions
-            UNION
-            SELECT normalized_email, transaction_id FROM matched_oi_transactions
-        ),
-        latest_reconciliation_data AS (
-            SELECT DISTINCT ON (rd.transactionid)
-                rd.transactionid,
-                rd.saleguid,
-                rd.gross_commission_match,
-                rd.close_date_match,
-                rd.status_match,
-                rd.sale_price_match
-            FROM reconciliation_data rd
-            ORDER BY rd.transactionid, rd.evaluated_at DESC NULLS LAST
+    matched_transactions = build_matched_transactions_subquery(target_emails, target_names)
+    latest_reconciliation = build_latest_reconciliation_subquery()
+    mismatch_expr = build_mismatch_expression(latest_reconciliation)
+
+    statement = (
+        select(
+            matched_transactions.c.agent_key,
+            func.count(func.distinct(matched_transactions.c.transaction_id)).label("transaction_count"),
+            func.bool_or(mismatch_expr).label("has_transaction_mismatch"),
         )
-        SELECT
-            mt.normalized_email,
-            COUNT(DISTINCT mt.transaction_id) AS transaction_count,
-            BOOL_OR(
-                lrd.saleguid IS NULL
-                OR (lrd.gross_commission_match IS NOT NULL AND LOWER(TRIM(lrd.gross_commission_match)) <> 'match')
-                OR (lrd.close_date_match IS NOT NULL AND LOWER(TRIM(lrd.close_date_match)) <> 'match')
-                OR (lrd.status_match IS NOT NULL AND LOWER(TRIM(lrd.status_match)) <> 'match')
-                OR (lrd.sale_price_match IS NOT NULL AND LOWER(TRIM(lrd.sale_price_match)) <> 'match')
-            ) AS has_transaction_mismatch
-        FROM matched_transactions mt
-        LEFT JOIN latest_reconciliation_data lrd
-          ON lrd.transactionid = mt.transaction_id
-        GROUP BY mt.normalized_email
-    """
+        .select_from(matched_transactions)
+        .outerjoin(
+            latest_reconciliation,
+            latest_reconciliation.c.transactionid == matched_transactions.c.transaction_id,
+        )
+        .group_by(matched_transactions.c.agent_key)
+    )
 
-    try:
-        rows = db.execute(text(query), {"agent_emails": agent_emails}).mappings().all()
+    rows = db.execute(statement).mappings().all()
 
-        return {
-            row["normalized_email"]: {
-                "transaction_count": int(row["transaction_count"] or 0),
-                "has_transaction_mismatch": bool(row["has_transaction_mismatch"]),
-            }
-            for row in rows
+    return {
+        row["agent_key"]: {
+            "transaction_count": int(row["transaction_count"] or 0),
+            "has_transaction_mismatch": bool(row["has_transaction_mismatch"]),
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Transaction summary query failed: {str(e)}")
+        for row in rows
+    }
 
 
-def fetch_agent_by_email(db: Session, email: str):
-    query = """
-        SELECT
-            u.display_name,
-            u.roa_email,
-            u.agenttags,
-            u.qb_customerid
-        FROM brokerage_engine_users u
-        WHERE LOWER(TRIM(u.roa_email)) = LOWER(TRIM(:email))
-        LIMIT 1
-    """
+def fetch_agent_by_email(db: Session, email: str) -> dict | None:
+    statement = (
+        select(
+            BrokerageEngineUser.display_name,
+            BrokerageEngineUser.roa_email,
+            BrokerageEngineUser.agenttags,
+            BrokerageEngineUser.qb_customerid,
+        )
+        .where(func.trim(BrokerageEngineUser.roa_email) == func.trim(email))
+        .limit(1)
+    )
 
-    try:
-        row = db.execute(text(query), {"email": email}).mappings().first()
-        return dict(row) if row else None
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Agent lookup failed: {str(e)}")
+    row = db.execute(statement).mappings().first()
+    return dict(row) if row else None
 
 
-def fetch_agent_ar_balance(db: Session, qb_customerid):
+def fetch_agent_ar_balance(db: Session, qb_customerid: int | str | None) -> dict | None:
     if qb_customerid is None:
         return None
 
-    query = """
-        SELECT
-            abd.customer_id AS customer_id,
-            MAX(COALESCE(abd.total_open_balance, 0)) AS total_open_balance,
-            MAX(COALESCE(abd.invoice_count, 0)) AS invoice_count,
-            MAX(abd.updated_at) AS updated_at
-        FROM ar_balance_details abd
-        WHERE abd.customer_id = :qb_customerid
-        GROUP BY abd.customer_id
-    """
+    statement = (
+        select(
+            QuickbooksInvoice.customer_id.label("customer_id"),
+            func.coalesce(func.sum(QuickbooksInvoice.balance), 0).label("total_open_balance"),
+            func.count(QuickbooksInvoice.invoice_id).label("invoice_count"),
+            func.max(QuickbooksInvoice.updated_at).label("updated_at"),
+        )
+        .where(QuickbooksInvoice.customer_id == str(qb_customerid))
+        .group_by(QuickbooksInvoice.customer_id)
+    )
 
-    try:
-        row = db.execute(text(query), {"qb_customerid": qb_customerid}).mappings().first()
-        if not row:
-            return None
+    row = db.execute(statement).mappings().first()
 
-        return {
-            "customer_id": str(row["customer_id"]),
-            "total_open_balance": row["total_open_balance"],
-            "invoice_count": int(row["invoice_count"] or 0),
-            "updated_at": row["updated_at"],
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"AR balance lookup failed: {str(e)}")
-    
+    if not row:
+        return None
+
+    return {
+        "customer_id": str(row["customer_id"]),
+        "total_open_balance": row["total_open_balance"],
+        "invoice_count": int(row["invoice_count"] or 0),
+        "updated_at": row["updated_at"],
+    }
+
 
 @router.get("/account-hold/summary", response_model=Response[AccountHoldSummaryData])
-async def get_account_hold_summary(db: Session = Depends(get_db)):
-    base_cte = get_base_cte()
+def get_account_hold_summary(db: Session = Depends(get_db)):
+    base = build_agent_base_subquery()
 
-    query = f"""
-        {base_cte}
-        SELECT
-            COUNT(*) AS total_agents,
-            COUNT(*) FILTER (WHERE b.has_ar_balance) AS agents_with_ar_balance,
-            COUNT(*) FILTER (WHERE b.has_account_hold) AS agents_with_account_hold
-        FROM b
-    """
+    statement = select(
+        func.count().label("total_agents"),
+        func.count().filter(base.c.has_ar_balance.is_(True)).label("agents_with_ar_balance"),
+        func.count().filter(base.c.has_account_hold.is_(True)).label("agents_with_account_hold"),
+    )
 
-    try:
-        row = db.execute(text(query)).mappings().one()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Summary query failed: {str(e)}")
+    row = db.execute(statement).mappings().one()
 
     return Response(
         data=AccountHoldSummaryData(
@@ -333,8 +218,9 @@ async def get_account_hold_summary(db: Session = Depends(get_db)):
         )
     )
 
+
 @router.get("/account-hold", response_model=PaginationResponse[AccountHoldItem])
-async def get_account_hold_listing(
+def get_account_hold_listing(
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=100),
     account_hold: bool | None = Query(None),
@@ -343,49 +229,67 @@ async def get_account_hold_listing(
     search: str | None = Query(None, max_length=100),
     db: Session = Depends(get_db),
 ):
-    total_count, agent_rows = fetch_agent_listing_page_base(
-        db=db,
-        page=page,
-        size=size,
+    base = build_agent_base_subquery()
+    statement = select(base)
+
+    statement = apply_listing_filters(
+        statement=statement,
+        base=base,
         search=search,
         account_hold=account_hold,
         ar_balance=ar_balance,
         match_mode=match_mode,
     )
 
-    agent_emails = [
-        normalize_email(row["roa_email"])
-        for row in agent_rows
-        if row.get("roa_email")
-    ]
+    count_statement = select(func.count()).select_from(statement.subquery())
+    total_count = int(db.scalar(count_statement) or 0)
 
-    transaction_summary_map = fetch_transaction_summary_for_agents(db, agent_emails)
+    offset = (page - 1) * size
 
-    data = []
+    data_statement = (
+        statement.order_by(
+            desc(base.c.has_account_hold),
+            desc(base.c.total_open_balance),
+            base.c.display_name.asc(),
+            base.c.roa_email.asc(),
+        )
+        .offset(offset)
+        .limit(size)
+    )
+
+    agent_rows = [dict(row) for row in db.execute(data_statement).mappings().all()]
+
+    transaction_summary_map = fetch_agent_transaction_summary(db=db, agent_rows=agent_rows)
+
+    data: list[AccountHoldItem] = []
+
     for row in agent_rows:
-        normalized_email = normalize_email(row.get("roa_email"))
-        tx_summary = transaction_summary_map.get(normalized_email, {})
+        transaction_summary = (
+            transaction_summary_map.get(row.get("roa_email"))
+            or transaction_summary_map.get(row.get("display_name"))
+            or {}
+        )
 
-        total_open_balance = float(row.get("total_open_balance") or 0)
         has_account_hold = bool(row.get("has_account_hold"))
+        total_open_balance = float(row.get("total_open_balance") or 0)
         has_ar_balance = total_open_balance > 0
 
-        broker_flags = []
+        broker_flags: list[str] = []
         if has_account_hold:
             broker_flags.append("account_hold")
         if has_ar_balance:
             broker_flags.append("ar_balance")
 
-        transaction_flags = []
-        if bool(tx_summary.get("has_transaction_mismatch", False)):
+        transaction_flags: list[str] = []
+        if transaction_summary.get("has_transaction_mismatch", False):
             transaction_flags.append("transaction_mismatch")
 
         data.append(
             AccountHoldItem(
-                display_name=row["display_name"],
-                roa_email=row["roa_email"],
+                display_name=row.get("display_name"),
+                roa_email=row.get("roa_email"),
                 customer_id=str(row["qb_customerid"]) if row.get("qb_customerid") is not None else None,
-                transaction_count=int(tx_summary.get("transaction_count") or 0),
+                transaction_count=int(transaction_summary.get("transaction_count", 0)),
                 broker_flags=broker_flags,
                 transaction_flags=transaction_flags,
             )
