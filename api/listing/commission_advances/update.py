@@ -1,12 +1,17 @@
 from datetime import date
 from decimal import Decimal
 from typing import Any, Dict, Optional
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+
 from api.listing.commission_advances.utils import CommissionAdvanceStatus
-from models.commisison_advances import CommissionAdvance, CommissionAdvanceHistory
+from models.commisison_advances import (
+    CommissionAdvance,
+    CommissionAdvanceHistory,
+)
 from common.response import Response
 from db import get_db
 
@@ -15,7 +20,13 @@ router = APIRouter(prefix="/commission-advances")
 
 
 class CommissionAdvanceUpdateRequest(BaseModel):
-    status: Optional[CommissionAdvanceStatus] = Field(default=None, description="Pending, Pending Partial, Wage Garnishment, Paid, Cancelled, Left ROA")
+    status: Optional[CommissionAdvanceStatus] = Field(
+        default=None,
+        description=(
+            "Pending, Pending Partial, Wage Garnishment, "
+            "Paid, Cancelled, Left ROA"
+        ),
+    )
     notes: Optional[str] = None
     amount: Optional[Decimal] = Field(default=None, ge=0)
     paid_date: Optional[date] = None
@@ -27,7 +38,9 @@ def serialize_value(value: Any) -> str | None:
     return None if value is None else str(value)
 
 
-def serialize_commission_advance(transaction: CommissionAdvance) -> Dict[str, Any]:
+def serialize_commission_advance(
+    transaction: CommissionAdvance,
+) -> Dict[str, Any]:
     return {
         "id": transaction.id,
         "agent_name": transaction.agent_name,
@@ -44,13 +57,26 @@ def serialize_commission_advance(transaction: CommissionAdvance) -> Dict[str, An
     }
 
 
-@router.patch("/transaction/{transaction_id}", response_model=Response[Dict[str, Any]])
-def update_commission_advance_transaction(transaction_id: int, payload: CommissionAdvanceUpdateRequest, db: Session = Depends(get_db)):
+@router.patch(
+    "/transaction/{transaction_id}",
+    response_model=Response[Dict[str, Any]],
+)
+def update_commission_advance_transaction(
+    transaction_id: int,
+    payload: CommissionAdvanceUpdateRequest,
+    db: Session = Depends(get_db),
+):
     try:
-        update_data = payload.model_dump(exclude_unset=True, exclude={"edited_by"})
+        update_data = payload.model_dump(
+            exclude_unset=True,
+            exclude={"edited_by"},
+        )
 
         if not update_data:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No fields provided for update")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No fields provided for update",
+            )
 
         transaction = db.execute(
             select(CommissionAdvance)
@@ -59,63 +85,100 @@ def update_commission_advance_transaction(transaction_id: int, payload: Commissi
         ).scalar_one_or_none()
 
         if transaction is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Transaction not found",
+            )
 
-        history_fields = ["status", "notes", "original_amount", "amount_paid", "paid_date", "approved_date"]
+        history_fields = [
+            "status",
+            "notes",
+            "original_amount",
+            "amount_paid",
+            "paid_date",
+            "approved_date",
+        ]
 
         old_values = {
             field_name: getattr(transaction, field_name)
             for field_name in history_fields
         }
 
-        requested_status = update_data.get("status", transaction.status)
+        requested_status = update_data.get(
+            "status",
+            transaction.status,
+        )
 
         if isinstance(requested_status, CommissionAdvanceStatus):
             requested_status = requested_status.value
 
-        original_amount = Decimal(transaction.original_amount or 0)
-        existing_amount_paid = Decimal(transaction.amount_paid or 0)
+        original_amount = Decimal(
+            transaction.original_amount or 0
+        )
+
         input_amount = update_data.get("amount")
 
-        if requested_status == CommissionAdvanceStatus.WAGE_GARNISHMENT.value:
-            disallowed_fields = {"amount", "paid_date"} & set(update_data.keys())
+        if (
+            requested_status
+            == CommissionAdvanceStatus.WAGE_GARNISHMENT.value
+        ):
+            disallowed_fields = {
+                "amount",
+                "paid_date",
+            } & set(update_data.keys())
 
             if disallowed_fields:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="For status 'Wage Garnishment', only notes and approved_date can be modified",
+                    detail=(
+                        "For status 'Wage Garnishment', only notes "
+                        "and approved_date can be modified"
+                    ),
                 )
 
-            transaction.status = CommissionAdvanceStatus.WAGE_GARNISHMENT.value
+            transaction.status = (
+                CommissionAdvanceStatus.WAGE_GARNISHMENT.value
+            )
 
             if "notes" in update_data:
                 transaction.notes = update_data["notes"]
 
             if "approved_date" in update_data:
-                transaction.approved_date = update_data["approved_date"]
+                transaction.approved_date = update_data[
+                    "approved_date"
+                ]
 
-        elif requested_status == CommissionAdvanceStatus.PENDING_PARTIAL.value:
+        elif (
+            requested_status
+            == CommissionAdvanceStatus.PENDING_PARTIAL.value
+        ):
             if input_amount is None:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="amount is required when changing status to 'Pending Partial'",
+                    detail=(
+                        "amount is required when changing status "
+                        "to 'Pending Partial'"
+                    ),
                 )
 
-            additional_amount = Decimal(input_amount)
+            amount_paid = Decimal(input_amount)
 
-            if transaction.status == CommissionAdvanceStatus.PENDING_PARTIAL.value:
-                partial_paid_amount = existing_amount_paid + additional_amount
-            else:
-                partial_paid_amount = additional_amount
-
-            if partial_paid_amount >= original_amount:
+            if amount_paid >= original_amount:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="For 'Pending Partial', cumulative amount_paid must be less than original_amount",
+                    detail=(
+                        "For 'Pending Partial', amount_paid must be "
+                        "less than original_amount"
+                    ),
                 )
 
-            transaction.status = CommissionAdvanceStatus.PENDING_PARTIAL.value
-            transaction.amount_paid = partial_paid_amount
+            transaction.status = (
+                CommissionAdvanceStatus.PENDING_PARTIAL.value
+            )
+
+            # Overwrite amount_paid instead of adding to the
+            # existing amount_paid value.
+            transaction.amount_paid = amount_paid
 
             if "notes" in update_data:
                 transaction.notes = update_data["notes"]
@@ -124,13 +187,18 @@ def update_commission_advance_transaction(transaction_id: int, payload: Commissi
                 transaction.paid_date = update_data["paid_date"]
 
             if "approved_date" in update_data:
-                transaction.approved_date = update_data["approved_date"]
+                transaction.approved_date = update_data[
+                    "approved_date"
+                ]
 
         elif requested_status == CommissionAdvanceStatus.PAID.value:
             if "amount" in update_data:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Do not send amount when status is 'Paid'; amount_paid is set automatically",
+                    detail=(
+                        "Do not send amount when status is 'Paid'; "
+                        "amount_paid is set automatically"
+                    ),
                 )
 
             transaction.status = CommissionAdvanceStatus.PAID.value
@@ -143,7 +211,9 @@ def update_commission_advance_transaction(transaction_id: int, payload: Commissi
                 transaction.paid_date = update_data["paid_date"]
 
             if "approved_date" in update_data:
-                transaction.approved_date = update_data["approved_date"]
+                transaction.approved_date = update_data[
+                    "approved_date"
+                ]
 
         else:
             if "status" in update_data:
@@ -156,7 +226,9 @@ def update_commission_advance_transaction(transaction_id: int, payload: Commissi
                 transaction.paid_date = update_data["paid_date"]
 
             if "approved_date" in update_data:
-                transaction.approved_date = update_data["approved_date"]
+                transaction.approved_date = update_data[
+                    "approved_date"
+                ]
 
             if "amount" in update_data:
                 transaction.original_amount = input_amount
@@ -202,7 +274,10 @@ def update_commission_advance_transaction(transaction_id: int, payload: Commissi
         return Response[Dict[str, Any]](
             success=True,
             data=serialize_commission_advance(transaction),
-            message="Commission advance transaction updated successfully",
+            message=(
+                "Commission advance transaction "
+                "updated successfully"
+            ),
         )
 
     except HTTPException:
