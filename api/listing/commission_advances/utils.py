@@ -19,4 +19,5 @@ class CommissionAdvanceStatus(str, Enum):
             cls.PENDING.value,
             cls.PENDING_PARTIAL.value,
             cls.WAGE_GARNISHMENT.value,
+            cls.REPLACEMENT.value,
         ]

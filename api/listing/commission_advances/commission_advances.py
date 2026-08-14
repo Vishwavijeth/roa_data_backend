@@ -12,7 +12,9 @@ from api.listing.commission_advances.utils import CommissionAdvanceStatus
 from models.brokerage_engine_users import BrokerageEngineUser
 from db import get_db
 
+
 router = APIRouter(prefix="/commission-advances")
+
 
 def build_listing_filters(
     status: Optional[CommissionAdvanceStatus],
@@ -30,7 +32,6 @@ def build_listing_filters(
 
     if search and search.strip():
         search_term = search.strip()
-        # Search in both agent_name AND address (OR logic)
         filters.append(
             or_(
                 CommissionAdvance.agent_name.ilike(f"%{search_term}%"),
@@ -213,7 +214,12 @@ def get_commission_advances_listing(
                 == CommissionAdvanceStatus.LEFT_ROA.value,
                 6,
             ),
-            else_=7,
+            (
+                filtered_data.c.status
+                == CommissionAdvanceStatus.REPLACEMENT.value,
+                7,
+            ),
+            else_=8,
         )
 
         agent_status_priority = (
@@ -280,6 +286,7 @@ def get_commission_advances_listing(
             CommissionAdvanceStatus.PAID.value,
             CommissionAdvanceStatus.CANCELLED.value,
             CommissionAdvanceStatus.LEFT_ROA.value,
+            CommissionAdvanceStatus.REPLACEMENT.value,
         ]
 
         items = []
@@ -355,7 +362,8 @@ def get_commission_advances_detail(
             (ca.status == CommissionAdvanceStatus.PAID.value, 4),
             (ca.status == CommissionAdvanceStatus.LEFT_ROA.value, 5),
             (ca.status == CommissionAdvanceStatus.CANCELLED.value, 6),
-            else_=7,
+            (ca.status == CommissionAdvanceStatus.REPLACEMENT.value, 7),
+            else_=8,
         )
 
         detail_stmt = (
