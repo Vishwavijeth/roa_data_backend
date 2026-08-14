@@ -528,12 +528,6 @@ def get_commission_advances_detail(
             if row["history_id"] is None:
                 continue
 
-            # Exclude saleguid from the history response.
-            # This also hides saleguid history rows that already
-            # exist in the database.
-            if row["history_field"] == "saleguid":
-                continue
-
             edited_at = row["history_edited_at"]
             transaction_history = history_by_transaction[
                 transaction_id
