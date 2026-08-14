@@ -1,23 +1,26 @@
-from datetime import date
 from decimal import Decimal
-from typing import Any, Dict, Optional
-from uuid import UUID
+from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from api.listing.commission_advances.base import CommissionAdvanceUpdateRequest
-from api.listing.commission_advances.utils import CommissionAdvanceStatus
+
+from api.listing.commission_advances.base import (
+    CommissionAdvanceUpdateRequest,
+)
+from api.listing.commission_advances.utils import (
+    CommissionAdvanceStatus,
+)
+from common.response import Response
+from db import get_db
 from models.commisison_advances import (
     CommissionAdvance,
     CommissionAdvanceHistory,
 )
-from common.response import Response
-from db import get_db
 
 
 router = APIRouter(prefix="/commission-advances")
+
 
 def serialize_value(value: Any) -> str | None:
     return None if value is None else str(value)
@@ -32,14 +35,24 @@ def serialize_commission_advance(
         "state": transaction.state,
         "address": transaction.address,
         "company": transaction.company,
-        "original_amount": float(transaction.original_amount or 0),
-        "amount_paid": float(transaction.amount_paid or 0),
-        "outstanding_amount": float(transaction.outstanding_amount or 0),
+        "original_amount": float(
+            transaction.original_amount or 0
+        ),
+        "amount_paid": float(
+            transaction.amount_paid or 0
+        ),
+        "outstanding_amount": float(
+            transaction.outstanding_amount or 0
+        ),
         "paid_date": transaction.paid_date,
         "approved_date": transaction.approved_date,
         "notes": transaction.notes,
         "status": transaction.status,
-        "saleguid": str(transaction.saleguid) if transaction.saleguid else None,
+        "saleguid": (
+            str(transaction.saleguid)
+            if transaction.saleguid
+            else None
+        ),
     }
 
 
@@ -76,6 +89,8 @@ def update_commission_advance_transaction(
                 detail="Transaction not found",
             )
 
+        # Track address changes, but intentionally do not track
+        # saleguid changes.
         history_fields = [
             "status",
             "notes",
@@ -83,7 +98,7 @@ def update_commission_advance_transaction(
             "amount_paid",
             "paid_date",
             "approved_date",
-            "saleguid",
+            "address",
         ]
 
         old_values = {
@@ -96,11 +111,14 @@ def update_commission_advance_transaction(
             transaction.status,
         )
 
-        if isinstance(requested_status, CommissionAdvanceStatus):
+        if isinstance(
+            requested_status,
+            CommissionAdvanceStatus,
+        ):
             requested_status = requested_status.value
 
         original_amount = Decimal(
-            transaction.original_amount or 0
+            str(transaction.original_amount or 0)
         )
 
         input_amount = update_data.get("amount")
@@ -112,14 +130,16 @@ def update_commission_advance_transaction(
             disallowed_fields = {
                 "amount",
                 "paid_date",
+                "address",
+                "saleguid",
             } & set(update_data.keys())
 
             if disallowed_fields:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=(
-                        "For status 'Wage Garnishment', only notes "
-                        "and approved_date can be modified"
+                        "For status 'Wage Garnishment', only "
+                        "notes and approved_date can be modified"
                     ),
                 )
 
@@ -148,28 +168,29 @@ def update_commission_advance_transaction(
                     ),
                 )
 
-            amount_paid = Decimal(input_amount)
+            amount_paid = Decimal(str(input_amount))
 
             if amount_paid >= original_amount:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=(
-                        "For 'Pending Partial', amount_paid must be "
-                        "less than original_amount"
+                        "For 'Pending Partial', amount_paid must "
+                        "be less than original_amount"
                     ),
                 )
 
             transaction.status = (
                 CommissionAdvanceStatus.PENDING_PARTIAL.value
             )
-
             transaction.amount_paid = amount_paid
 
             if "notes" in update_data:
                 transaction.notes = update_data["notes"]
 
             if "paid_date" in update_data:
-                transaction.paid_date = update_data["paid_date"]
+                transaction.paid_date = update_data[
+                    "paid_date"
+                ]
 
             if "approved_date" in update_data:
                 transaction.approved_date = update_data[
@@ -193,21 +214,30 @@ def update_commission_advance_transaction(
                 transaction.notes = update_data["notes"]
 
             if "paid_date" in update_data:
-                transaction.paid_date = update_data["paid_date"]
+                transaction.paid_date = update_data[
+                    "paid_date"
+                ]
 
             if "approved_date" in update_data:
                 transaction.approved_date = update_data[
                     "approved_date"
                 ]
 
-        elif requested_status == CommissionAdvanceStatus.REPLACEMENT.value:
-            transaction.status = CommissionAdvanceStatus.REPLACEMENT.value
+        elif (
+            requested_status
+            == CommissionAdvanceStatus.REPLACEMENT.value
+        ):
+            transaction.status = (
+                CommissionAdvanceStatus.REPLACEMENT.value
+            )
 
             if "notes" in update_data:
                 transaction.notes = update_data["notes"]
 
             if "paid_date" in update_data:
-                transaction.paid_date = update_data["paid_date"]
+                transaction.paid_date = update_data[
+                    "paid_date"
+                ]
 
             if "approved_date" in update_data:
                 transaction.approved_date = update_data[
@@ -215,11 +245,15 @@ def update_commission_advance_transaction(
                 ]
 
             if "amount" in update_data:
-                transaction.amount_paid = Decimal(update_data["amount"])
+                transaction.amount_paid = Decimal(
+                    str(update_data["amount"])
+                )
 
+            # saleguid is updated, but not tracked in history.
             if "saleguid" in update_data:
                 transaction.saleguid = update_data["saleguid"]
 
+            # address is updated and tracked in history.
             if "address" in update_data:
                 transaction.address = update_data["address"]
 
@@ -231,7 +265,9 @@ def update_commission_advance_transaction(
                 transaction.notes = update_data["notes"]
 
             if "paid_date" in update_data:
-                transaction.paid_date = update_data["paid_date"]
+                transaction.paid_date = update_data[
+                    "paid_date"
+                ]
 
             if "approved_date" in update_data:
                 transaction.approved_date = update_data[
@@ -239,11 +275,15 @@ def update_commission_advance_transaction(
                 ]
 
             if "amount" in update_data:
-                transaction.original_amount = input_amount
+                transaction.original_amount = Decimal(
+                    str(input_amount)
+                )
 
+            # saleguid is updated, but not tracked in history.
             if "saleguid" in update_data:
                 transaction.saleguid = update_data["saleguid"]
 
+            # address is updated and tracked in history.
             if "address" in update_data:
                 transaction.address = update_data["address"]
 
@@ -257,15 +297,20 @@ def update_commission_advance_transaction(
 
         edited_by = (
             payload.edited_by.strip()
-            if payload.edited_by and payload.edited_by.strip()
+            if payload.edited_by
+            and payload.edited_by.strip()
             else "System"
         )
 
         history_records = []
 
         for field_name in history_fields:
-            old_value = serialize_value(old_values[field_name])
-            new_value = serialize_value(new_values[field_name])
+            old_value = serialize_value(
+                old_values[field_name]
+            )
+            new_value = serialize_value(
+                new_values[field_name]
+            )
 
             if old_value != new_value:
                 history_records.append(

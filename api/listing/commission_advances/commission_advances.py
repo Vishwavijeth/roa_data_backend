@@ -2,35 +2,35 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Any, Dict, Optional
 from math import ceil
 
-from sqlalchemy.orm import Session
 from sqlalchemy import (
     case,
     cast,
     distinct,
     func,
     literal,
-    select,
     or_,
+    select,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Session
 
-from common.pagination import (
-    PaginationData,
-    PaginationResponseWithCount,
-)
-from common.response import Response, FilterResponse
 from api.listing.commission_advances.base import (
     CommissionAdvanceSummary,
 )
 from api.listing.commission_advances.utils import (
     CommissionAdvanceStatus,
 )
+from common.pagination import (
+    PaginationData,
+    PaginationResponseWithCount,
+)
+from common.response import FilterResponse, Response
+from db import get_db
+from models.brokerage_engine_users import BrokerageEngineUser
 from models.commisison_advances import (
     CommissionAdvance,
     CommissionAdvanceHistory,
 )
-from models.brokerage_engine_users import BrokerageEngineUser
-from db import get_db
 
 
 router = APIRouter(prefix="/commission-advances")
@@ -91,8 +91,7 @@ def get_commission_advances_summary(
         commission_advance_received = (
             db.execute(
                 select(func.count(ca.id)).where(
-                    ca.status
-                    == CommissionAdvanceStatus.PAID.value
+                    ca.status == CommissionAdvanceStatus.PAID.value
                 )
             ).scalar()
             or 0
@@ -396,6 +395,7 @@ def get_commission_advances_detail(
     try:
         ca = CommissionAdvance
         history = CommissionAdvanceHistory
+
         offset = (page - 1) * page_size
 
         total_count = (
@@ -456,7 +456,7 @@ def get_commission_advances_detail(
                 ca.original_amount,
                 ca.amount_paid,
                 ca.outstanding_amount,
-                ca.saleguid,  # Added saleguid
+                ca.saleguid,
                 ca.approved_date,
                 ca.paid_date,
                 ca.notes,
@@ -528,6 +528,12 @@ def get_commission_advances_detail(
             if row["history_id"] is None:
                 continue
 
+            # Exclude saleguid from the history response.
+            # This also hides saleguid history rows that already
+            # exist in the database.
+            if row["history_field"] == "saleguid":
+                continue
+
             edited_at = row["history_edited_at"]
             transaction_history = history_by_transaction[
                 transaction_id
@@ -547,13 +553,14 @@ def get_commission_advances_detail(
                 }
             )
 
-        for (
-            transaction_id,
-            grouped_history,
-        ) in history_by_transaction.items():
-            items_by_id[transaction_id]["history"] = list(
-                grouped_history.values()
-            )
+        for transaction_id, grouped_history in (
+            history_by_transaction.items()
+        ):
+            items_by_id[transaction_id]["history"] = [
+                history_entry
+                for history_entry in grouped_history.values()
+                if history_entry["changes"]
+            ]
 
         items = list(items_by_id.values())
 
@@ -574,6 +581,7 @@ def get_commission_advances_detail(
             count=len(items),
             total_pages=total_pages,
             has_next=page < total_pages,
+            message="Request successful",
         )
 
     except Exception as exc:
