@@ -4,6 +4,7 @@ class CommissionAdvanceStatus(str, Enum):
     PENDING = "Pending"
     PENDING_PARTIAL = "Pending Partial"
     WAGE_GARNISHMENT = "Wage Garnishment"
+    REPLACEMENT = "Replacement"
     CANCELLED = "Cancelled"
     LEFT_ROA = "Left ROA"
     PAID = "Paid"
