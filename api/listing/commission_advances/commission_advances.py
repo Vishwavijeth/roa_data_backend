@@ -1,14 +1,34 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Any, Dict, Optional
 from math import ceil
+
 from sqlalchemy.orm import Session
-from sqlalchemy import case, cast, distinct, func, literal, select, or_
-from common.pagination import PaginationData, PaginationResponseWithCount
+from sqlalchemy import (
+    case,
+    cast,
+    distinct,
+    func,
+    literal,
+    select,
+    or_,
+)
 from sqlalchemy.dialects.postgresql import JSONB
+
+from common.pagination import (
+    PaginationData,
+    PaginationResponseWithCount,
+)
 from common.response import Response, FilterResponse
-from api.listing.commission_advances.base import CommissionAdvanceSummary
-from models.commisison_advances import CommissionAdvance, CommissionAdvanceHistory
-from api.listing.commission_advances.utils import CommissionAdvanceStatus
+from api.listing.commission_advances.base import (
+    CommissionAdvanceSummary,
+)
+from api.listing.commission_advances.utils import (
+    CommissionAdvanceStatus,
+)
+from models.commisison_advances import (
+    CommissionAdvance,
+    CommissionAdvanceHistory,
+)
 from models.brokerage_engine_users import BrokerageEngineUser
 from db import get_db
 
@@ -22,8 +42,8 @@ def build_listing_filters(
 ):
     """
     Build filters for commission advance listing.
-    
-    - search: searches both agent_name AND address (OR logic)
+
+    Search checks both agent_name and address using OR logic.
     """
     filters = []
 
@@ -32,17 +52,25 @@ def build_listing_filters(
 
     if search and search.strip():
         search_term = search.strip()
+
         filters.append(
             or_(
-                CommissionAdvance.agent_name.ilike(f"%{search_term}%"),
-                CommissionAdvance.address.ilike(f"%{search_term}%"),
+                CommissionAdvance.agent_name.ilike(
+                    f"%{search_term}%"
+                ),
+                CommissionAdvance.address.ilike(
+                    f"%{search_term}%"
+                ),
             )
         )
 
     return filters
 
 
-@router.get("/summary", response_model=Response[CommissionAdvanceSummary])
+@router.get(
+    "/summary",
+    response_model=Response[CommissionAdvanceSummary],
+)
 def get_commission_advances_summary(
     db: Session = Depends(get_db),
 ):
@@ -63,7 +91,8 @@ def get_commission_advances_summary(
         commission_advance_received = (
             db.execute(
                 select(func.count(ca.id)).where(
-                    ca.status == CommissionAdvanceStatus.PAID.value
+                    ca.status
+                    == CommissionAdvanceStatus.PAID.value
                 )
             ).scalar()
             or 0
@@ -82,8 +111,12 @@ def get_commission_advances_summary(
             success=True,
             data=CommissionAdvanceSummary(
                 pending_advances=pending_advances,
-                commission_advance_received=commission_advance_received,
-                agents_with_active_advances=agents_with_active_advances,
+                commission_advance_received=(
+                    commission_advance_received
+                ),
+                agents_with_active_advances=(
+                    agents_with_active_advances
+                ),
             ),
         )
 
@@ -107,7 +140,10 @@ def get_commission_advance_status_dropdown():
     )
 
 
-@router.get("/listing", response_model=PaginationResponseWithCount[Dict[str, Any]])
+@router.get(
+    "/listing",
+    response_model=PaginationResponseWithCount[Dict[str, Any]],
+)
 def get_commission_advances_listing(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=100),
@@ -119,11 +155,14 @@ def get_commission_advances_listing(
         ca = CommissionAdvance
         beu = BrokerageEngineUser
         offset = (page - 1) * page_size
+
         filters = build_listing_filters(status, search)
 
         total_count = (
             db.execute(
-                select(func.count(distinct(ca.agent_name))).where(*filters)
+                select(
+                    func.count(distinct(ca.agent_name))
+                ).where(*filters)
             ).scalar()
             or 0
         )
@@ -142,7 +181,9 @@ def get_commission_advances_listing(
             select(
                 filtered_data.c.agent_name,
                 func.coalesce(
-                    func.sum(filtered_data.c.outstanding_amount).filter(
+                    func.sum(
+                        filtered_data.c.outstanding_amount
+                    ).filter(
                         filtered_data.c.status.in_(
                             CommissionAdvanceStatus.active_values()
                         )
@@ -225,7 +266,9 @@ def get_commission_advances_listing(
         agent_status_priority = (
             select(
                 filtered_data.c.agent_name,
-                func.min(priority_expression).label("status_priority"),
+                func.min(priority_expression).label(
+                    "status_priority"
+                ),
             )
             .group_by(filtered_data.c.agent_name)
             .cte("agent_status_priority")
@@ -240,7 +283,10 @@ def get_commission_advances_listing(
             .cte("agent_user_status")
         )
 
-        empty_json_object = cast(literal("{}"), JSONB)
+        empty_json_object = cast(
+            literal("{}"),
+            JSONB,
+        )
 
         listing_stmt = (
             select(
@@ -337,7 +383,10 @@ def get_commission_advances_listing(
         ) from exc
 
 
-@router.get("/detail", response_model=PaginationResponseWithCount[Dict[str, Any]])
+@router.get(
+    "/detail",
+    response_model=PaginationResponseWithCount[Dict[str, Any]],
+)
 def get_commission_advances_detail(
     agent_name: str = Query(..., min_length=1),
     page: int = Query(1, ge=1),
@@ -349,20 +398,51 @@ def get_commission_advances_detail(
         history = CommissionAdvanceHistory
         offset = (page - 1) * page_size
 
-        total_count = db.execute(
-            select(func.count(ca.id)).where(
-                ca.agent_name == agent_name
-            )
-        ).scalar() or 0
+        total_count = (
+            db.execute(
+                select(func.count(ca.id)).where(
+                    ca.agent_name == agent_name
+                )
+            ).scalar()
+            or 0
+        )
 
         status_order = case(
-            (ca.status == CommissionAdvanceStatus.WAGE_GARNISHMENT.value, 1),
-            (ca.status == CommissionAdvanceStatus.PENDING.value, 2),
-            (ca.status == CommissionAdvanceStatus.PENDING_PARTIAL.value, 3),
-            (ca.status == CommissionAdvanceStatus.PAID.value, 4),
-            (ca.status == CommissionAdvanceStatus.LEFT_ROA.value, 5),
-            (ca.status == CommissionAdvanceStatus.CANCELLED.value, 6),
-            (ca.status == CommissionAdvanceStatus.REPLACEMENT.value, 7),
+            (
+                ca.status
+                == CommissionAdvanceStatus.WAGE_GARNISHMENT.value,
+                1,
+            ),
+            (
+                ca.status
+                == CommissionAdvanceStatus.PENDING.value,
+                2,
+            ),
+            (
+                ca.status
+                == CommissionAdvanceStatus.PENDING_PARTIAL.value,
+                3,
+            ),
+            (
+                ca.status
+                == CommissionAdvanceStatus.PAID.value,
+                4,
+            ),
+            (
+                ca.status
+                == CommissionAdvanceStatus.LEFT_ROA.value,
+                5,
+            ),
+            (
+                ca.status
+                == CommissionAdvanceStatus.CANCELLED.value,
+                6,
+            ),
+            (
+                ca.status
+                == CommissionAdvanceStatus.REPLACEMENT.value,
+                7,
+            ),
             else_=8,
         )
 
@@ -376,6 +456,7 @@ def get_commission_advances_detail(
                 ca.original_amount,
                 ca.amount_paid,
                 ca.outstanding_amount,
+                ca.saleguid,  # Added saleguid
                 ca.approved_date,
                 ca.paid_date,
                 ca.notes,
@@ -387,7 +468,10 @@ def get_commission_advances_detail(
                 history.edited_at.label("history_edited_at"),
             )
             .select_from(ca)
-            .outerjoin(history, history.ca_id == ca.id)
+            .outerjoin(
+                history,
+                history.ca_id == ca.id,
+            )
             .where(ca.agent_name == agent_name)
             .order_by(
                 status_order.asc(),
@@ -403,7 +487,10 @@ def get_commission_advances_detail(
         rows = db.execute(detail_stmt).mappings().all()
 
         items_by_id: Dict[int, Dict[str, Any]] = {}
-        history_by_transaction: Dict[int, Dict[Any, Dict[str, Any]]] = {}
+        history_by_transaction: Dict[
+            int,
+            Dict[Any, Dict[str, Any]],
+        ] = {}
 
         for row in rows:
             transaction_id = row["ca_id"]
@@ -415,9 +502,20 @@ def get_commission_advances_detail(
                     "state": row["state"],
                     "address": row["address"],
                     "company": row["company"],
-                    "original_amount": float(row["original_amount"] or 0),
-                    "amount_paid": float(row["amount_paid"] or 0),
-                    "outstanding_amount": float(row["outstanding_amount"] or 0),
+                    "original_amount": float(
+                        row["original_amount"] or 0
+                    ),
+                    "amount_paid": float(
+                        row["amount_paid"] or 0
+                    ),
+                    "outstanding_amount": float(
+                        row["outstanding_amount"] or 0
+                    ),
+                    "saleguid": (
+                        str(row["saleguid"])
+                        if row["saleguid"] is not None
+                        else None
+                    ),
                     "approved_date": row["approved_date"],
                     "paid_date": row["paid_date"],
                     "notes": row["notes"],
@@ -431,7 +529,9 @@ def get_commission_advances_detail(
                 continue
 
             edited_at = row["history_edited_at"]
-            transaction_history = history_by_transaction[transaction_id]
+            transaction_history = history_by_transaction[
+                transaction_id
+            ]
 
             if edited_at not in transaction_history:
                 transaction_history[edited_at] = {
@@ -447,14 +547,21 @@ def get_commission_advances_detail(
                 }
             )
 
-        for transaction_id, grouped_history in history_by_transaction.items():
+        for (
+            transaction_id,
+            grouped_history,
+        ) in history_by_transaction.items():
             items_by_id[transaction_id]["history"] = list(
                 grouped_history.values()
             )
 
         items = list(items_by_id.values())
 
-        total_pages = max(1, ceil(total_count / page_size)) if total_count else 1
+        total_pages = (
+            max(1, ceil(total_count / page_size))
+            if total_count
+            else 1
+        )
 
         return PaginationResponseWithCount[Dict[str, Any]](
             success=True,
