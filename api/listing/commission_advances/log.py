@@ -250,12 +250,10 @@ def get_address_suggestions(
     sale = Sale
 
     address_expression = func.concat_ws(
-        ", ",
-        func.concat_ws(
-            " ",
-            cast(sp.streetnumber, String),
-            sp.streetaddress,
-        ),
+        " ",
+        cast(sp.streetnumber, String),
+        sp.streetaddress,
+        sp.unit,
         sp.city,
         sp.state,
         cast(sp.zip, String),

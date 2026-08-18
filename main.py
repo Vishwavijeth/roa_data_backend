@@ -44,6 +44,8 @@ from api.quickbooks.qb_customerid_population import router as qb_customerid_popu
 from api.listing.commission_advances.commission_advances import router as commission_advances_router
 from api.listing.commission_advances.log import router as commission_advances_log_router
 from api.listing.commission_advances.update import router as commisison_advances_update_router
+from api.listing.commission_advances.commission_advances_flow_sync import router as commission_advances_flow_sync_router
+from api.listing.commission_advances.commisison_advances_flow_listing import router as commission_advances_flow_listing_router
 from api.cron import router as cron_router
 
 app = FastAPI()
@@ -98,6 +100,8 @@ app.include_router(cron_router)
 app.include_router(commission_advances_router)
 app.include_router(commission_advances_log_router)
 app.include_router(commisison_advances_update_router)
+app.include_router(commission_advances_flow_sync_router)
+app.include_router(commission_advances_flow_listing_router)
 app.include_router(broker_hold_router)
 
 @app.exception_handler(AppError)

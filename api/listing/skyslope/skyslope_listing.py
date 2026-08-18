@@ -83,12 +83,14 @@ def apply_skyslope_filters(
                     FROM sale_property sp_search
                     WHERE sp_search.saleguid = s.saleguid
                       AND LOWER(
-                        CONCAT_WS(', ',
-                            CONCAT_WS(' ', sp_search.streetnumber, sp_search.streetaddress),
-                            sp_search.city,
-                            sp_search.state,
-                            sp_search.zip
-                        )
+                            CONCAT_WS(' ',
+                                sp_search.streetnumber,
+                                sp_search.streetaddress,
+                                sp_search.unit,
+                                sp_search.city,
+                                sp_search.state,
+                                sp_search.zip
+                            )
                       ) LIKE %s
                 )
                 OR LOWER(s.saleguid::text) LIKE %s
@@ -236,8 +238,10 @@ def skyslope_api(
     data_query = """
         SELECT
             s.saleguid,
-            CONCAT_WS(', ',
-                CONCAT_WS(' ', sp.streetnumber, sp.streetaddress),
+            CONCAT_WS(' ',
+                sp.streetnumber,
+                sp.streetaddress,
+                sp.unit,
                 sp.city,
                 sp.state,
                 sp.zip
@@ -407,8 +411,10 @@ def skyslope_api(
     data_query = """
         SELECT
             s.saleguid,
-            CONCAT_WS(', ',
-                CONCAT_WS(' ', sp.streetnumber, sp.streetaddress),
+            CONCAT_WS(' ',
+                sp.streetnumber,
+                sp.streetaddress,
+                sp.unit,
                 sp.city,
                 sp.state,
                 sp.zip
@@ -534,8 +540,10 @@ def skyslope_detail(saleguid: str, db: Session = Depends(get_db)):
         SELECT
             s.saleguid,
             s.saleguid AS skyslope_saleguid,
-            CONCAT_WS(', ',
-                CONCAT_WS(' ', sp.streetnumber, sp.streetaddress),
+            CONCAT_WS(' ',
+                sp.streetnumber,
+                sp.streetaddress,
+                sp.unit,
                 sp.city,
                 sp.state,
                 sp.zip
@@ -754,8 +762,10 @@ def skyslope_download(
                     LIMIT 1
                 )
             ) AS transactionid,
-            CONCAT_WS(', ',
-                CONCAT_WS(' ', sp.streetnumber, sp.streetaddress),
+            CONCAT_WS(' ',
+                sp.streetnumber,
+                sp.streetaddress,
+                sp.unit,
                 sp.city,
                 sp.state,
                 sp.zip

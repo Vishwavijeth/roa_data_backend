@@ -63,8 +63,10 @@ def reviewer_listing(
     data_query = """
         SELECT
             s.saleguid AS saleguid,
-            CONCAT_WS(', ',
-                CONCAT_WS(' ', sp.streetnumber, sp.streetaddress),
+            CONCAT_WS(' ',
+                sp.streetnumber,
+                sp.streetaddress,
+                sp.unit,
                 sp.city,
                 sp.state,
                 sp.zip

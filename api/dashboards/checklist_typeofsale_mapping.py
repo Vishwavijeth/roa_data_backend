@@ -83,8 +83,10 @@ def build_checklist_validation_query(
     """
 
     property_address_expr = """
-        CONCAT_WS(', ',
-            CONCAT_WS(' ', sp.streetnumber, sp.streetaddress),
+        CONCAT_WS(' ',
+            sp.streetnumber,
+            sp.streetaddress,
+            sp.unit,
             sp.city,
             sp.state,
             sp.zip
