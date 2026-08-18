@@ -171,12 +171,14 @@ def brokerage_detail(transactionid: str, db: Session = Depends(get_db)):
                 ''
             ) AS skyslope_buying_agent_name,
 
-            CONCAT_WS(', ',
-                CONCAT_WS(' ', sp.streetnumber, sp.streetaddress),
+            CONCAT_WS(' ',
+                sp.streetnumber,
+                sp.streetaddress,
+                sp.unit,
                 sp.city,
                 sp.state,
                 sp.zip
-            ) AS propertyaddress,
+            ),
 
             COALESCE(scn.officeGrossCommissionOnSale, 0) AS officegrosscommissiononsale
 

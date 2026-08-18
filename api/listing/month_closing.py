@@ -149,8 +149,10 @@ def fetch_month_closing_data(
                     s.contractacceptancedate AS ss_contract_date,
                     s.listingprice AS ss_listing_price,
                     sp.state AS state,
-                    CONCAT_WS(', ',
-                        CONCAT_WS(' ', sp.streetnumber, sp.streetaddress, sp.unit, sp.direction),
+                    CONCAT_WS(' ',
+                        sp.streetnumber,
+                        sp.streetaddress,
+                        sp.unit,
                         sp.city,
                         sp.state,
                         sp.zip

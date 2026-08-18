@@ -8,10 +8,13 @@ import pandas as pd
 from openpyxl.styles import Font, Alignment
 from openpyxl.utils import get_column_letter
 
+
 router = APIRouter()
+
 
 def norm(x):
     return str(x or "").replace("\u00A0", "").strip().lower()
+
 
 @router.get("/skyslope/sync_info")
 def skyslope_sync_info(conn=Depends(get_db)):
@@ -20,6 +23,7 @@ def skyslope_sync_info(conn=Depends(get_db)):
     return {
         "sync_info": sync_info,
     }
+
 
 @router.get("/skyslope_api")
 def skyslope_api(
@@ -80,8 +84,10 @@ def skyslope_api(
                     FROM sale_property sp
                     WHERE sp.saleguid = s.saleguid
                     AND LOWER(
-                        CONCAT_WS(', ',
-                            CONCAT_WS(' ', sp.streetnumber, sp.streetaddress),
+                        CONCAT_WS(' ',
+                            sp.streetnumber,
+                            sp.streetaddress,
+                            sp.unit,
                             sp.city,
                             sp.state,
                             sp.zip
@@ -100,8 +106,10 @@ def skyslope_api(
     data_query = """
         SELECT
             s.saleguid,
-            CONCAT_WS(', ',
-                CONCAT_WS(' ', sp.streetnumber, sp.streetaddress),
+            CONCAT_WS(' ',
+                sp.streetnumber,
+                sp.streetaddress,
+                sp.unit,
                 sp.city,
                 sp.state,
                 sp.zip
@@ -181,6 +189,7 @@ def skyslope_api(
         "data": data
     }
 
+
 @router.get("/skyslope/detail")
 def skyslope_detail(saleguid: str, conn=Depends(get_db)):
     cursor = conn.cursor()
@@ -189,8 +198,10 @@ def skyslope_detail(saleguid: str, conn=Depends(get_db)):
         SELECT
             s.saleguid,
             s.saleguid AS skyslope_saleguid,
-            CONCAT_WS(', ',
-                CONCAT_WS(' ', sp.streetnumber, sp.streetaddress),
+            CONCAT_WS(' ',
+                sp.streetnumber,
+                sp.streetaddress,
+                sp.unit,
                 sp.city,
                 sp.state,
                 sp.zip
@@ -343,6 +354,7 @@ def skyslope_detail(saleguid: str, conn=Depends(get_db)):
         "otherincome_transactions": otherincome_records,
     }
 
+
 @router.get("/skyslope/download")
 def skyslope_download(conn=Depends(get_db)):
     cursor = conn.cursor()
@@ -351,8 +363,10 @@ def skyslope_download(conn=Depends(get_db)):
     data_query = """
         SELECT
             s.saleguid AS saleguid,
-            CONCAT_WS(', ',
-                CONCAT_WS(' ', sp.streetnumber, sp.streetaddress),
+            CONCAT_WS(' ',
+                sp.streetnumber,
+                sp.streetaddress,
+                sp.unit,
                 sp.city,
                 sp.state,
                 sp.zip
