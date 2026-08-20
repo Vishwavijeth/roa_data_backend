@@ -21,3 +21,8 @@ class CommissionAdvanceStatus(str, Enum):
             cls.WAGE_GARNISHMENT.value,
             cls.REPLACEMENT.value,
         ]
+
+class CommissionAdvanceOperation(str, Enum):
+    ADD = "add"
+    SUB = "sub"
+    SET = "set"
