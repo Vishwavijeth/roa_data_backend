@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import Optional, List
-from api.listing.commission_advances.utils import CommissionAdvanceStatus
+from api.listing.commission_advances.utils import CommissionAdvanceStatus, CommissionAdvanceOperation
 from decimal import Decimal
 from datetime import date
 from uuid import UUID
@@ -14,6 +14,7 @@ class CommissionAdvanceUpdateRequest(BaseModel):
     status: Optional[CommissionAdvanceStatus] = Field(default=None)
     notes: Optional[str] = None
     amount: Optional[Decimal] = Field(default=None, ge=0)
+    operation: Optional[CommissionAdvanceOperation] = None
     paid_date: Optional[date] = None
     approved_date: Optional[date] = None
     edited_by: Optional[str] = Field(default=None, max_length=255)
