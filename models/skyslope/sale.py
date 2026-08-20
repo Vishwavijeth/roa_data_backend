@@ -42,3 +42,13 @@ class Sale(Base):
     customfields = Column(String)
     fileid = Column(String)
     url = Column(String)
+
+
+class SaleFileCreator(Base):
+    __tablename__ = "sale_file_creator"
+    saleguid = Column(UUID(as_uuid=True), ForeignKey("sale.saleGuid", ondelete="CASCADE"), nullable=False)
+    guid = Column(UUID(as_uuid=True), ForeignKey("users.userGuid"), nullable=False)
+    firstname = Column(String, nullable=True)
+    lastname = Column(String, nullable=True)
+    email = Column(String, nullable=True)
+    alternateemail = Column(String, nullable=True)
