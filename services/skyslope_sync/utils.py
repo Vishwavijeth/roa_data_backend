@@ -154,21 +154,7 @@ def get_last_sync_date(db: Session) -> str:
 
         if row and row["sync_date"]:
             sync_date = row["sync_date"]
-            sync_timestamp = row["sync_timestamp"]
-
-            if sync_timestamp:
-                combined = datetime(
-                    sync_date.year,
-                    sync_date.month,
-                    sync_date.day,
-                    sync_timestamp.hour,
-                    0,
-                    0,
-                )
-                sync_datetime_str = combined.strftime("%Y-%m-%dT%H:00:00")
-            else:
-                sync_datetime_str = sync_date.strftime("%Y-%m-%dT00:00:00")
-
+            sync_datetime_str = sync_date.strftime("%Y-%m-%dT00:00:00")
             logger.info("Last sync datetime loaded from DB: %s", sync_datetime_str)
             return sync_datetime_str
 

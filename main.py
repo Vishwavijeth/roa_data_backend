@@ -14,6 +14,7 @@ from api.listing.reviewer import router as reviewer_router
 from api.listing.brokeage_engine_sync import router as brokerage_sync_router
 from api.listing.other_income_sync import router as other_income_sync_router
 from api.listing.skyslope_sync import router as skyslope_sync_router
+from api.listing.skyslope.sync import router as skyslope_sync_orm_router
 from api.listing.skyslope_sync_logs import router as skyslope_sync_logs_router
 from api.listing.cda_sent import router as cda_sent_router
 from api.listing.account_hold.account_hold import router as account_hold_router
@@ -70,6 +71,7 @@ app.include_router(checklist_mapping_router)
 app.include_router(brokerage_sync_router)
 app.include_router(other_income_sync_router)
 app.include_router(skyslope_sync_router)
+app.include_router(skyslope_sync_orm_router)
 app.include_router(skyslope_sync_logs_router)
 app.include_router(cda_sent_router)
 app.include_router(account_hold_router)

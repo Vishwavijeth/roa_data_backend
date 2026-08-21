@@ -4,11 +4,12 @@ from db import Base
 
 class SaleEarnestMoneyDeposit(Base):
     __tablename__ = "sale_earnest_money_deposit"
-    saleGuid = Column(UUID(as_uuid=True), ForeignKey("sale.saleGuid", ondelete="CASCADE"), primary_key=True, nullable=False)
-    isEarnestMoneyHeld = Column(Boolean, nullable=True)
-    depositAmount = Column(Numeric, nullable=True)
-    depositDueDate = Column(Date, nullable=True)
-    datePostedToLogBook = Column(Date, nullable=True)
-    dateOfCheck = Column(Date, nullable=True)
-    additionalDepositAmount = Column(Numeric, nullable=True)
-    additionalDepositDueDate = Column(Date, nullable=True)
+
+    saleguid = Column(UUID(as_uuid=True), ForeignKey("sale.saleguid", ondelete="CASCADE"), primary_key=True, nullable=False)
+    isearnestmoneyheld = Column(Boolean, nullable=True)
+    depositamount = Column(Numeric, nullable=True)
+    depositduedate = Column(Date, nullable=True)
+    datepostedtologbook = Column(Date, nullable=True)
+    dateofcheck = Column(Date, nullable=True)
+    additionaldepositamount = Column(Numeric, nullable=True)
+    additionaldepositduedate = Column(Date, nullable=True)
