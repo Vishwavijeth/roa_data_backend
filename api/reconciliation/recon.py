@@ -2,6 +2,7 @@ from typing import Optional, List, Any
 from uuid import UUID as PythonUUID
 
 from fastapi import APIRouter, Query, Depends, HTTPException, Response
+from fastapi.responses import StreamingResponse
 from sqlalchemy import Date, String, and_, case, cast, func, literal, or_, select, union_all
 from sqlalchemy.orm import Session
 
@@ -189,24 +190,29 @@ def parse_text_list_params(values: Optional[List[str]]) -> List[str]:
 def build_base_reconciliation_subquery():
     rd = ReconciliationData
 
-    # PostgreSQL DISTINCT ON:
-    # one linked reconciliation row per saleguid.
-    # Priority remains exactly:
-    #   1. other income
-    #   2. sale income
-    #   3. anything else
     source_priority = case(
         (func.lower(rd.be_source_table) == "other income", 0),
         (func.lower(rd.be_source_table) == "sale income", 1),
         else_=2,
     )
 
+    saleguid_group_flags = (
+        select(
+            rd.saleguid.label("saleguid"),
+            func.bool_or(func.lower(rd.be_source_table) == "sale income").label("has_sale_income"),
+            func.bool_or(func.lower(rd.be_source_table) == "other income").label("has_other_income"),
+        )
+        .where(rd.saleguid.is_not(None))
+        .group_by(rd.saleguid)
+        .cte("saleguid_group_flags")
+    )
+
     deduplicated_reconciliation = (
         select(
             rd.transactionid.label("transactionid"),
-            rd.be_source_table.label("be_source_table"),
+            rd.be_source_table.label("source_table"),
             rd.saleguid.label("saleguid"),
-            rd.property_address.label("property_address"),
+            rd.property_address.label("propertyaddress"),
             rd.be_close_date.label("be_close_date"),
             rd.be_status.label("be_status"),
             rd.be_transaction_specialist.label("be_transaction_specialist"),
@@ -224,64 +230,49 @@ def build_base_reconciliation_subquery():
         )
         .where(rd.saleguid.is_not(None))
         .distinct(rd.saleguid)
-        .order_by(
-            rd.saleguid,
-            source_priority,
-            rd.transactionid,
-        )
+        .order_by(rd.saleguid, source_priority, rd.transactionid)
         .cte("deduplicated_reconciliation")
     )
 
-    # Only the two booleans are needed by the API.
-    # ARRAY_AGG(DISTINCT ...) has been removed.
-    saleguid_group_flags = (
+    linked_rows = (
         select(
-            rd.saleguid.label("saleguid"),
-            func.bool_or(
-                func.lower(rd.be_source_table) == "sale income"
-            ).label("has_sale_income"),
-            func.bool_or(
-                func.lower(rd.be_source_table) == "other income"
-            ).label("has_other_income"),
-        )
-        .where(rd.saleguid.is_not(None))
-        .group_by(rd.saleguid)
-        .cte("saleguid_group_flags")
-    )
-
-    grouped_rows = (
-        select(
-            deduplicated_reconciliation.c.transactionid.label("transactionid"),
-            deduplicated_reconciliation.c.be_source_table.label("source_table"),
-            deduplicated_reconciliation.c.saleguid.label("saleguid"),
-            deduplicated_reconciliation.c.property_address.label("propertyaddress"),
-            deduplicated_reconciliation.c.be_close_date.label("be_close_date"),
-            deduplicated_reconciliation.c.be_status.label("be_status"),
-            deduplicated_reconciliation.c.be_transaction_specialist.label("be_transaction_specialist"),
-            deduplicated_reconciliation.c.skyslope_reviewer.label("skyslope_reviewer"),
-            deduplicated_reconciliation.c.gross_commission_match.label("gross_commission_match"),
-            deduplicated_reconciliation.c.close_date_match.label("close_date_match"),
-            deduplicated_reconciliation.c.status_match.label("status_match"),
-            deduplicated_reconciliation.c.sale_price_match.label("sale_price_match"),
-            deduplicated_reconciliation.c.listing_price_match.label("listing_price_match"),
-            deduplicated_reconciliation.c.contract_date_match.label("contract_date_match"),
-            deduplicated_reconciliation.c.buyer_name_match.label("buyer_name_match"),
-            deduplicated_reconciliation.c.seller_name_match.label("seller_name_match"),
-            deduplicated_reconciliation.c.buying_agent_match.label("buying_agent_match"),
-            deduplicated_reconciliation.c.title_company_match.label("title_company_match"),
-            saleguid_group_flags.c.has_sale_income.label("has_sale_income"),
-            saleguid_group_flags.c.has_other_income.label("has_other_income"),
+            deduplicated_reconciliation.c.transactionid,
+            deduplicated_reconciliation.c.source_table,
+            deduplicated_reconciliation.c.saleguid,
+            deduplicated_reconciliation.c.propertyaddress,
+            deduplicated_reconciliation.c.be_close_date,
+            deduplicated_reconciliation.c.be_status,
+            deduplicated_reconciliation.c.be_transaction_specialist,
+            deduplicated_reconciliation.c.skyslope_reviewer,
+            deduplicated_reconciliation.c.gross_commission_match,
+            deduplicated_reconciliation.c.close_date_match,
+            deduplicated_reconciliation.c.status_match,
+            deduplicated_reconciliation.c.sale_price_match,
+            deduplicated_reconciliation.c.listing_price_match,
+            deduplicated_reconciliation.c.contract_date_match,
+            deduplicated_reconciliation.c.buyer_name_match,
+            deduplicated_reconciliation.c.seller_name_match,
+            deduplicated_reconciliation.c.buying_agent_match,
+            deduplicated_reconciliation.c.title_company_match,
+            saleguid_group_flags.c.has_sale_income,
+            saleguid_group_flags.c.has_other_income,
+            Stage.name.label("skyslope_stage"),
+            ReconciliationReview.review_status.label("review_status"),
+            ReconciliationReview.notes.label("review_notes"),
+            ReconciliationReview.updated_by.label("review_updated_by"),
+            ReconciliationReview.updated_at.label("review_updated_at"),
+            Sale.url.label("skyslope_url"),
         )
         .select_from(
-            deduplicated_reconciliation.join(
-                saleguid_group_flags,
-                saleguid_group_flags.c.saleguid == deduplicated_reconciliation.c.saleguid,
-            )
+            deduplicated_reconciliation
+            .join(saleguid_group_flags, saleguid_group_flags.c.saleguid == deduplicated_reconciliation.c.saleguid)
+            .outerjoin(Sale, Sale.saleguid == deduplicated_reconciliation.c.saleguid)
+            .outerjoin(Stage, Stage.stageid == Sale.stageid)
+            .outerjoin(ReconciliationReview, ReconciliationReview.transactionid == deduplicated_reconciliation.c.transactionid)
         )
     )
 
-    # Unlinked rows stay individual, exactly as before.
-    null_saleguid_rows = (
+    unlinked_rows = (
         select(
             rd.transactionid.label("transactionid"),
             rd.be_source_table.label("source_table"),
@@ -303,64 +294,19 @@ def build_base_reconciliation_subquery():
             rd.title_company_match.label("title_company_match"),
             (func.lower(rd.be_source_table) == "sale income").label("has_sale_income"),
             (func.lower(rd.be_source_table) == "other income").label("has_other_income"),
-        )
-        .where(rd.saleguid.is_(None))
-    )
-
-    combined_source = union_all(
-        grouped_rows,
-        null_saleguid_rows,
-    ).cte("combined_source")
-
-    # ReconciliationReview.transactionid is already the primary key,
-    # therefore no ROW_NUMBER/latest-review CTE is needed.
-    base_query = (
-        select(
-            combined_source.c.transactionid,
-            combined_source.c.source_table,
-            combined_source.c.saleguid,
-            combined_source.c.propertyaddress,
-            combined_source.c.be_close_date,
-            combined_source.c.be_status,
-            combined_source.c.be_transaction_specialist,
-            combined_source.c.skyslope_reviewer,
-            combined_source.c.gross_commission_match,
-            combined_source.c.close_date_match,
-            combined_source.c.status_match,
-            combined_source.c.sale_price_match,
-            combined_source.c.listing_price_match,
-            combined_source.c.contract_date_match,
-            combined_source.c.buyer_name_match,
-            combined_source.c.seller_name_match,
-            combined_source.c.buying_agent_match,
-            combined_source.c.title_company_match,
-            combined_source.c.has_sale_income,
-            combined_source.c.has_other_income,
-            Stage.name.label("skyslope_stage"),
+            cast(literal(None), String).label("skyslope_stage"),
             ReconciliationReview.review_status.label("review_status"),
             ReconciliationReview.notes.label("review_notes"),
             ReconciliationReview.updated_by.label("review_updated_by"),
             ReconciliationReview.updated_at.label("review_updated_at"),
-            Sale.url.label("skyslope_url"),
+            cast(literal(None), String).label("skyslope_url"),
         )
-        .select_from(
-            combined_source
-            .outerjoin(
-                Sale,
-                Sale.saleguid == combined_source.c.saleguid,
-            )
-            .outerjoin(
-                Stage,
-                Stage.stageid == Sale.stageid,
-            )
-            .outerjoin(
-                ReconciliationReview,
-                ReconciliationReview.transactionid == combined_source.c.transactionid,
-            )
-        )
+        .select_from(rd)
+        .outerjoin(ReconciliationReview, ReconciliationReview.transactionid == rd.transactionid)
+        .where(rd.saleguid.is_(None))
     )
 
-    return base_query.subquery("cs")
+    return union_all(linked_rows, unlinked_rows).subquery("cs")
 
 
 # ============================================================
@@ -777,7 +723,6 @@ def get_reconciliation_transactions(
     db: Session = Depends(get_db),
 ):
     parsed_mismatch_params = parse_mismatch_params(mismatch_parameter)
-
     parsed_source_tables = parse_source_table_params(source_table)
 
     cs = build_base_reconciliation_subquery()
@@ -1215,7 +1160,6 @@ def download_recon_data(
     db: Session = Depends(get_db),
 ):
     parsed_mismatch_params = parse_mismatch_params(mismatch_parameter)
-
     parsed_source_tables = parse_source_table_params(source_table)
 
     cs = build_base_reconciliation_subquery()
