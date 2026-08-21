@@ -1,245 +1,30 @@
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Any
+from uuid import UUID as PythonUUID
+
 from fastapi import APIRouter, Query, Depends, HTTPException, Response
-from sqlalchemy import text
+from sqlalchemy import Date, String, and_, case, cast, func, literal, or_, select, union_all
 from sqlalchemy.orm import Session
+
 from db import get_db
+from common.pagination import PaginationData, PaginationResponseWithCount
+from common.response import Response as APIResponse
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 import pandas as pd
 import io
 import datetime
 from decimal import Decimal
+from models.reconciliation_data import ReconciliationData, ReconciliationReview
+from models.skyslope.sale import Sale
+from models.skyslope.meta import Stage
+
 
 router = APIRouter()
 
-BASE_QUERY = """
-WITH base_reconciliation AS (
-    SELECT
-        rd.transactionid,
-        rd.be_source_table,
-        rd.saleguid,
-        rd.property_address,
-        rd.be_close_date,
-        rd.be_status,
-        rd.be_transaction_specialist,
-        rd.skyslope_reviewer,
-        rd.gross_commission_match,
-        rd.close_date_match,
-        rd.status_match,
-        rd.sale_price_match,
-        rd.listing_price_match,
-        rd.contract_date_match,
-        rd.buyer_name_match,
-        rd.seller_name_match,
-        rd.buying_agent_match,
-        rd.title_company_match
-    FROM reconciliation_data rd
-),
-latest_review AS (
-    SELECT DISTINCT ON (rr.transactionid)
-        rr.transactionid::uuid AS transactionid,
-        rr.review_status,
-        rr.notes,
-        rr.updated_by,
-        rr.updated_at
-    FROM reconciliation_review rr
-    ORDER BY rr.transactionid, rr.updated_at DESC
-),
-non_null_base AS (
-    SELECT *
-    FROM base_reconciliation
-    WHERE saleguid IS NOT NULL
-),
-null_base AS (
-    SELECT *
-    FROM base_reconciliation
-    WHERE saleguid IS NULL
-),
-saleguid_group_flags AS (
-    SELECT
-        br.saleguid,
-        ARRAY_AGG(DISTINCT LOWER(br.be_source_table)) AS linked_source_tables,
-        BOOL_OR(LOWER(br.be_source_table) = 'sale income') AS has_sale_income,
-        BOOL_OR(LOWER(br.be_source_table) = 'other income') AS has_other_income
-    FROM non_null_base br
-    GROUP BY br.saleguid
-),
-deduplicated_reconciliation AS (
-    SELECT DISTINCT ON (br.saleguid)
-        br.transactionid,
-        br.be_source_table,
-        br.saleguid,
-        br.property_address,
-        br.be_close_date,
-        br.be_status,
-        br.be_transaction_specialist,
-        br.skyslope_reviewer,
-        br.gross_commission_match,
-        br.close_date_match,
-        br.status_match,
-        br.sale_price_match,
-        br.listing_price_match,
-        br.contract_date_match,
-        br.buyer_name_match,
-        br.seller_name_match,
-        br.buying_agent_match,
-        br.title_company_match
-    FROM non_null_base br
-    ORDER BY
-        br.saleguid,
-        CASE
-            WHEN LOWER(br.be_source_table) = 'other income' THEN 0
-            WHEN LOWER(br.be_source_table) = 'sale income' THEN 1
-            ELSE 2
-        END,
-        br.transactionid
-),
-grouped_rows AS (
-    SELECT
-        dr.transactionid,
-        dr.be_source_table AS source_table,
-        dr.saleguid,
-        dr.property_address AS propertyaddress,
-        dr.be_close_date,
-        dr.be_status,
-        dr.be_transaction_specialist,
-        dr.skyslope_reviewer,
-        dr.gross_commission_match,
-        dr.close_date_match,
-        dr.status_match,
-        dr.sale_price_match,
-        dr.listing_price_match,
-        dr.contract_date_match,
-        dr.buyer_name_match,
-        dr.seller_name_match,
-        dr.buying_agent_match,
-        dr.title_company_match,
-        sgf.linked_source_tables,
-        sgf.has_sale_income,
-        sgf.has_other_income
-    FROM deduplicated_reconciliation dr
-    JOIN saleguid_group_flags sgf
-        ON sgf.saleguid = dr.saleguid
-),
-null_saleguid_rows AS (
-    SELECT
-        nb.transactionid,
-        nb.be_source_table AS source_table,
-        nb.saleguid,
-        nb.property_address AS propertyaddress,
-        nb.be_close_date,
-        nb.be_status,
-        nb.be_transaction_specialist,
-        nb.skyslope_reviewer,
-        nb.gross_commission_match,
-        nb.close_date_match,
-        nb.status_match,
-        nb.sale_price_match,
-        nb.listing_price_match,
-        nb.contract_date_match,
-        nb.buyer_name_match,
-        nb.seller_name_match,
-        nb.buying_agent_match,
-        nb.title_company_match,
-        ARRAY[LOWER(nb.be_source_table)] AS linked_source_tables,
-        (LOWER(nb.be_source_table) = 'sale income') AS has_sale_income,
-        (LOWER(nb.be_source_table) = 'other income') AS has_other_income
-    FROM null_base nb
-),
-combined_source AS (
-    SELECT * FROM grouped_rows
-    UNION ALL
-    SELECT * FROM null_saleguid_rows
-)
-SELECT
-    cs.transactionid,
-    cs.source_table,
-    cs.saleguid,
-    cs.propertyaddress,
-    cs.be_close_date,
-    cs.be_status,
-    cs.be_transaction_specialist,
-    cs.skyslope_reviewer,
-    cs.gross_commission_match,
-    cs.close_date_match,
-    cs.status_match,
-    cs.sale_price_match,
-    cs.listing_price_match,
-    cs.contract_date_match,
-    cs.buyer_name_match,
-    cs.seller_name_match,
-    cs.buying_agent_match,
-    cs.title_company_match,
-    cs.linked_source_tables,
-    cs.has_sale_income,
-    cs.has_other_income,
-    st.name AS skyslope_stage,
-    lr.review_status,
-    lr.notes AS review_notes,
-    lr.updated_by AS review_updated_by,
-    lr.updated_at AS review_updated_at,
-    s.url AS skyslope_url
-FROM combined_source cs
-LEFT JOIN sale s
-    ON s.saleguid = cs.saleguid
-LEFT JOIN stage st
-    ON st.stageid = s.stageid
-LEFT JOIN latest_review lr
-    ON lr.transactionid = cs.transactionid
-"""
 
-DETAIL_QUERY = """
-SELECT
-    rd.transactionid,
-    rd.saleguid,
-    rd.property_address AS propertyaddress,
-    rd.be_source_table AS source_table,
-
-    rd.be_status,
-    rd.skyslope_status_value AS skyslope_status,
-
-    rd.be_gross_commission,
-    rd.skyslope_gross_commission,
-    rd.gross_commission_match,
-
-    rd.be_close_date_value,
-    rd.skyslope_close_date_value,
-    rd.close_date_match,
-
-    rd.be_status_value,
-    rd.skyslope_status_value,
-    rd.status_match,
-
-    rd.be_sale_price,
-    rd.skyslope_sale_price,
-    rd.sale_price_match,
-
-    rd.be_listing_price,
-    rd.skyslope_listing_price,
-    rd.listing_price_match,
-
-    rd.be_contract_date,
-    rd.skyslope_contract_date,
-    rd.contract_date_match,
-
-    rd.be_buyer_name,
-    rd.skyslope_buyer_name,
-    rd.buyer_name_match,
-
-    rd.be_seller_name,
-    rd.skyslope_seller_name,
-    rd.seller_name_match,
-
-    rd.be_buying_agent_name,
-    rd.skyslope_buying_agent_name,
-    rd.buying_agent_match,
-
-    rd.be_title_company,
-    rd.skyslope_title_company,
-    rd.title_company_match
-FROM reconciliation_data rd
-WHERE rd.transactionid = :transaction_id
-"""
+# ============================================================
+# DISPLAY / FILTER CONFIGURATION
+# ============================================================
 
 PARAMETER_DISPLAY_NAMES = {
     "gross_commission": "Gross Commission",
@@ -254,144 +39,336 @@ PARAMETER_DISPLAY_NAMES = {
     "title_company": "Title Company",
 }
 
+
 SOURCE_TABLE_DISPLAY_NAMES = {
     "sale income": "sale income",
     "other income": "other income",
 }
+
 
 SOURCE_TABLE_FILTER_MAP = {
     "sale income": "sale income",
     "other income": "other income",
 }
 
-MISMATCH_SQL_FILTERS = {
-    "gross_commission": "(cs.gross_commission_match = 'mismatch')",
-    "close_date": "(cs.close_date_match = 'mismatch')",
-    "status": "(cs.status_match = 'mismatch')",
-    "sale_price": "(cs.sale_price_match = 'mismatch')",
-    "listing_price": "(cs.listing_price_match = 'mismatch')",
-    "contract_date": "(cs.contract_date_match = 'mismatch')",
-    "buyer_name": "(cs.buyer_name_match = 'mismatch')",
-    "seller_name": "(cs.seller_name_match = 'mismatch')",
-    "buying_agent_name": "(cs.buying_agent_match = 'mismatch')",
-    "title_company": "(cs.title_company_match = 'mismatch')",
-}
 
 EXPORT_PARAMETER_CONFIG = {
     "gross_commission": {
-        "be_column": "rd.be_gross_commission",
-        "ss_column": "rd.skyslope_gross_commission",
-        "match_column": "cs.gross_commission_match",
+        "be_attr": "be_gross_commission",
+        "ss_attr": "skyslope_gross_commission",
+        "match_attr": "gross_commission_match",
         "be_header": "BE Gross Commission",
         "ss_header": "Skyslope Gross Commission",
         "match_header": "Gross Commission Match",
     },
     "close_date": {
-        "be_column": "rd.be_close_date_value",
-        "ss_column": "rd.skyslope_close_date_value",
-        "match_column": "cs.close_date_match",
+        "be_attr": "be_close_date_value",
+        "ss_attr": "skyslope_close_date_value",
+        "match_attr": "close_date_match",
         "be_header": "BE Close Date",
         "ss_header": "Skyslope Close Date",
         "match_header": "Close Date Match",
     },
     "status": {
-        "be_column": "rd.be_status_value",
-        "ss_column": "rd.skyslope_status_value",
-        "match_column": "cs.status_match",
+        "be_attr": "be_status_value",
+        "ss_attr": "skyslope_status_value",
+        "match_attr": "status_match",
         "be_header": "BE Status",
         "ss_header": "Skyslope Status",
         "match_header": "Status Match",
     },
     "sale_price": {
-        "be_column": "rd.be_sale_price",
-        "ss_column": "rd.skyslope_sale_price",
-        "match_column": "cs.sale_price_match",
+        "be_attr": "be_sale_price",
+        "ss_attr": "skyslope_sale_price",
+        "match_attr": "sale_price_match",
         "be_header": "BE Sale Price",
         "ss_header": "Skyslope Sale Price",
         "match_header": "Sale Price Match",
     },
     "listing_price": {
-        "be_column": "rd.be_listing_price",
-        "ss_column": "rd.skyslope_listing_price",
-        "match_column": "cs.listing_price_match",
+        "be_attr": "be_listing_price",
+        "ss_attr": "skyslope_listing_price",
+        "match_attr": "listing_price_match",
         "be_header": "BE Listing Price",
         "ss_header": "Skyslope Listing Price",
         "match_header": "Listing Price Match",
     },
     "contract_date": {
-        "be_column": "rd.be_contract_date",
-        "ss_column": "rd.skyslope_contract_date",
-        "match_column": "cs.contract_date_match",
+        "be_attr": "be_contract_date",
+        "ss_attr": "skyslope_contract_date",
+        "match_attr": "contract_date_match",
         "be_header": "BE Contract Date",
         "ss_header": "Skyslope Contract Date",
         "match_header": "Contract Date Match",
     },
     "buyer_name": {
-        "be_column": "rd.be_buyer_name",
-        "ss_column": "rd.skyslope_buyer_name",
-        "match_column": "cs.buyer_name_match",
+        "be_attr": "be_buyer_name",
+        "ss_attr": "skyslope_buyer_name",
+        "match_attr": "buyer_name_match",
         "be_header": "BE Buyer Name",
         "ss_header": "Skyslope Buyer Name",
         "match_header": "Buyer Name Match",
     },
     "seller_name": {
-        "be_column": "rd.be_seller_name",
-        "ss_column": "rd.skyslope_seller_name",
-        "match_column": "cs.seller_name_match",
+        "be_attr": "be_seller_name",
+        "ss_attr": "skyslope_seller_name",
+        "match_attr": "seller_name_match",
         "be_header": "BE Seller Name",
         "ss_header": "Skyslope Seller Name",
         "match_header": "Seller Name Match",
     },
     "buying_agent_name": {
-        "be_column": "rd.be_buying_agent_name",
-        "ss_column": "rd.skyslope_buying_agent_name",
-        "match_column": "cs.buying_agent_match",
+        "be_attr": "be_buying_agent_name",
+        "ss_attr": "skyslope_buying_agent_name",
+        "match_attr": "buying_agent_match",
         "be_header": "BE Buying Agent Name",
         "ss_header": "Skyslope Buying Agent Name",
         "match_header": "Buying Agent Match",
     },
     "title_company": {
-        "be_column": "rd.be_title_company",
-        "ss_column": "rd.skyslope_title_company",
-        "match_column": "cs.title_company_match",
+        "be_attr": "be_title_company",
+        "ss_attr": "skyslope_title_company",
+        "match_attr": "title_company_match",
         "be_header": "BE Title Company",
         "ss_header": "Skyslope Title Company",
         "match_header": "Title Company Match",
     },
 }
 
+
+# ============================================================
+# PARAMETER PARSING
+# ============================================================
+
 def parse_mismatch_params(mismatch_parameter: Optional[List[str]]) -> List[str]:
     parsed = []
+
     if mismatch_parameter:
-        for p in mismatch_parameter:
-            for part in p.split(","):
+        for value in mismatch_parameter:
+            for part in value.split(","):
                 normalized = part.strip().lower().replace(" ", "_")
                 if normalized:
                     parsed.append(normalized)
+
     return parsed
+
 
 def parse_source_table_params(source_table: Optional[List[str]]) -> List[str]:
     parsed = []
+
     if source_table:
         for value in source_table:
             for part in value.split(","):
                 normalized = part.strip().lower()
                 mapped_value = SOURCE_TABLE_FILTER_MAP.get(normalized)
+
                 if mapped_value:
                     parsed.append(mapped_value)
+
     return parsed
+
 
 def parse_text_list_params(values: Optional[List[str]]) -> List[str]:
     parsed = []
+
     if values:
         for value in values:
             for part in value.split(","):
                 normalized = part.strip().lower()
+
                 if normalized:
                     parsed.append(normalized)
+
     return parsed
 
-def build_where_clause(
+
+# ============================================================
+# OPTIMIZED BASE RECONCILIATION QUERY
+# ============================================================
+
+def build_base_reconciliation_subquery():
+    rd = ReconciliationData
+
+    # PostgreSQL DISTINCT ON:
+    # one linked reconciliation row per saleguid.
+    # Priority remains exactly:
+    #   1. other income
+    #   2. sale income
+    #   3. anything else
+    source_priority = case(
+        (func.lower(rd.be_source_table) == "other income", 0),
+        (func.lower(rd.be_source_table) == "sale income", 1),
+        else_=2,
+    )
+
+    deduplicated_reconciliation = (
+        select(
+            rd.transactionid.label("transactionid"),
+            rd.be_source_table.label("be_source_table"),
+            rd.saleguid.label("saleguid"),
+            rd.property_address.label("property_address"),
+            rd.be_close_date.label("be_close_date"),
+            rd.be_status.label("be_status"),
+            rd.be_transaction_specialist.label("be_transaction_specialist"),
+            rd.skyslope_reviewer.label("skyslope_reviewer"),
+            rd.gross_commission_match.label("gross_commission_match"),
+            rd.close_date_match.label("close_date_match"),
+            rd.status_match.label("status_match"),
+            rd.sale_price_match.label("sale_price_match"),
+            rd.listing_price_match.label("listing_price_match"),
+            rd.contract_date_match.label("contract_date_match"),
+            rd.buyer_name_match.label("buyer_name_match"),
+            rd.seller_name_match.label("seller_name_match"),
+            rd.buying_agent_match.label("buying_agent_match"),
+            rd.title_company_match.label("title_company_match"),
+        )
+        .where(rd.saleguid.is_not(None))
+        .distinct(rd.saleguid)
+        .order_by(
+            rd.saleguid,
+            source_priority,
+            rd.transactionid,
+        )
+        .cte("deduplicated_reconciliation")
+    )
+
+    # Only the two booleans are needed by the API.
+    # ARRAY_AGG(DISTINCT ...) has been removed.
+    saleguid_group_flags = (
+        select(
+            rd.saleguid.label("saleguid"),
+            func.bool_or(
+                func.lower(rd.be_source_table) == "sale income"
+            ).label("has_sale_income"),
+            func.bool_or(
+                func.lower(rd.be_source_table) == "other income"
+            ).label("has_other_income"),
+        )
+        .where(rd.saleguid.is_not(None))
+        .group_by(rd.saleguid)
+        .cte("saleguid_group_flags")
+    )
+
+    grouped_rows = (
+        select(
+            deduplicated_reconciliation.c.transactionid.label("transactionid"),
+            deduplicated_reconciliation.c.be_source_table.label("source_table"),
+            deduplicated_reconciliation.c.saleguid.label("saleguid"),
+            deduplicated_reconciliation.c.property_address.label("propertyaddress"),
+            deduplicated_reconciliation.c.be_close_date.label("be_close_date"),
+            deduplicated_reconciliation.c.be_status.label("be_status"),
+            deduplicated_reconciliation.c.be_transaction_specialist.label("be_transaction_specialist"),
+            deduplicated_reconciliation.c.skyslope_reviewer.label("skyslope_reviewer"),
+            deduplicated_reconciliation.c.gross_commission_match.label("gross_commission_match"),
+            deduplicated_reconciliation.c.close_date_match.label("close_date_match"),
+            deduplicated_reconciliation.c.status_match.label("status_match"),
+            deduplicated_reconciliation.c.sale_price_match.label("sale_price_match"),
+            deduplicated_reconciliation.c.listing_price_match.label("listing_price_match"),
+            deduplicated_reconciliation.c.contract_date_match.label("contract_date_match"),
+            deduplicated_reconciliation.c.buyer_name_match.label("buyer_name_match"),
+            deduplicated_reconciliation.c.seller_name_match.label("seller_name_match"),
+            deduplicated_reconciliation.c.buying_agent_match.label("buying_agent_match"),
+            deduplicated_reconciliation.c.title_company_match.label("title_company_match"),
+            saleguid_group_flags.c.has_sale_income.label("has_sale_income"),
+            saleguid_group_flags.c.has_other_income.label("has_other_income"),
+        )
+        .select_from(
+            deduplicated_reconciliation.join(
+                saleguid_group_flags,
+                saleguid_group_flags.c.saleguid == deduplicated_reconciliation.c.saleguid,
+            )
+        )
+    )
+
+    # Unlinked rows stay individual, exactly as before.
+    null_saleguid_rows = (
+        select(
+            rd.transactionid.label("transactionid"),
+            rd.be_source_table.label("source_table"),
+            rd.saleguid.label("saleguid"),
+            rd.property_address.label("propertyaddress"),
+            rd.be_close_date.label("be_close_date"),
+            rd.be_status.label("be_status"),
+            rd.be_transaction_specialist.label("be_transaction_specialist"),
+            rd.skyslope_reviewer.label("skyslope_reviewer"),
+            rd.gross_commission_match.label("gross_commission_match"),
+            rd.close_date_match.label("close_date_match"),
+            rd.status_match.label("status_match"),
+            rd.sale_price_match.label("sale_price_match"),
+            rd.listing_price_match.label("listing_price_match"),
+            rd.contract_date_match.label("contract_date_match"),
+            rd.buyer_name_match.label("buyer_name_match"),
+            rd.seller_name_match.label("seller_name_match"),
+            rd.buying_agent_match.label("buying_agent_match"),
+            rd.title_company_match.label("title_company_match"),
+            (func.lower(rd.be_source_table) == "sale income").label("has_sale_income"),
+            (func.lower(rd.be_source_table) == "other income").label("has_other_income"),
+        )
+        .where(rd.saleguid.is_(None))
+    )
+
+    combined_source = union_all(
+        grouped_rows,
+        null_saleguid_rows,
+    ).cte("combined_source")
+
+    # ReconciliationReview.transactionid is already the primary key,
+    # therefore no ROW_NUMBER/latest-review CTE is needed.
+    base_query = (
+        select(
+            combined_source.c.transactionid,
+            combined_source.c.source_table,
+            combined_source.c.saleguid,
+            combined_source.c.propertyaddress,
+            combined_source.c.be_close_date,
+            combined_source.c.be_status,
+            combined_source.c.be_transaction_specialist,
+            combined_source.c.skyslope_reviewer,
+            combined_source.c.gross_commission_match,
+            combined_source.c.close_date_match,
+            combined_source.c.status_match,
+            combined_source.c.sale_price_match,
+            combined_source.c.listing_price_match,
+            combined_source.c.contract_date_match,
+            combined_source.c.buyer_name_match,
+            combined_source.c.seller_name_match,
+            combined_source.c.buying_agent_match,
+            combined_source.c.title_company_match,
+            combined_source.c.has_sale_income,
+            combined_source.c.has_other_income,
+            Stage.name.label("skyslope_stage"),
+            ReconciliationReview.review_status.label("review_status"),
+            ReconciliationReview.notes.label("review_notes"),
+            ReconciliationReview.updated_by.label("review_updated_by"),
+            ReconciliationReview.updated_at.label("review_updated_at"),
+            Sale.url.label("skyslope_url"),
+        )
+        .select_from(
+            combined_source
+            .outerjoin(
+                Sale,
+                Sale.saleguid == combined_source.c.saleguid,
+            )
+            .outerjoin(
+                Stage,
+                Stage.stageid == Sale.stageid,
+            )
+            .outerjoin(
+                ReconciliationReview,
+                ReconciliationReview.transactionid == combined_source.c.transactionid,
+            )
+        )
+    )
+
+    return base_query.subquery("cs")
+
+
+# ============================================================
+# FILTER BUILDER
+# ============================================================
+
+def build_filter_conditions(
+    cs,
     search: Optional[str],
     parsed_mismatch_params: List[str],
     parsed_source_tables: Optional[List[str]] = None,
@@ -406,140 +383,216 @@ def build_where_clause(
     otherincome_no_skyslopefileid: Optional[bool] = None,
 ):
     conditions = []
-    params = {}
 
     if search:
-        conditions.append("""
-            (
-                CAST(cs.transactionid AS TEXT) ILIKE :search_term
-                OR cs.propertyaddress ILIKE :search_term
+        search_term = f"%{search}%"
+
+        conditions.append(
+            or_(
+                cast(cs.c.transactionid, String).ilike(search_term),
+                cs.c.propertyaddress.ilike(search_term),
             )
-        """)
-        params["search_term"] = f"%{search}%"
+        )
 
     if parsed_source_tables:
         source_table_conditions = []
 
         if "sale income" in parsed_source_tables:
-            source_table_conditions.append("""
-                (
-                    cs.has_sale_income = TRUE
-                    AND cs.has_other_income = FALSE
+            source_table_conditions.append(
+                and_(
+                    cs.c.has_sale_income.is_(True),
+                    cs.c.has_other_income.is_(False),
                 )
-            """)
+            )
 
         if "other income" in parsed_source_tables:
-            source_table_conditions.append("""
-                (
-                    cs.has_other_income = TRUE
-                )
-            """)
+            source_table_conditions.append(
+                cs.c.has_other_income.is_(True)
+            )
 
         if source_table_conditions:
-            conditions.append(f"({' OR '.join(source_table_conditions)})")
+            conditions.append(or_(*source_table_conditions))
 
     if from_close_date:
-        conditions.append("cs.be_close_date >= CAST(:from_close_date AS DATE)")
-        params["from_close_date"] = from_close_date
+        conditions.append(
+            cs.c.be_close_date >= cast(literal(from_close_date), Date)
+        )
 
     if to_close_date:
-        conditions.append("cs.be_close_date <= CAST(:to_close_date AS DATE)")
-        params["to_close_date"] = to_close_date
+        conditions.append(
+            cs.c.be_close_date <= cast(literal(to_close_date), Date)
+        )
 
     if status:
-        normalized_status = [s.strip().lower() for s in status if s and s.strip()]
+        normalized_status = [
+            value.strip().lower()
+            for value in status
+            if value and value.strip()
+        ]
+
         if normalized_status:
-            conditions.append("LOWER(cs.be_status) = ANY(:status)")
-            params["status"] = normalized_status
+            conditions.append(
+                func.lower(cs.c.be_status).in_(normalized_status)
+            )
 
     if skyslope_stage:
-        normalized_stages = [s.strip().lower() for s in skyslope_stage if s and s.strip()]
+        normalized_stages = [
+            value.strip().lower()
+            for value in skyslope_stage
+            if value and value.strip()
+        ]
+
         if normalized_stages:
-            conditions.append("LOWER(cs.skyslope_stage) = ANY(:skyslope_stage)")
-            params["skyslope_stage"] = normalized_stages
+            conditions.append(
+                func.lower(cs.c.skyslope_stage).in_(normalized_stages)
+            )
 
     if review_status:
-        normalized_review_filters = [s.strip().lower() for s in review_status if s and s.strip()]
+        normalized_review_filters = [
+            value.strip().lower()
+            for value in review_status
+            if value and value.strip()
+        ]
+
         review_conditions = []
 
-        if "in_review" in normalized_review_filters:
-            review_conditions.append("LOWER(cs.review_status) = 'in_review'")
+        allowed_review_statuses = [
+            value
+            for value in normalized_review_filters
+            if value in {"in_review", "review_done", "not_a_mismatch"}
+        ]
 
-        if "review_done" in normalized_review_filters:
-            review_conditions.append("LOWER(cs.review_status) = 'review_done'")
+        if allowed_review_statuses:
+            # Controlled DB values: avoid LOWER() so PostgreSQL can use
+            # an index on review_status directly.
+            review_conditions.append(
+                cs.c.review_status.in_(allowed_review_statuses)
+            )
 
-        if "not_a_mismatch" in normalized_review_filters:
-            review_conditions.append("LOWER(cs.review_status) = 'not_a_mismatch'")
+        if "not_reviewed" in normalized_review_filters:
+            review_conditions.append(cs.c.review_status.is_(None))
 
         if review_conditions:
-            conditions.append(f"({' OR '.join(review_conditions)})")
+            conditions.append(or_(*review_conditions))
 
     parsed_specialists = parse_text_list_params(specialist)
+
     if parsed_specialists:
+        normalized_specialist_column = func.lower(
+            func.trim(cs.c.be_transaction_specialist)
+        )
+
         if "unassigned" in parsed_specialists:
-            non_unassigned_specialists = [s for s in parsed_specialists if s != "unassigned"]
-            specialist_conditions = [
-                "COALESCE(NULLIF(LOWER(TRIM(cs.be_transaction_specialist)), ''), 'unassigned') = 'unassigned'"
+            non_unassigned_specialists = [
+                value
+                for value in parsed_specialists
+                if value != "unassigned"
             ]
+
+            specialist_conditions = [
+                func.coalesce(
+                    func.nullif(normalized_specialist_column, ""),
+                    "unassigned",
+                ) == "unassigned"
+            ]
+
             if non_unassigned_specialists:
                 specialist_conditions.append(
-                    "LOWER(TRIM(cs.be_transaction_specialist)) = ANY(:specialists)"
+                    normalized_specialist_column.in_(
+                        non_unassigned_specialists
+                    )
                 )
-                params["specialists"] = non_unassigned_specialists
-            conditions.append(f"({' OR '.join(specialist_conditions)})")
+
+            conditions.append(or_(*specialist_conditions))
         else:
-            conditions.append("LOWER(TRIM(cs.be_transaction_specialist)) = ANY(:specialists)")
-            params["specialists"] = parsed_specialists
+            conditions.append(
+                normalized_specialist_column.in_(parsed_specialists)
+            )
 
     parsed_reviewers = parse_text_list_params(reviewer)
+
     if parsed_reviewers:
+        normalized_reviewer_column = func.lower(
+            func.trim(cs.c.skyslope_reviewer)
+        )
+
         if "unassigned" in parsed_reviewers:
-            non_unassigned_reviewers = [r for r in parsed_reviewers if r != "unassigned"]
-            reviewer_conditions = [
-                "COALESCE(NULLIF(LOWER(TRIM(cs.skyslope_reviewer)), ''), 'unassigned') = 'unassigned'"
+            non_unassigned_reviewers = [
+                value
+                for value in parsed_reviewers
+                if value != "unassigned"
             ]
+
+            reviewer_conditions = [
+                func.coalesce(
+                    func.nullif(normalized_reviewer_column, ""),
+                    "unassigned",
+                ) == "unassigned"
+            ]
+
             if non_unassigned_reviewers:
                 reviewer_conditions.append(
-                    "LOWER(TRIM(cs.skyslope_reviewer)) = ANY(:reviewers)"
+                    normalized_reviewer_column.in_(
+                        non_unassigned_reviewers
+                    )
                 )
-                params["reviewers"] = non_unassigned_reviewers
-            conditions.append(f"({' OR '.join(reviewer_conditions)})")
+
+            conditions.append(or_(*reviewer_conditions))
         else:
-            conditions.append("LOWER(TRIM(cs.skyslope_reviewer)) = ANY(:reviewers)")
-            params["reviewers"] = parsed_reviewers
+            conditions.append(
+                normalized_reviewer_column.in_(parsed_reviewers)
+            )
+
+    mismatch_columns = {
+        "gross_commission": cs.c.gross_commission_match,
+        "close_date": cs.c.close_date_match,
+        "status": cs.c.status_match,
+        "sale_price": cs.c.sale_price_match,
+        "listing_price": cs.c.listing_price_match,
+        "contract_date": cs.c.contract_date_match,
+        "buyer_name": cs.c.buyer_name_match,
+        "seller_name": cs.c.seller_name_match,
+        "buying_agent_name": cs.c.buying_agent_match,
+        "title_company": cs.c.title_company_match,
+    }
 
     if parsed_mismatch_params:
-        active_filters = [
-            MISMATCH_SQL_FILTERS[p]
-            for p in parsed_mismatch_params
-            if p in MISMATCH_SQL_FILTERS
+        mismatch_conditions = [
+            mismatch_columns[parameter] == "mismatch"
+            for parameter in parsed_mismatch_params
+            if parameter in mismatch_columns
         ]
-        if active_filters:
-            conditions.append(f"({' OR '.join(active_filters)})")
+
+        if mismatch_conditions:
+            conditions.append(or_(*mismatch_conditions))
 
     no_skyslope_conditions = []
 
     if saleincome_no_skyslopefileid is True:
-        no_skyslope_conditions.append("""
-            (
-                cs.saleguid IS NULL
-                AND LOWER(cs.source_table) = 'sale income'
+        no_skyslope_conditions.append(
+            and_(
+                cs.c.saleguid.is_(None),
+                func.lower(cs.c.source_table) == "sale income",
             )
-        """)
+        )
 
     if otherincome_no_skyslopefileid is True:
-        no_skyslope_conditions.append("""
-            (
-                cs.saleguid IS NULL
-                AND LOWER(cs.source_table) = 'other income'
+        no_skyslope_conditions.append(
+            and_(
+                cs.c.saleguid.is_(None),
+                func.lower(cs.c.source_table) == "other income",
             )
-        """)
+        )
 
     if no_skyslope_conditions:
-        conditions.append(f"({' OR '.join(no_skyslope_conditions)})")
+        conditions.append(or_(*no_skyslope_conditions))
 
-    where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
-    return where_clause, params
+    return conditions
+
+
+# ============================================================
+# COMMON HELPERS
+# ============================================================
 
 def get_mismatched_parameters_from_row(row):
     parameter_to_column = {
@@ -561,74 +614,154 @@ def get_mismatched_parameters_from_row(row):
         if row.get(column_name) == "mismatch"
     ]
 
+
+def build_source_table_value(row) -> List[str]:
+    if row.get("saleguid") is None:
+        source_table = row.get("source_table")
+
+        if not source_table:
+            return []
+
+        return [
+            SOURCE_TABLE_DISPLAY_NAMES.get(
+                source_table.lower(),
+                source_table,
+            )
+        ]
+
+    result = []
+
+    # Same source-table information as before, without ARRAY_AGG.
+    if row.get("has_sale_income"):
+        result.append("sale income")
+
+    if row.get("has_other_income"):
+        result.append("other income")
+
+    return result
+
+
 def get_summary_counts(db: Session):
-    row = db.execute(text("""
-        WITH grouped_summary AS (
-            SELECT DISTINCT ON (rd.saleguid)
-                rd.saleguid,
-                rd.be_source_table
-            FROM reconciliation_data rd
-            WHERE rd.saleguid IS NOT NULL
-            ORDER BY
-                rd.saleguid,
-                CASE
-                    WHEN LOWER(rd.be_source_table) = 'other income' THEN 0
-                    WHEN LOWER(rd.be_source_table) = 'sale income' THEN 1
-                    ELSE 2
-                END,
-                rd.transactionid
-        )
-        SELECT
-            (
-                (SELECT COUNT(*) FROM grouped_summary)
-                +
-                (SELECT COUNT(*) FROM reconciliation_data rd2 WHERE rd2.saleguid IS NULL)
-            ) AS total_record,
-            COUNT(*) FILTER (
-                WHERE LOWER(rd.be_source_table) = 'sale income' AND rd.saleguid IS NULL
-            ) AS saleincome_no_skyslopefileid,
-            COUNT(*) FILTER (
-                WHERE LOWER(rd.be_source_table) = 'other income' AND rd.saleguid IS NULL
-            ) AS otherincome_no_skyslopefileid
-        FROM reconciliation_data rd
-    """)).mappings().one()
-    return row
+    rd = ReconciliationData
+
+    stmt = select(
+        (
+            func.count(func.distinct(rd.saleguid)).filter(
+                rd.saleguid.is_not(None)
+            )
+            +
+            func.count().filter(
+                rd.saleguid.is_(None)
+            )
+        ).label("total_record"),
+        func.count().filter(
+            and_(
+                func.lower(rd.be_source_table) == "sale income",
+                rd.saleguid.is_(None),
+            )
+        ).label("saleincome_no_skyslopefileid"),
+        func.count().filter(
+            and_(
+                func.lower(rd.be_source_table) == "other income",
+                rd.saleguid.is_(None),
+            )
+        ).label("otherincome_no_skyslopefileid"),
+    )
+
+    return db.execute(stmt).mappings().one()
+
 
 def get_status_filters(db: Session):
-    query = """
-        SELECT DISTINCT be_status AS status
-        FROM reconciliation_data
-        WHERE be_status IS NOT NULL
-          AND TRIM(be_status) <> ''
-        ORDER BY status
-    """
-    rows = db.execute(text(query)).mappings().all()
+    stmt = (
+        select(
+            ReconciliationData.be_status.label("status")
+        )
+        .where(
+            ReconciliationData.be_status.is_not(None),
+            func.trim(ReconciliationData.be_status) != "",
+        )
+        .distinct()
+        .order_by(ReconciliationData.be_status)
+    )
+
+    rows = db.execute(stmt).mappings().all()
     return [row["status"] for row in rows]
 
+
 def get_specialist_filters(db: Session):
-    query = """
-        SELECT DISTINCT
-            COALESCE(NULLIF(TRIM(be_transaction_specialist), ''), 'unassigned') AS specialist
-        FROM reconciliation_data
-        ORDER BY specialist
-    """
-    rows = db.execute(text(query)).mappings().all()
+    specialist = func.coalesce(
+        func.nullif(
+            func.trim(
+                ReconciliationData.be_transaction_specialist
+            ),
+            "",
+        ),
+        "unassigned",
+    ).label("specialist")
+
+    stmt = (
+        select(specialist)
+        .distinct()
+        .order_by(specialist)
+    )
+
+    rows = db.execute(stmt).mappings().all()
     return [row["specialist"] for row in rows]
 
+
 def get_reviewer_filters(db: Session):
-    query = """
-        SELECT DISTINCT
-            COALESCE(NULLIF(TRIM(skyslope_reviewer), ''), 'unassigned') AS reviewer
-        FROM reconciliation_data
-        ORDER BY reviewer
-    """
-    rows = db.execute(text(query)).mappings().all()
+    reviewer = func.coalesce(
+        func.nullif(
+            func.trim(
+                ReconciliationData.skyslope_reviewer
+            ),
+            "",
+        ),
+        "unassigned",
+    ).label("reviewer")
+
+    stmt = (
+        select(reviewer)
+        .distinct()
+        .order_by(reviewer)
+    )
+
+    rows = db.execute(stmt).mappings().all()
     return [row["reviewer"] for row in rows]
 
-@router.get("/reconciliation/transactions")
+
+# ============================================================
+# FILTER API
+# ============================================================
+
+@router.get("/reconciliation/filter", response_model=APIResponse[dict[str, Any]])
+def get_reconciliation_filters(db: Session = Depends(get_db)):
+    summary = get_summary_counts(db)
+    return APIResponse(data={
+        "summary": {
+            "total_record": summary["total_record"],
+            "saleincome_no_skyslopefileid": summary["saleincome_no_skyslopefileid"],
+            "otherincome_no_skyslopefileid": summary["otherincome_no_skyslopefileid"],
+        },
+        "filters": {
+            "parameter": list(PARAMETER_DISPLAY_NAMES.values()),
+            "source_table": ["sale income", "other income"],
+            "review_status": ["in_review", "review_done", "not_a_mismatch", "not_reviewed"],
+            "status": get_status_filters(db),
+            "specialist": get_specialist_filters(db),
+            "reviewer": get_reviewer_filters(db),
+        },
+    })
+
+
+# ============================================================
+# LISTING API
+# ============================================================
+
+@router.get("/reconciliation/transactions", response_model=PaginationResponseWithCount[dict[str, Any]])
 def get_reconciliation_transactions(
     page: int = Query(default=1, ge=1),
-    limit: int = Query(default=50, ge=1),
+    limit: int = Query(default=50, ge=1, le=100),
     search: Optional[str] = Query(default=None),
     mismatch_parameter: Optional[List[str]] = Query(default=None),
     source_table: Optional[List[str]] = Query(default=None),
@@ -644,9 +777,13 @@ def get_reconciliation_transactions(
     db: Session = Depends(get_db),
 ):
     parsed_mismatch_params = parse_mismatch_params(mismatch_parameter)
+
     parsed_source_tables = parse_source_table_params(source_table)
 
-    where_clause, params = build_where_clause(
+    cs = build_base_reconciliation_subquery()
+
+    conditions = build_filter_conditions(
+        cs=cs,
         search=search,
         parsed_mismatch_params=parsed_mismatch_params,
         parsed_source_tables=parsed_source_tables,
@@ -661,112 +798,251 @@ def get_reconciliation_transactions(
         otherincome_no_skyslopefileid=otherincome_no_skyslopefileid,
     )
 
-    data_query = f"""
-        SELECT
-            cs.transactionid,
-            cs.saleguid,
-            cs.skyslope_url,
-            cs.propertyaddress,
-            cs.source_table,
-            cs.linked_source_tables,
-            cs.skyslope_stage,
-            cs.gross_commission_match,
-            cs.close_date_match,
-            cs.status_match,
-            cs.sale_price_match,
-            cs.listing_price_match,
-            cs.contract_date_match,
-            cs.buyer_name_match,
-            cs.seller_name_match,
-            cs.buying_agent_match,
-            cs.title_company_match,
-            cs.review_status,
-            cs.review_notes,
-            cs.review_updated_by,
-            COUNT(*) OVER() AS _total_count
-        FROM (
-            {BASE_QUERY}
-        ) cs
-        {where_clause}
-        ORDER BY
-            CASE WHEN cs.saleguid IS NULL THEN 1 ELSE 0 END,
-            cs.saleguid NULLS LAST,
-            cs.transactionid
-        LIMIT :limit OFFSET :offset;
-    """
+    # Keep COUNT(*) OVER() so the API still returns count in the same
+    # single DB query and does not execute the expensive reconciliation
+    # CTE twice.
+    stmt = (
+        select(
+            cs.c.transactionid,
+            cs.c.saleguid,
+            cs.c.skyslope_url,
+            cs.c.propertyaddress,
+            cs.c.source_table,
+            cs.c.has_sale_income,
+            cs.c.has_other_income,
+            cs.c.skyslope_stage,
+            cs.c.gross_commission_match,
+            cs.c.close_date_match,
+            cs.c.status_match,
+            cs.c.sale_price_match,
+            cs.c.listing_price_match,
+            cs.c.contract_date_match,
+            cs.c.buyer_name_match,
+            cs.c.seller_name_match,
+            cs.c.buying_agent_match,
+            cs.c.title_company_match,
+            cs.c.review_status,
+            cs.c.review_notes,
+            cs.c.review_updated_by,
+            func.count().over().label("_total_count"),
+        )
+        .select_from(cs)
+    )
 
+    if conditions:
+        stmt = stmt.where(*conditions)
+
+    # Final ordering intentionally removed as requested.
     offset = (page - 1) * limit
-    data_params = {**params, "limit": limit, "offset": offset}
-    rows = db.execute(text(data_query), data_params).mappings().all()
 
-    total_count = rows[0]["_total_count"] if rows else 0
-    summary = get_summary_counts(db)
-    status_filters = get_status_filters(db)
-    specialist_filters = get_specialist_filters(db)
-    reviewer_filters = get_reviewer_filters(db)
+    stmt = (
+        stmt
+        .limit(limit)
+        .offset(offset)
+    )
+
+    rows = db.execute(stmt).mappings().all()
+
+    total_count = (
+        rows[0]["_total_count"]
+        if rows
+        else 0
+    )
 
     results = []
+
     for row in rows:
-        if row.get("saleguid") is None:
-            source_table_value = []
-            if row.get("source_table"):
-                source_table_value = [
-                    SOURCE_TABLE_DISPLAY_NAMES.get(
-                        (row.get("source_table") or "").lower(),
-                        row.get("source_table")
+        results.append(
+            {
+                "transactionid": (
+                    str(row["transactionid"])
+                    if row.get("transactionid")
+                    else None
+                ),
+                "saleguid": (
+                    str(row["saleguid"])
+                    if row.get("saleguid")
+                    else None
+                ),
+                "skyslope_url": row.get(
+                    "skyslope_url"
+                ),
+                "propertyaddress": row.get(
+                    "propertyaddress"
+                ),
+                "source_table": build_source_table_value(
+                    row
+                ),
+                "skyslope_stage": row.get(
+                    "skyslope_stage"
+                ),
+                "mismatched_parameters": (
+                    get_mismatched_parameters_from_row(
+                        row
                     )
-                ]
-        else:
-            source_table_value = [
-                SOURCE_TABLE_DISPLAY_NAMES.get((value or "").lower(), value)
-                for value in (row.get("linked_source_tables") or [])
-            ]
+                ),
+                "review": {
+                    "review_status": row.get(
+                        "review_status"
+                    ),
+                    "notes": row.get(
+                        "review_notes"
+                    ),
+                    "updated_by": row.get(
+                        "review_updated_by"
+                    ),
+                },
+            }
+        )
 
-        results.append({
-            "transactionid": str(row["transactionid"]) if row.get("transactionid") else None,
-            "saleguid": str(row["saleguid"]) if row.get("saleguid") else None,
-            "skyslope_url": row.get("skyslope_url"),
-            "propertyaddress": row.get("propertyaddress"),
-            "source_table": source_table_value,
-            "skyslope_stage": row.get("skyslope_stage"),
-            "mismatched_parameters": get_mismatched_parameters_from_row(row),
-            "is_unlinked": row.get("saleguid") is None,
-            "review": {
-                "review_status": row.get("review_status"),
-                "notes": row.get("review_notes"),
-                "updated_by": row.get("review_updated_by"),
-            },
-        })
+    total_pages = max(1, (total_count + limit - 1) // limit)
+    return PaginationResponseWithCount(
+        data=PaginationData(total_count=total_count, items=results),
+        page=page,
+        page_size=limit,
+        count=total_count,
+        total_pages=total_pages,
+        has_next=page < total_pages,
+    )
 
-    return {
-        "summary": {
-            "total_record": summary["total_record"],
-            "saleincome_no_skyslopefileid": summary["saleincome_no_skyslopefileid"],
-            "otherincome_no_skyslopefileid": summary["otherincome_no_skyslopefileid"],
-        },
-        "count": total_count,
-        "pagination": {
-            "page": page,
-            "limit": limit,
-            "total_pages": (total_count + limit - 1) // limit if limit else 1,
-        },
-        "filters": {
-            "parameter": list(PARAMETER_DISPLAY_NAMES.values()),
-            "source_table": ["sale income", "other income"],
-            "review_status": ["in_review", "review_done", "not_a_mismatch"],
-            "status": status_filters,
-            "specialist": specialist_filters,
-            "reviewer": reviewer_filters,
-        },
-        "data": results,
-    }
 
-@router.get("/reconciliation/transaction/{transaction_id}")
+# ============================================================
+# DETAIL API
+# ============================================================
+
+@router.get(
+    "/reconciliation/transaction/{transaction_id}"
+)
 def get_reconciliation_transaction_details(
     transaction_id: str,
     db: Session = Depends(get_db),
 ):
-    row_res = db.execute(text(DETAIL_QUERY), {"transaction_id": transaction_id}).mappings().first()
+    try:
+        transaction_uuid = PythonUUID(transaction_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=404, detail="Transaction not found.")
+
+    rd = ReconciliationData
+
+    # Direct UUID equality allows PostgreSQL to use the PK index.
+    stmt = (
+        select(
+            rd.transactionid.label(
+                "transactionid"
+            ),
+            rd.saleguid.label(
+                "saleguid"
+            ),
+            rd.property_address.label(
+                "propertyaddress"
+            ),
+            rd.be_source_table.label(
+                "source_table"
+            ),
+            rd.be_status.label(
+                "be_status"
+            ),
+            rd.skyslope_status_value.label(
+                "skyslope_status"
+            ),
+            rd.be_gross_commission.label(
+                "be_gross_commission"
+            ),
+            rd.skyslope_gross_commission.label(
+                "skyslope_gross_commission"
+            ),
+            rd.gross_commission_match.label(
+                "gross_commission_match"
+            ),
+            rd.be_close_date_value.label(
+                "be_close_date_value"
+            ),
+            rd.skyslope_close_date_value.label(
+                "skyslope_close_date_value"
+            ),
+            rd.close_date_match.label(
+                "close_date_match"
+            ),
+            rd.be_status_value.label(
+                "be_status_value"
+            ),
+            rd.skyslope_status_value.label(
+                "skyslope_status_value"
+            ),
+            rd.status_match.label(
+                "status_match"
+            ),
+            rd.be_sale_price.label(
+                "be_sale_price"
+            ),
+            rd.skyslope_sale_price.label(
+                "skyslope_sale_price"
+            ),
+            rd.sale_price_match.label(
+                "sale_price_match"
+            ),
+            rd.be_listing_price.label(
+                "be_listing_price"
+            ),
+            rd.skyslope_listing_price.label(
+                "skyslope_listing_price"
+            ),
+            rd.listing_price_match.label(
+                "listing_price_match"
+            ),
+            rd.be_contract_date.label(
+                "be_contract_date"
+            ),
+            rd.skyslope_contract_date.label(
+                "skyslope_contract_date"
+            ),
+            rd.contract_date_match.label(
+                "contract_date_match"
+            ),
+            rd.be_buyer_name.label(
+                "be_buyer_name"
+            ),
+            rd.skyslope_buyer_name.label(
+                "skyslope_buyer_name"
+            ),
+            rd.buyer_name_match.label(
+                "buyer_name_match"
+            ),
+            rd.be_seller_name.label(
+                "be_seller_name"
+            ),
+            rd.skyslope_seller_name.label(
+                "skyslope_seller_name"
+            ),
+            rd.seller_name_match.label(
+                "seller_name_match"
+            ),
+            rd.be_buying_agent_name.label(
+                "be_buying_agent_name"
+            ),
+            rd.skyslope_buying_agent_name.label(
+                "skyslope_buying_agent_name"
+            ),
+            rd.buying_agent_match.label(
+                "buying_agent_match"
+            ),
+            rd.be_title_company.label(
+                "be_title_company"
+            ),
+            rd.skyslope_title_company.label(
+                "skyslope_title_company"
+            ),
+            rd.title_company_match.label(
+                "title_company_match"
+            ),
+        )
+        .where(
+            rd.transactionid == transaction_uuid
+        )
+    )
+
+    row_res = db.execute(stmt).mappings().first()
+
     row = dict(row_res) if row_res else None
 
     if not row:
@@ -780,66 +1056,147 @@ def get_reconciliation_transaction_details(
 
     detailed_parameters = {
         "gross_commission": {
-            "be_value": serialize_numeric(row.get("be_gross_commission")),
-            "skyslope_value": serialize_numeric(row.get("skyslope_gross_commission")),
-            "match_result": row.get("gross_commission_match"),
+            "be_value": serialize_numeric(
+                row.get("be_gross_commission")
+            ),
+            "skyslope_value": serialize_numeric(
+                row.get("skyslope_gross_commission")
+            ),
+            "match_result": row.get(
+                "gross_commission_match"
+            ),
         },
         "close_date": {
-            "be_value": serialize_date(row.get("be_close_date_value")),
-            "skyslope_value": serialize_date(row.get("skyslope_close_date_value")),
-            "match_result": row.get("close_date_match"),
+            "be_value": serialize_date(
+                row.get("be_close_date_value")
+            ),
+            "skyslope_value": serialize_date(
+                row.get("skyslope_close_date_value")
+            ),
+            "match_result": row.get(
+                "close_date_match"
+            ),
         },
         "status": {
-            "be_value": row.get("be_status_value"),
-            "skyslope_value": row.get("skyslope_status_value"),
-            "match_result": row.get("status_match"),
+            "be_value": row.get(
+                "be_status_value"
+            ),
+            "skyslope_value": row.get(
+                "skyslope_status_value"
+            ),
+            "match_result": row.get(
+                "status_match"
+            ),
         },
         "sale_price": {
-            "be_value": serialize_numeric(row.get("be_sale_price")),
-            "skyslope_value": serialize_numeric(row.get("skyslope_sale_price")),
-            "match_result": row.get("sale_price_match"),
+            "be_value": serialize_numeric(
+                row.get("be_sale_price")
+            ),
+            "skyslope_value": serialize_numeric(
+                row.get("skyslope_sale_price")
+            ),
+            "match_result": row.get(
+                "sale_price_match"
+            ),
         },
         "listing_price": {
-            "be_value": serialize_numeric(row.get("be_listing_price")),
-            "skyslope_value": serialize_numeric(row.get("skyslope_listing_price")),
-            "match_result": row.get("listing_price_match"),
+            "be_value": serialize_numeric(
+                row.get("be_listing_price")
+            ),
+            "skyslope_value": serialize_numeric(
+                row.get("skyslope_listing_price")
+            ),
+            "match_result": row.get(
+                "listing_price_match"
+            ),
         },
         "contract_date": {
-            "be_value": serialize_date(row.get("be_contract_date")),
-            "skyslope_value": serialize_date(row.get("skyslope_contract_date")),
-            "match_result": row.get("contract_date_match"),
+            "be_value": serialize_date(
+                row.get("be_contract_date")
+            ),
+            "skyslope_value": serialize_date(
+                row.get("skyslope_contract_date")
+            ),
+            "match_result": row.get(
+                "contract_date_match"
+            ),
         },
         "buyer_name": {
-            "be_value": row.get("be_buyer_name"),
-            "skyslope_value": row.get("skyslope_buyer_name"),
-            "match_result": row.get("buyer_name_match"),
+            "be_value": row.get(
+                "be_buyer_name"
+            ),
+            "skyslope_value": row.get(
+                "skyslope_buyer_name"
+            ),
+            "match_result": row.get(
+                "buyer_name_match"
+            ),
         },
         "seller_name": {
-            "be_value": row.get("be_seller_name"),
-            "skyslope_value": row.get("skyslope_seller_name"),
-            "match_result": row.get("seller_name_match"),
+            "be_value": row.get(
+                "be_seller_name"
+            ),
+            "skyslope_value": row.get(
+                "skyslope_seller_name"
+            ),
+            "match_result": row.get(
+                "seller_name_match"
+            ),
         },
         "buying_agent_name": {
-            "be_value": row.get("be_buying_agent_name"),
-            "skyslope_value": row.get("skyslope_buying_agent_name"),
-            "match_result": row.get("buying_agent_match"),
+            "be_value": row.get(
+                "be_buying_agent_name"
+            ),
+            "skyslope_value": row.get(
+                "skyslope_buying_agent_name"
+            ),
+            "match_result": row.get(
+                "buying_agent_match"
+            ),
         },
         "title_company": {
-            "be_value": row.get("be_title_company"),
-            "skyslope_value": row.get("skyslope_title_company"),
-            "match_result": row.get("title_company_match"),
+            "be_value": row.get(
+                "be_title_company"
+            ),
+            "skyslope_value": row.get(
+                "skyslope_title_company"
+            ),
+            "match_result": row.get(
+                "title_company_match"
+            ),
         },
     }
 
     return {
-        "transactionid": str(row["transactionid"]) if row.get("transactionid") else None,
-        "saleguid": str(row["saleguid"]) if row.get("saleguid") else None,
-        "propertyaddress": row.get("propertyaddress"),
-        "source_table": row.get("source_table"),
-        "be_status": row.get("be_status"),
-        "skyslope_status": row.get("skyslope_status"),
+        "transactionid": (
+            str(row["transactionid"])
+            if row.get("transactionid")
+            else None
+        ),
+        "saleguid": (
+            str(row["saleguid"])
+            if row.get("saleguid")
+            else None
+        ),
+        "propertyaddress": row.get(
+            "propertyaddress"
+        ),
+        "source_table": row.get(
+            "source_table"
+        ),
+        "be_status": row.get(
+            "be_status"
+        ),
+        "skyslope_status": row.get(
+            "skyslope_status"
+        ),
         "parameters": detailed_parameters,
     }
+
+
+# ============================================================
+# EXCEL DOWNLOAD API
+# ============================================================
 
 @router.get("/recon-data/download")
 def download_recon_data(
@@ -858,9 +1215,13 @@ def download_recon_data(
     db: Session = Depends(get_db),
 ):
     parsed_mismatch_params = parse_mismatch_params(mismatch_parameter)
+
     parsed_source_tables = parse_source_table_params(source_table)
 
-    where_clause, params = build_where_clause(
+    cs = build_base_reconciliation_subquery()
+
+    conditions = build_filter_conditions(
+        cs=cs,
         search=search,
         parsed_mismatch_params=parsed_mismatch_params,
         parsed_source_tables=parsed_source_tables,
@@ -876,68 +1237,132 @@ def download_recon_data(
     )
 
     default_columns = [
-        ("transactionid", "cs.transactionid", "Transaction ID"),
-        ("source_table", "cs.source_table", "Source Table"),
-        ("saleguid", "cs.saleguid", "Sale GUID"),
-        ("propertyaddress", "cs.propertyaddress", "Property Address"),
-        ("be_transaction_specialist", "cs.be_transaction_specialist", "Transaction Specialist"),
-        ("skyslope_reviewer", "cs.skyslope_reviewer", "Skyslope Reviewer"),
-        ("skyslope_stage", "cs.skyslope_stage", "Skyslope Stage"),
+        (
+            "transactionid",
+            cs.c.transactionid,
+            "Transaction ID",
+        ),
+        (
+            "source_table",
+            cs.c.source_table,
+            "Source Table",
+        ),
+        (
+            "saleguid",
+            cs.c.saleguid,
+            "Sale GUID",
+        ),
+        (
+            "propertyaddress",
+            cs.c.propertyaddress,
+            "Property Address",
+        ),
+        (
+            "be_transaction_specialist",
+            cs.c.be_transaction_specialist,
+            "Transaction Specialist",
+        ),
+        (
+            "skyslope_reviewer",
+            cs.c.skyslope_reviewer,
+            "Skyslope Reviewer",
+        ),
+        (
+            "skyslope_stage",
+            cs.c.skyslope_stage,
+            "Skyslope Stage",
+        ),
     ]
 
     selected_parameters = [
-        p for p in parsed_mismatch_params
-        if p in EXPORT_PARAMETER_CONFIG
+        parameter
+        for parameter in parsed_mismatch_params
+        if parameter in EXPORT_PARAMETER_CONFIG
     ]
 
     if not selected_parameters:
-        selected_parameters = list(EXPORT_PARAMETER_CONFIG.keys())
+        selected_parameters = list(
+            EXPORT_PARAMETER_CONFIG.keys()
+        )
 
-    select_clauses = [
-        f"{column_expr} AS {alias}"
+    select_columns = [
+        column_expr.label(alias)
         for alias, column_expr, _ in default_columns
     ]
 
     export_headers = {
-        alias: header for alias, _, header in default_columns
+        alias: header
+        for alias, _, header in default_columns
     }
 
     for parameter in selected_parameters:
-        config = EXPORT_PARAMETER_CONFIG[parameter]
+        config = EXPORT_PARAMETER_CONFIG[
+            parameter
+        ]
 
-        be_alias = f"{parameter}_be_value"
-        ss_alias = f"{parameter}_ss_value"
-        match_alias = f"{parameter}_match_result"
+        be_alias = (
+            f"{parameter}_be_value"
+        )
+        ss_alias = (
+            f"{parameter}_ss_value"
+        )
+        match_alias = (
+            f"{parameter}_match_result"
+        )
 
-        select_clauses.extend([
-            f"{config['be_column']} AS {be_alias}",
-            f"{config['ss_column']} AS {ss_alias}",
-            f"{config['match_column']} AS {match_alias}",
-        ])
+        select_columns.extend(
+            [
+                getattr(
+                    ReconciliationData,
+                    config["be_attr"],
+                ).label(be_alias),
+                getattr(
+                    ReconciliationData,
+                    config["ss_attr"],
+                ).label(ss_alias),
+                getattr(
+                    cs.c,
+                    config["match_attr"],
+                ).label(match_alias),
+            ]
+        )
 
-        export_headers[be_alias] = config["be_header"]
-        export_headers[ss_alias] = config["ss_header"]
-        export_headers[match_alias] = config["match_header"]
+        export_headers[
+            be_alias
+        ] = config["be_header"]
 
-    data_query = f"""
-        SELECT
-            {", ".join(select_clauses)}
-        FROM (
-            {BASE_QUERY}
-        ) cs
-        LEFT JOIN reconciliation_data rd
-            ON rd.transactionid = cs.transactionid
-        {where_clause}
-        ORDER BY
-            CASE WHEN cs.saleguid IS NULL THEN 1 ELSE 0 END,
-            cs.saleguid NULLS LAST,
-            cs.transactionid
-    """
+        export_headers[
+            ss_alias
+        ] = config["ss_header"]
 
-    rows = db.execute(text(data_query), params).mappings().all()
-    data = [dict(r) for r in rows]
+        export_headers[
+            match_alias
+        ] = config["match_header"]
+
+    stmt = (
+        select(*select_columns)
+        .select_from(
+            cs.outerjoin(
+                ReconciliationData,
+                ReconciliationData.transactionid
+                == cs.c.transactionid,
+            )
+        )
+    )
+
+    if conditions:
+        stmt = stmt.where(*conditions)
+
+    # Final ordering intentionally removed as requested.
+    rows = db.execute(stmt).mappings().all()
+
+    data = [
+        dict(row)
+        for row in rows
+    ]
 
     rows_to_export = []
+
     for record in data:
         row_dict = {}
 
@@ -946,24 +1371,48 @@ def download_recon_data(
 
             if isinstance(val, Decimal):
                 val = float(val)
-            elif isinstance(val, (datetime.date, datetime.datetime)):
-                val = val.strftime("%Y-%m-%d")
+
+            elif isinstance(
+                val,
+                (
+                    datetime.date,
+                    datetime.datetime,
+                ),
+            ):
+                val = val.strftime(
+                    "%Y-%m-%d"
+                )
+
             elif isinstance(val, bool):
-                val = "Yes" if val else "No"
+                val = (
+                    "Yes"
+                    if val
+                    else "No"
+                )
+
             elif val is None:
                 val = ""
 
-            row_dict[header] = val
+            row_dict[
+                header
+            ] = val
 
-        rows_to_export.append(row_dict)
+        rows_to_export.append(
+            row_dict
+        )
 
-    df = pd.DataFrame(rows_to_export)
+    df = pd.DataFrame(
+        rows_to_export
+    )
 
     output = io.BytesIO()
+
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="Recon Data", index=False)
 
-        worksheet = writer.sheets["Recon Data"]
+        worksheet = writer.sheets[
+            "Recon Data"
+        ]
 
         for cell in worksheet[1]:
             cell.font = Font(bold=True)
@@ -974,6 +1423,7 @@ def download_recon_data(
 
             for cell in col:
                 val = cell.value
+
                 if val is not None:
                     max_len = max(max_len, len(str(val)))
 
@@ -982,12 +1432,14 @@ def download_recon_data(
     output.seek(0)
 
     filename = "reconciliation_data_report.xlsx"
-    headers = {
-        "Content-Disposition": f'attachment; filename="{filename}"'
-    }
+
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
 
     return Response(
         content=output.getvalue(),
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers=headers
+        media_type=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+        headers=headers,
     )

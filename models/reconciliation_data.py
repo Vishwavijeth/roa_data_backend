@@ -1,5 +1,5 @@
 from db import Base
-from sqlalchemy import Column, String, Date, Numeric, Text, DateTime
+from sqlalchemy import Column, String, Date, Numeric, Text, DateTime, TIMESTAMP
 from sqlalchemy.dialects.postgresql import UUID
 import uuid
 
@@ -72,3 +72,12 @@ class ReconciliationData(Base):
     title_company_match = Column(Text)
 
     evaluated_at = Column(DateTime)
+
+class ReconciliationReview(Base):
+    __tablename__ = "reconciliation_review"
+
+    transactionid = Column(UUID(as_uuid=True), primary_key=True, nullable=False)
+    review_status = Column(String, nullable=True)
+    notes = Column(String, nullable=True)
+    updated_by = Column(String, nullable=True)
+    updated_at = Column(TIMESTAMP, nullable=True)
