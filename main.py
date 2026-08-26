@@ -2,7 +2,7 @@ from fastapi import FastAPI, Request, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from common.response import AppError, build_error_response
-from api.auth import router as auth_router
+from api.auth.authentication import router as auth_router
 from api.dashboards.transaction_specialist import router as trans_dash_router
 from api.dashboards.reviewer import router as review_dash_router
 from api.dashboards.checklist_typeofsale_mapping import router as checklist_mapping_router
@@ -47,6 +47,7 @@ from api.listing.commission_advances.update import router as commisison_advances
 from api.listing.commission_advances.commission_advances_flow_sync import router as commission_advances_flow_sync_router
 from api.listing.commission_advances.commisison_advances_flow_listing import router as commission_advances_flow_listing_router
 from api.cron import router as cron_router
+from api.user_access.create_user import router as create_user_router
 
 app = FastAPI()
 
@@ -103,6 +104,7 @@ app.include_router(commisison_advances_update_router)
 app.include_router(commission_advances_flow_sync_router)
 app.include_router(commission_advances_flow_listing_router)
 app.include_router(broker_hold_router)
+app.include_router(create_user_router)
 
 @app.exception_handler(AppError)
 async def app_error_handler(request: Request, exc: AppError):
