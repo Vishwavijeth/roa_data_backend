@@ -9,6 +9,7 @@ from api.dashboards.checklist_typeofsale_mapping import router as checklist_mapp
 from api.listing.brokerage_engine import router as brokerage_router
 from api.listing.otherincome_transactions import router as other_income_listing_router
 from api.listing.skyslope.skyslope_listing import router as skyslope_router
+from api.listing.skyslope.filters import router as skyslope_filter_router
 from api.listing.transaction_specialist import router as transaction_specialist_router
 from api.listing.reviewer import router as reviewer_router
 from api.listing.brokeage_engine_sync import router as brokerage_sync_router
@@ -63,6 +64,7 @@ app.include_router(auth_router)
 app.include_router(brokerage_router)
 app.include_router(other_income_listing_router)
 app.include_router(skyslope_router)
+app.include_router(skyslope_filter_router)
 app.include_router(transaction_specialist_router)
 app.include_router(reviewer_router)
 app.include_router(trans_dash_router)

@@ -1,4 +1,4 @@
-from services.state_office_mapping import STATE_OFFICES_MAP
+from services.states import STATE_OFFICES_MAP
 
 def apply_common_filters(
     query,

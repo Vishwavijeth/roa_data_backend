@@ -1,17 +1,388 @@
-from fastapi import APIRouter, Query, Depends, Response
-from typing import Optional, List
-from sqlalchemy import text
-from sqlalchemy.orm import Session
-from db import get_db
-from services.state_office_mapping import STATE_OFFICES_MAP
-from services.reviewer_filters import apply_common_filters
-from openpyxl.styles import Font, Alignment
-from openpyxl.utils import get_column_letter
-import pandas as pd
+from datetime import date
 import io
+import re
+from typing import Dict, List, Optional
 
+import pandas as pd
+from fastapi import APIRouter, Depends, Query, Response
+from openpyxl.styles import Alignment, Font
+from openpyxl.utils import get_column_letter
+from sqlalchemy import and_, case, distinct, func, or_, select
+from sqlalchemy.orm import Session
+
+from db import get_db
+from models.skyslope.meta import Office, Stage
+from models.skyslope.property import SaleProperty
+from models.skyslope.sale import Sale
+from models.skyslope.users import SkyslopeUser
+from services.states import STATE_FULL_NAME_MAP
 
 router = APIRouter()
+
+
+STATE_CODE_BY_FULL_NAME = {
+    full_name.upper(): state_code
+    for state_code, full_name in STATE_FULL_NAME_MAP.items()
+}
+
+
+# ============================================================
+# COMMON ORM EXPRESSIONS / HELPERS
+# ============================================================
+
+def reviewer_name_expr():
+    full_name = func.nullif(
+        func.trim(
+            func.concat_ws(
+                " ",
+                SkyslopeUser.firstname,
+                SkyslopeUser.lastname,
+            )
+        ),
+        "",
+    )
+
+    return case(
+        # No reviewer GUID on the sale itself.
+        (Sale.reviewerguid.is_(None), "Unassigned"),
+
+        # Reviewer GUID exists on the sale, but there is no matching users row.
+        (SkyslopeUser.userguid.is_(None), "No User Record"),
+
+        # Matching users row exists, but firstname + lastname is empty/null.
+        (full_name.is_(None), "No User Record"),
+
+        else_=full_name,
+    )
+
+
+def normalized_status_expr():
+    return func.lower(func.trim(func.coalesce(Sale.status, "")))
+
+
+def normalized_state_expr():
+    return func.coalesce(
+        func.nullif(func.upper(func.trim(SaleProperty.state)), ""),
+        "UNKNOWN",
+    )
+
+
+def parse_date(value: Optional[str]) -> Optional[date]:
+    if not value:
+        return None
+    return date.fromisoformat(value)
+
+
+def status_field_name(status: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "_", status.strip().lower()).strip("_")
+    return f"transactions_{normalized}"
+
+
+def get_distinct_statuses(db: Session) -> List[str]:
+    status_value = func.trim(Sale.status)
+
+    stmt = (
+        select(status_value)
+        .where(
+            Sale.status.is_not(None),
+            func.trim(Sale.status) != "",
+        )
+        .distinct()
+    )
+
+    statuses = list(db.scalars(stmt).all())
+    return sorted(statuses, key=str.casefold)
+
+
+def build_status_field_map(statuses: List[str]) -> Dict[str, str]:
+    field_map: Dict[str, str] = {}
+    used_fields: Dict[str, str] = {}
+
+    for status in statuses:
+        base_field = status_field_name(status)
+        field_name = base_field
+        counter = 2
+
+        while field_name in used_fields and used_fields[field_name].casefold() != status.casefold():
+            field_name = f"{base_field}_{counter}"
+            counter += 1
+
+        field_map[status] = field_name
+        used_fields[field_name] = status
+
+    return field_map
+
+
+def apply_common_filters_orm(
+    stmt,
+    *,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    state: Optional[List[str]] = None,
+    stage_name: Optional[List[str]] = None,
+    status: Optional[List[str]] = None,
+    reviewer: Optional[List[str]] = None,
+    type_of_sale: Optional[List[str]] = None,
+):
+    conditions = []
+
+    parsed_from_date = parse_date(from_date)
+    parsed_to_date = parse_date(to_date)
+
+    if parsed_from_date:
+        conditions.append(func.date(Sale.escrowclosingdate) >= parsed_from_date)
+
+    if parsed_to_date:
+        conditions.append(func.date(Sale.escrowclosingdate) <= parsed_to_date)
+
+    # State is selected from sale_property.state, but filtering is done
+    # against the transaction's office name.
+    # Example: TX -> office name starts with "TX" or "Texas".
+    if state:
+        office_state_conditions = []
+
+        for value in state:
+            if not value or not value.strip():
+                continue
+
+            selected_state = value.strip().upper()
+            state_code = STATE_CODE_BY_FULL_NAME.get(selected_state, selected_state)
+            full_state_name = STATE_FULL_NAME_MAP.get(state_code)
+
+            if not full_state_name:
+                continue
+
+            office_state_conditions.append(
+                or_(
+                    Office.officename.ilike(f"{state_code}%"),
+                    Office.officename.ilike(f"{full_state_name}%"),
+                )
+            )
+
+        if office_state_conditions:
+            conditions.append(or_(*office_state_conditions))
+
+    if stage_name:
+        normalized_stages = [
+            value.strip().lower()
+            for value in stage_name
+            if value and value.strip()
+        ]
+
+        if normalized_stages:
+            conditions.append(
+                func.lower(func.trim(Stage.name)).in_(normalized_stages)
+            )
+
+    if status:
+        normalized_statuses = [
+            value.strip().lower()
+            for value in status
+            if value and value.strip()
+        ]
+
+        if normalized_statuses:
+            conditions.append(
+                normalized_status_expr().in_(normalized_statuses)
+            )
+
+    if reviewer:
+        reviewer_values = [
+            value.strip()
+            for value in reviewer
+            if value and value.strip()
+        ]
+
+        if reviewer_values:
+            conditions.append(
+                reviewer_name_expr().in_(reviewer_values)
+            )
+
+    if type_of_sale:
+        normalized_sale_types = [
+            value.strip().lower()
+            for value in type_of_sale
+            if value and value.strip()
+        ]
+
+        if normalized_sale_types:
+            conditions.append(
+                func.lower(func.trim(Sale.dealtype)).in_(normalized_sale_types)
+            )
+
+    if conditions:
+        stmt = stmt.where(and_(*conditions))
+
+    return stmt
+
+
+def status_count_columns(
+    statuses: List[str],
+    status_field_map: Dict[str, str],
+):
+    status_expr = normalized_status_expr()
+    columns = []
+
+    for status in statuses:
+        columns.append(
+            func.count(distinct(Sale.saleguid))
+            .filter(status_expr == status.strip().lower())
+            .label(status_field_map[status])
+        )
+
+    columns.append(
+        func.count(distinct(Sale.saleguid)).label("total_transactions")
+    )
+
+    return columns
+
+
+def build_reviewer_dashboard_stmt(
+    *,
+    statuses: List[str],
+    status_field_map: Dict[str, str],
+    from_date: Optional[str],
+    to_date: Optional[str],
+    state: Optional[List[str]],
+    stage_name: Optional[List[str]],
+    status: Optional[List[str]],
+    reviewer: Optional[List[str]],
+    type_of_sale: Optional[List[str]],
+    include_reviewer_guid: bool,
+):
+    reviewer_full_name = reviewer_name_expr().label("reviewer_full_name")
+
+    columns = []
+
+    if include_reviewer_guid:
+        columns.append(Sale.reviewerguid.label("reviewerguid"))
+
+    columns.extend(
+        [
+            reviewer_full_name,
+            *status_count_columns(statuses, status_field_map),
+        ]
+    )
+
+    stmt = (
+        select(*columns)
+        .select_from(Sale)
+        .outerjoin(
+            SkyslopeUser,
+            Sale.reviewerguid == SkyslopeUser.userguid,
+        )
+        .outerjoin(
+            Stage,
+            Sale.stageid == Stage.stageid,
+        )
+        .outerjoin(
+            Office,
+            Sale.officeguid == Office.officeguid,
+        )
+    )
+
+    stmt = apply_common_filters_orm(
+        stmt,
+        from_date=from_date,
+        to_date=to_date,
+        state=state,
+        stage_name=stage_name,
+        status=status,
+        reviewer=reviewer,
+        type_of_sale=type_of_sale,
+    )
+
+    if include_reviewer_guid:
+        stmt = stmt.group_by(
+            Sale.reviewerguid,
+            reviewer_name_expr(),
+        )
+    else:
+        stmt = stmt.group_by(reviewer_name_expr())
+
+    return stmt.order_by(reviewer_name_expr())
+
+
+def get_status_count(row: dict, status: str, status_field_map: Dict[str, str]) -> int:
+    for existing_status, field_name in status_field_map.items():
+        if existing_status.casefold() == status.casefold():
+            return row.get(field_name, 0) or 0
+    return 0
+
+
+def create_export_rows(
+    rows: List[dict],
+    statuses: List[str],
+    status_field_map: Dict[str, str],
+    first_column_name: str,
+    first_column_key: str,
+) -> List[dict]:
+    export_rows = []
+
+    for row in rows:
+        export_row = {
+            first_column_name: row.get(first_column_key) or "",
+        }
+
+        for status in statuses:
+            export_row[status] = row.get(status_field_map[status], 0) or 0
+
+        export_row["Total Transactions"] = row.get("total_transactions", 0) or 0
+        export_rows.append(export_row)
+
+    return export_rows
+
+
+def style_standard_dashboard_sheet(worksheet, df: pd.DataFrame):
+    worksheet.freeze_panes = "A2"
+
+    font_header = Font(name="Segoe UI", size=11, bold=True)
+    align_header = Alignment(
+        horizontal="center",
+        vertical="center",
+        wrap_text=True,
+    )
+    font_body = Font(name="Segoe UI", size=10)
+
+    worksheet.row_dimensions[1].height = 28
+
+    for col_num in range(1, len(df.columns) + 1):
+        cell = worksheet.cell(row=1, column=col_num)
+        cell.font = font_header
+        cell.alignment = align_header
+
+    for row_num in range(2, len(df) + 2):
+        worksheet.row_dimensions[row_num].height = 20
+
+        for col_num in range(1, len(df.columns) + 1):
+            cell = worksheet.cell(row=row_num, column=col_num)
+            cell.font = font_body
+
+            if col_num == 1:
+                cell.alignment = Alignment(
+                    horizontal="left",
+                    vertical="center",
+                )
+            else:
+                cell.alignment = Alignment(
+                    horizontal="center",
+                    vertical="center",
+                )
+
+    for col in worksheet.columns:
+        max_len = 0
+        col_letter = get_column_letter(col[0].column)
+
+        for cell in col:
+            if cell.value is not None:
+                max_len = max(max_len, len(str(cell.value)))
+
+        worksheet.column_dimensions[col_letter].width = max(max_len + 3, 14)
+
+
+# ============================================================
+# REVIEWER DASHBOARD
+# ============================================================
 
 @router.get("/reviewer-dashboard")
 def reviewer_dashboard(
@@ -22,69 +393,14 @@ def reviewer_dashboard(
     status: Optional[List[str]] = Query(None),
     reviewer: Optional[List[str]] = Query(None),
     type_of_sale: Optional[List[str]] = Query(None),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
-    query = """
-    SELECT
-        s.reviewerguid,
-        COALESCE(NULLIF(TRIM(CONCAT_WS(' ', r.firstname, r.lastname)), ''), 'Unassigned') AS reviewer_full_name,
+    statuses = get_distinct_statuses(db)
+    status_field_map = build_status_field_map(statuses)
 
-        COUNT(DISTINCT s.saleguid) FILTER (
-            WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'expired'
-        ) AS transactions_expired,
-
-        COUNT(DISTINCT s.saleguid) FILTER (
-            WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'pending'
-        ) AS transactions_pending,
-
-        COUNT(DISTINCT s.saleguid) FILTER (
-            WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'closed'
-        ) AS transactions_closed,
-
-        COUNT(DISTINCT s.saleguid) FILTER (
-            WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'archived'
-        ) AS transactions_archived,
-
-        COUNT(DISTINCT s.saleguid) FILTER (
-            WHERE LOWER(TRIM(COALESCE(s.status, ''))) IN ('canceled/app', 'canceled/pend')
-        ) AS transactions_canceled,
-
-        COUNT(DISTINCT s.saleguid) FILTER (
-            WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'incomplete'
-        ) AS transactions_incomplete,
-
-        COUNT(DISTINCT s.saleguid) FILTER (
-            WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'pre-contract'
-        ) AS transactions_pre_contract,
-
-        COUNT(DISTINCT s.saleguid) FILTER (
-            WHERE LOWER(TRIM(COALESCE(s.status, ''))) IN (
-                'archived',
-                'canceled/app',
-                'canceled/pend',
-                'closed',
-                'expired',
-                'incomplete',
-                'pending',
-                'pre-contract'
-            )
-        ) AS total_transactions
-
-    FROM sale s
-    LEFT JOIN users r
-        ON s.reviewerguid = r.userguid
-    LEFT JOIN stage st
-        ON s.stageid = st.stageid
-    LEFT JOIN office o
-        ON s.officeguid = o.officeguid
-    WHERE 1=1
-    """
-
-    params = {}
-
-    query, params = apply_common_filters(
-        query=query,
-        params=params,
+    stmt = build_reviewer_dashboard_stmt(
+        statuses=statuses,
+        status_field_map=status_field_map,
         from_date=from_date,
         to_date=to_date,
         state=state,
@@ -92,37 +408,41 @@ def reviewer_dashboard(
         status=status,
         reviewer=reviewer,
         type_of_sale=type_of_sale,
-        date_field="s.escrowclosingdate",
+        include_reviewer_guid=True,
     )
 
-    query += """
-    GROUP BY
-        s.reviewerguid,
-        COALESCE(NULLIF(TRIM(CONCAT_WS(' ', r.firstname, r.lastname)), ''), 'Unassigned')
-    ORDER BY reviewer_full_name
-    """
-
-    rows = db.execute(text(query), params).mappings().all()
-    rows = [dict(r) for r in rows]
+    rows = [
+        dict(row)
+        for row in db.execute(stmt).mappings().all()
+    ]
 
     summary = {
         "count": len(rows),
         "outstanding_transactions": sum(
-            (row.get("transactions_pending", 0) or 0) +
-            (row.get("transactions_expired", 0) or 0)
+            get_status_count(row, "pending", status_field_map)
+            + get_status_count(row, "expired", status_field_map)
             for row in rows
         ),
         "closed_transactions": sum(
-            (row.get("transactions_closed", 0) or 0) +
-            (row.get("transactions_archived", 0) or 0)
+            get_status_count(row, "closed", status_field_map)
+            + get_status_count(row, "archived", status_field_map)
             for row in rows
-        )
+        ),
     }
 
     return {
         "summary": summary,
-        "data": rows
+        "status_fields": {
+            status: status_field_map[status]
+            for status in statuses
+        },
+        "data": rows,
     }
+
+
+# ============================================================
+# REVIEWER DASHBOARD DOWNLOAD
+# ============================================================
 
 @router.get("/reviewer-dashboard/download")
 def download_reviewer_dashboard(
@@ -133,70 +453,14 @@ def download_reviewer_dashboard(
     status: Optional[List[str]] = Query(None),
     reviewer: Optional[List[str]] = Query(None),
     type_of_sale: Optional[List[str]] = Query(None),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
-    query = """
-    SELECT
-        COALESCE(NULLIF(TRIM(CONCAT_WS(' ', r.firstname, r.lastname)), ''), 'Unassigned') AS reviewer_full_name,
+    statuses = get_distinct_statuses(db)
+    status_field_map = build_status_field_map(statuses)
 
-        COUNT(*) FILTER (
-            WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'expired'
-        ) AS transactions_expired,
-
-        COUNT(*) FILTER (
-            WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'pending'
-        ) AS transactions_pending,
-
-        COUNT(*) FILTER (
-            WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'closed'
-        ) AS transactions_closed,
-
-        COUNT(*) FILTER (
-            WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'archived'
-        ) AS transactions_archived,
-
-        COUNT(*) FILTER (
-            WHERE LOWER(TRIM(COALESCE(s.status, ''))) IN ('canceled/app', 'canceled/pend')
-        ) AS transactions_canceled,
-
-        COUNT(*) FILTER (
-            WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'incomplete'
-        ) AS transactions_incomplete,
-
-        COUNT(*) FILTER (
-            WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'pre-contract'
-        ) AS transactions_pre_contract,
-
-        COUNT(*) FILTER (
-            WHERE LOWER(TRIM(COALESCE(s.status, ''))) IN (
-                'archived',
-                'canceled/app',
-                'canceled/pend',
-                'closed',
-                'expired',
-                'incomplete',
-                'pending',
-                'pre-contract'
-            )
-        ) AS total_transactions
-
-    FROM sale s
-    LEFT JOIN users r
-        ON s.reviewerguid = r.userguid
-    LEFT JOIN sale_property sp
-        ON s.saleguid = sp.saleguid
-    LEFT JOIN stage st
-        ON s.stageid = st.stageid
-    LEFT JOIN office o
-        ON s.officeguid = o.officeguid
-    WHERE 1=1
-    """
-
-    params = {}
-
-    query, params = apply_common_filters(
-        query=query,
-        params=params,
+    stmt = build_reviewer_dashboard_stmt(
+        statuses=statuses,
+        status_field_map=status_field_map,
         from_date=from_date,
         to_date=to_date,
         state=state,
@@ -204,162 +468,127 @@ def download_reviewer_dashboard(
         status=status,
         reviewer=reviewer,
         type_of_sale=type_of_sale,
-        date_field="s.escrowclosingdate",
+        include_reviewer_guid=False,
     )
 
-    query += """
-    GROUP BY reviewer_full_name
-    ORDER BY reviewer_full_name
-    """
+    rows = [
+        dict(row)
+        for row in db.execute(stmt).mappings().all()
+    ]
 
-    rows = db.execute(text(query), params).mappings().all()
-    rows = [dict(r) for r in rows]
+    rows_to_export = create_export_rows(
+        rows=rows,
+        statuses=statuses,
+        status_field_map=status_field_map,
+        first_column_name="Reviewer Name",
+        first_column_key="reviewer_full_name",
+    )
 
-    rows_to_export = []
-    for row in rows:
-        rows_to_export.append({
-            "Reviewer Name": row.get("reviewer_full_name") or "",
-            "Expired": row.get("transactions_expired", 0) or 0,
-            "Pending": row.get("transactions_pending", 0) or 0,
-            "Closed": row.get("transactions_closed", 0) or 0,
-            "Archived": row.get("transactions_archived", 0) or 0,
-            "Canceled": row.get("transactions_canceled", 0) or 0,
-            "Incomplete": row.get("transactions_incomplete", 0) or 0,
-            "Pre-Contract": row.get("transactions_pre_contract", 0) or 0,
-            "Total Transactions": row.get("total_transactions", 0) or 0,
-        })
+    export_columns = [
+        "Reviewer Name",
+        *statuses,
+        "Total Transactions",
+    ]
 
-    df = pd.DataFrame(rows_to_export)
-
-    if df.empty:
-        df = pd.DataFrame(columns=[
-            "Reviewer Name",
-            "Expired",
-            "Pending",
-            "Closed",
-            "Archived",
-            "Canceled",
-            "Incomplete",
-            "Pre-Contract",
-            "Total Transactions",
-        ])
+    df = pd.DataFrame(rows_to_export, columns=export_columns)
 
     output = io.BytesIO()
+
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name="Reviewer Dashboard", index=False)
+        df.to_excel(
+            writer,
+            sheet_name="Reviewer Dashboard",
+            index=False,
+        )
 
         worksheet = writer.sheets["Reviewer Dashboard"]
-        worksheet.freeze_panes = "A2"
-
-        font_header = Font(name="Segoe UI", size=11, bold=True)
-        align_header = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        font_body = Font(name="Segoe UI", size=10)
-
-        worksheet.row_dimensions[1].height = 28
-        for col_num in range(1, len(df.columns) + 1):
-            cell = worksheet.cell(row=1, column=col_num)
-            cell.font = font_header
-            cell.alignment = align_header
-
-        center_cols = list(range(1, len(df.columns) + 1))
-
-        for row_num in range(2, len(df) + 2):
-            worksheet.row_dimensions[row_num].height = 20
-
-            for col_num in range(1, len(df.columns) + 1):
-                cell = worksheet.cell(row=row_num, column=col_num)
-                cell.font = font_body
-
-                if col_num == 1:
-                    cell.alignment = Alignment(horizontal="left", vertical="center")
-                else:
-                    cell.alignment = Alignment(horizontal="center", vertical="center")
-
-        for col in worksheet.columns:
-            max_len = 0
-            col_letter = get_column_letter(col[0].column)
-
-            for cell in col:
-                val = cell.value
-                if val is not None:
-                    val_len = len(str(val))
-                    if val_len > max_len:
-                        max_len = val_len
-
-            worksheet.column_dimensions[col_letter].width = max(max_len + 3, 14)
+        style_standard_dashboard_sheet(worksheet, df)
 
     output.seek(0)
 
     filename = "reviewer_dashboard_report.xlsx"
     headers = {
-        "Content-Disposition": f'attachment; filename=\"{filename}\"'
+        "Content-Disposition": f'attachment; filename="{filename}"'
     }
 
     return Response(
         content=output.getvalue(),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers=headers
+        headers=headers,
     )
 
 
+# ============================================================
+# REVIEWER FILTERS
+# ============================================================
+
 @router.get("/reviewers/filters")
-def reviewer_dashboard_filters(db: Session = Depends(get_db)):
-    stage_query = """
-        SELECT DISTINCT name
-        FROM stage
-        WHERE name IS NOT NULL AND TRIM(name) <> ''
-        ORDER BY name
-    """
+def reviewer_dashboard_filters(
+    db: Session = Depends(get_db),
+):
+    stage_stmt = (
+        select(Stage.name)
+        .where(
+            Stage.name.is_not(None),
+            func.trim(Stage.name) != "",
+        )
+        .distinct()
+        .order_by(Stage.name)
+    )
 
-    state_query = """
-        SELECT DISTINCT UPPER(TRIM(state)) AS state
-        FROM sale_property
-        WHERE state IS NOT NULL AND TRIM(state) <> ''
-        ORDER BY state
-    """
+    state_value = func.upper(func.trim(SaleProperty.state))
 
-    status_query = """
-        SELECT DISTINCT status
-        FROM sale
-        WHERE status IS NOT NULL AND TRIM(status) <> ''
-        ORDER BY status
-    """
+    state_stmt = (
+        select(state_value)
+        .where(
+            SaleProperty.state.is_not(None),
+            func.trim(SaleProperty.state) != "",
+        )
+        .distinct()
+        .order_by(state_value)
+    )
 
-    reviewer_query = """
-        SELECT DISTINCT reviewer_name
-        FROM (
-            SELECT
-                CASE
-                    WHEN s.reviewerguid IS NULL THEN 'Unassigned'
-                    ELSE COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.firstname, u.lastname)), ''), 'Unassigned')
-                END AS reviewer_name
-            FROM sale s
-            LEFT JOIN users u
-                ON s.reviewerguid = u.userguid
-        ) x
-        ORDER BY reviewer_name
-    """
+    reviewer_value = reviewer_name_expr().label("reviewer_name")
 
-    type_of_sale_query = """
-        SELECT DISTINCT dealtype
-        FROM sale
-        WHERE dealtype IS NOT NULL AND TRIM(dealtype) <> ''
-        ORDER BY dealtype
-    """
+    reviewer_stmt = (
+        select(reviewer_value)
+        .select_from(Sale)
+        .outerjoin(
+            SkyslopeUser,
+            Sale.reviewerguid == SkyslopeUser.userguid,
+        )
+        .distinct()
+        .order_by(reviewer_value)
+    )
 
-    stage_list = [row["name"] for row in db.execute(text(stage_query)).mappings().all()]
-    state_list = [row["state"] for row in db.execute(text(state_query)).mappings().all()]
-    status_list = [row["status"] for row in db.execute(text(status_query)).mappings().all()]
-    reviewer_list = [row["reviewer_name"] for row in db.execute(text(reviewer_query)).mappings().all()]
-    type_of_sale_list = [row["dealtype"] for row in db.execute(text(type_of_sale_query)).mappings().all()]
+    type_of_sale_stmt = (
+        select(Sale.dealtype)
+        .where(
+            Sale.dealtype.is_not(None),
+            func.trim(Sale.dealtype) != "",
+        )
+        .distinct()
+        .order_by(Sale.dealtype)
+    )
+
+    stage_list = list(db.scalars(stage_stmt).all())
+    state_list = list(db.scalars(state_stmt).all())
+    status_list = get_distinct_statuses(db)
+    reviewer_list = list(db.scalars(reviewer_stmt).all())
+    type_of_sale_list = list(db.scalars(type_of_sale_stmt).all())
 
     return {
         "stage_list": stage_list,
         "state_list": state_list,
         "status_list": status_list,
         "reviewer_list": reviewer_list,
-        "type_of_sale_list": type_of_sale_list
+        "type_of_sale_list": type_of_sale_list,
     }
+
+
+# ============================================================
+# UNASSIGNED REVIEWER REPORT
+# ============================================================
 
 @router.get("/reviewer-dashboard/unassigned/download")
 def download_unassigned_reviewer_state_report(
@@ -370,71 +599,39 @@ def download_unassigned_reviewer_state_report(
     status: Optional[List[str]] = Query(None),
     reviewer: Optional[List[str]] = Query(None),
     type_of_sale: Optional[List[str]] = Query(None),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
-    query = """
-    SELECT
-        COALESCE(NULLIF(UPPER(TRIM(sp.state)), ''), 'UNKNOWN') AS state,
+    statuses = get_distinct_statuses(db)
+    status_field_map = build_status_field_map(statuses)
+    state_value = normalized_state_expr().label("state")
 
-        COUNT(*) FILTER (
-            WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'expired'
-        ) AS transactions_expired,
+    stmt = (
+        select(
+            state_value,
+            *status_count_columns(statuses, status_field_map),
+        )
+        .select_from(Sale)
+        .outerjoin(
+            SkyslopeUser,
+            Sale.reviewerguid == SkyslopeUser.userguid,
+        )
+        .outerjoin(
+            SaleProperty,
+            Sale.saleguid == SaleProperty.saleguid,
+        )
+        .outerjoin(
+            Stage,
+            Sale.stageid == Stage.stageid,
+        )
+        .outerjoin(
+            Office,
+            Sale.officeguid == Office.officeguid,
+        )
+        .where(Sale.reviewerguid.is_(None))
+    )
 
-        COUNT(*) FILTER (
-            WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'pending'
-        ) AS transactions_pending,
-
-        COUNT(*) FILTER (
-            WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'closed'
-        ) AS transactions_closed,
-
-        COUNT(*) FILTER (
-            WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'archived'
-        ) AS transactions_archived,
-
-        COUNT(*) FILTER (
-            WHERE LOWER(TRIM(COALESCE(s.status, ''))) IN ('canceled/app', 'canceled/pend')
-        ) AS transactions_canceled,
-
-        COUNT(*) FILTER (
-            WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'incomplete'
-        ) AS transactions_incomplete,
-
-        COUNT(*) FILTER (
-            WHERE LOWER(TRIM(COALESCE(s.status, ''))) = 'pre-contract'
-        ) AS transactions_pre_contract,
-
-        COUNT(*) FILTER (
-            WHERE LOWER(TRIM(COALESCE(s.status, ''))) IN (
-                'archived',
-                'canceled/app',
-                'canceled/pend',
-                'closed',
-                'expired',
-                'incomplete',
-                'pending',
-                'pre-contract'
-            )
-        ) AS total_transactions
-
-    FROM sale s
-    LEFT JOIN users r
-        ON s.reviewerguid = r.userguid
-    LEFT JOIN sale_property sp
-        ON s.saleguid = sp.saleguid
-    LEFT JOIN stage st
-        ON s.stageid = st.stageid
-    LEFT JOIN office o
-        ON s.officeguid = o.officeguid
-    WHERE 1=1
-      AND s.reviewerguid IS NULL
-    """
-
-    params = {}
-
-    query, params = apply_common_filters(
-        query=query,
-        params=params,
+    stmt = apply_common_filters_orm(
+        stmt,
         from_date=from_date,
         to_date=to_date,
         state=state,
@@ -442,118 +639,130 @@ def download_unassigned_reviewer_state_report(
         status=status,
         reviewer=None,
         type_of_sale=type_of_sale,
-        date_field="s.escrowclosingdate",
     )
 
-    query += """
-    GROUP BY COALESCE(NULLIF(UPPER(TRIM(sp.state)), ''), 'UNKNOWN')
-    ORDER BY COALESCE(NULLIF(UPPER(TRIM(sp.state)), ''), 'UNKNOWN')
-    """
+    stmt = (
+        stmt
+        .group_by(normalized_state_expr())
+        .order_by(normalized_state_expr())
+    )
 
-    rows = db.execute(text(query), params).mappings().all()
-    rows = [dict(r) for r in rows]
+    rows = [
+        dict(row)
+        for row in db.execute(stmt).mappings().all()
+    ]
 
     applied_filters = []
 
     if from_date:
         applied_filters.append(f"From Date: {from_date}")
+
     if to_date:
         applied_filters.append(f"To Date: {to_date}")
+
     if state:
         applied_filters.append(f"State: {', '.join(state)}")
+
     if stage_name:
         applied_filters.append(f"Stage: {', '.join(stage_name)}")
+
     if status:
         applied_filters.append(f"Status: {', '.join(status)}")
+
     if type_of_sale:
         applied_filters.append(f"Type of Sale: {', '.join(type_of_sale)}")
 
     applied_filters.append("Reviewer: Unassigned")
 
-    rows_to_export = []
-    for row in rows:
-        rows_to_export.append({
-            "State": row.get("state") or "UNKNOWN",
-            "Expired": row.get("transactions_expired", 0) or 0,
-            "Pending": row.get("transactions_pending", 0) or 0,
-            "Closed": row.get("transactions_closed", 0) or 0,
-            "Archived": row.get("transactions_archived", 0) or 0,
-            "Canceled": row.get("transactions_canceled", 0) or 0,
-            "Incomplete": row.get("transactions_incomplete", 0) or 0,
-            "Pre-Contract": row.get("transactions_pre_contract", 0) or 0,
-            "Total Transactions": row.get("total_transactions", 0) or 0,
-        })
+    rows_to_export = create_export_rows(
+        rows=rows,
+        statuses=statuses,
+        status_field_map=status_field_map,
+        first_column_name="State",
+        first_column_key="state",
+    )
 
-    df = pd.DataFrame(rows_to_export)
+    export_columns = [
+        "State",
+        *statuses,
+        "Total Transactions",
+    ]
 
-    if df.empty:
-        df = pd.DataFrame(columns=[
-            "State",
-            "Expired",
-            "Pending",
-            "Closed",
-            "Archived",
-            "Canceled",
-            "Incomplete",
-            "Pre-Contract",
-            "Total Transactions",
-        ])
+    df = pd.DataFrame(rows_to_export, columns=export_columns)
 
     output = io.BytesIO()
+
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         sheet_name = "Unassigned by State"
 
-        # Start the table in column B
-        df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=0, startcol=1)
+        df.to_excel(
+            writer,
+            sheet_name=sheet_name,
+            index=False,
+            startrow=0,
+            startcol=1,
+        )
 
         worksheet = writer.sheets[sheet_name]
 
         font_header = Font(name="Segoe UI", size=11, bold=True)
         font_body = Font(name="Segoe UI", size=10)
 
-        # Filters column in A
         worksheet["A1"] = "Filters"
         worksheet["A1"].font = font_header
-        worksheet["A1"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        worksheet["A1"].alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+            wrap_text=True,
+        )
 
         for idx, filter_text in enumerate(applied_filters, start=2):
             cell = worksheet.cell(row=idx, column=1)
             cell.value = filter_text
             cell.font = font_body
-            cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+            cell.alignment = Alignment(
+                horizontal="left",
+                vertical="center",
+                wrap_text=True,
+            )
 
-        # Style table headers in row 1, starting from column B
         for col_num in range(2, len(df.columns) + 2):
             cell = worksheet.cell(row=1, column=col_num)
             cell.font = font_header
-            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.alignment = Alignment(
+                horizontal="center",
+                vertical="center",
+                wrap_text=True,
+            )
 
-        # Style data rows
         for row_num in range(2, len(df) + 2):
             for col_num in range(2, len(df.columns) + 2):
                 cell = worksheet.cell(row=row_num, column=col_num)
                 cell.font = font_body
 
-                if col_num == 2:  # State column
-                    cell.alignment = Alignment(horizontal="left", vertical="center")
+                if col_num == 2:
+                    cell.alignment = Alignment(
+                        horizontal="left",
+                        vertical="center",
+                    )
                 else:
-                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                    cell.alignment = Alignment(
+                        horizontal="center",
+                        vertical="center",
+                    )
 
-        # Row heights
         worksheet.row_dimensions[1].height = 28
         max_rows = max(len(applied_filters) + 1, len(df) + 1)
+
         for row_num in range(2, max_rows + 1):
             worksheet.row_dimensions[row_num].height = 20
 
-        # Freeze top row and keep filters visible
         worksheet.freeze_panes = "B2"
 
-        # Apply filter only to table, not the filters column
         last_col_letter = get_column_letter(len(df.columns) + 1)
         last_row = len(df) + 1 if len(df) > 0 else 1
         worksheet.auto_filter.ref = f"B1:{last_col_letter}{last_row}"
 
-        # Column widths
         worksheet.column_dimensions["A"].width = 30
 
         for col_num in range(2, len(df.columns) + 2):
@@ -561,14 +770,18 @@ def download_unassigned_reviewer_state_report(
             max_len = 0
 
             for row_num in range(1, len(df) + 2):
-                val = worksheet.cell(row=row_num, column=col_num).value
-                if val is not None:
-                    max_len = max(max_len, len(str(val)))
+                value = worksheet.cell(row=row_num, column=col_num).value
+
+                if value is not None:
+                    max_len = max(max_len, len(str(value)))
 
             if worksheet.cell(row=1, column=col_num).value == "State":
                 worksheet.column_dimensions[col_letter].width = 14
             else:
-                worksheet.column_dimensions[col_letter].width = max(max_len + 3, 14)
+                worksheet.column_dimensions[col_letter].width = max(
+                    max_len + 3,
+                    14,
+                )
 
     output.seek(0)
 
@@ -580,5 +793,5 @@ def download_unassigned_reviewer_state_report(
     return Response(
         content=output.getvalue(),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers=headers
+        headers=headers,
     )
