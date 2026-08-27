@@ -94,8 +94,6 @@ Please click the link below to reset your password:
 
 This password reset link will expire in {PASSWORD_RESET_EXPIRE_MINUTES} minutes.
 
-If you did not request a password reset, please ignore this email.
-
 Regards,
 Realty Of America
 """.strip()
