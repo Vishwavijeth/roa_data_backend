@@ -3,8 +3,13 @@ from pydantic import BaseModel, EmailStr
 class CreateUserRequest(BaseModel):
     email: EmailStr
 
+class RoleResponse(BaseModel):
+    id: int
+    name: str
+
+
 class CreateUserResponse(BaseModel):
     id: int
     email: EmailStr
-    role: str
-    temporary_password: str
+    is_active: bool
+    role: RoleResponse

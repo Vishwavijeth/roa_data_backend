@@ -9,35 +9,65 @@ from pwdlib import PasswordHash
 from sqlalchemy.orm import Session
 
 from db import get_db
-from models.roa_data_users import RoaDataUser, RoaDataUserRole
-from api.auth.base import LoginRequest, RefreshRequest, TokenResponse, UserResponse
+
+from models.roa_data_users import (
+    RoaDataUser,
+    RoaDataUserRole,
+)
+
+from api.auth.base import (
+    LoginRequest,
+    RefreshRequest,
+    TokenResponse,
+    TokenDataResponse,
+    LoginResponse,
+    UserResponse,
+    RoleResponse,
+)
 
 
 load_dotenv()
 
-router = APIRouter(prefix="/auth", tags=["Authentication"])
+router = APIRouter(
+    prefix="/auth",
+    tags=["Authentication"],
+)
+
 
 SECRET_KEY = os.getenv("AUTH_SECRET_KEY")
+
 ALGORITHM = "HS256"
+
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
 REFRESH_TOKEN_EXPIRE_DAYS = 7
 
+
 if not SECRET_KEY:
-    raise RuntimeError("AUTH_SECRET_KEY is not configured")
+    raise RuntimeError(
+        "AUTH_SECRET_KEY is not configured"
+    )
+
 
 password_hash = PasswordHash.recommended()
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+oauth2_scheme = OAuth2PasswordBearer(
+    tokenUrl="/auth/login"
+)
 
 
-# =================================================
-# Token Utilities
-# =================================================
-
-def create_token(data: dict, expires_delta: timedelta, token_type: str):
+def create_token(
+    data: dict,
+    expires_delta: timedelta,
+    token_type: str,
+):
     to_encode = data.copy()
 
-    expire = datetime.now(timezone.utc) + expires_delta
+    expire = (
+        datetime.now(timezone.utc)
+        + expires_delta
+    )
 
     to_encode.update(
         {
@@ -55,28 +85,38 @@ def create_token(data: dict, expires_delta: timedelta, token_type: str):
     return token, expire
 
 
-def create_access_token(user: RoaDataUser):
+def create_access_token(
+    user: RoaDataUser,
+):
     return create_token(
         {
             "user_id": user.id,
             "email": user.email,
         },
-        timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+        timedelta(
+            minutes=ACCESS_TOKEN_EXPIRE_MINUTES
+        ),
         "access",
     )
 
 
-def create_refresh_token(user: RoaDataUser):
+def create_refresh_token(
+    user: RoaDataUser,
+):
     return create_token(
         {
             "user_id": user.id,
         },
-        timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS),
+        timedelta(
+            days=REFRESH_TOKEN_EXPIRE_DAYS
+        ),
         "refresh",
     )
 
 
-def decode_token(token: str):
+def decode_token(
+    token: str,
+):
     try:
         return jwt.decode(
             token,
@@ -91,10 +131,6 @@ def decode_token(token: str):
         )
 
 
-# =================================================
-# User Role
-# =================================================
-
 def get_user_role(
     user: RoaDataUser,
     db: Session,
@@ -102,7 +138,10 @@ def get_user_role(
 
     role = (
         db.query(RoaDataUserRole)
-        .filter(RoaDataUserRole.id == user.role_id)
+        .filter(
+            RoaDataUserRole.id
+            == user.role_id
+        )
         .first()
     )
 
@@ -115,16 +154,18 @@ def get_user_role(
     return role
 
 
-# =================================================
-# Current User
-# =================================================
-
 def get_current_user(
-    token: str = Depends(oauth2_scheme),
-    db: Session = Depends(get_db),
+    token: str = Depends(
+        oauth2_scheme
+    ),
+    db: Session = Depends(
+        get_db
+    ),
 ) -> RoaDataUser:
 
-    payload = decode_token(token)
+    payload = decode_token(
+        token
+    )
 
     if payload.get("type") != "access":
         raise HTTPException(
@@ -132,7 +173,9 @@ def get_current_user(
             detail="Access token required",
         )
 
-    user_id = payload.get("user_id")
+    user_id = payload.get(
+        "user_id"
+    )
 
     if not user_id:
         raise HTTPException(
@@ -142,7 +185,10 @@ def get_current_user(
 
     user = (
         db.query(RoaDataUser)
-        .filter(RoaDataUser.id == user_id)
+        .filter(
+            RoaDataUser.id
+            == user_id
+        )
         .first()
     )
 
@@ -161,15 +207,17 @@ def get_current_user(
     return user
 
 
-# =================================================
-# Role Based Access Control
-# =================================================
-
-def require_roles(*allowed_roles: str):
+def require_roles(
+    *allowed_roles: str,
+):
 
     def role_checker(
-        current_user: RoaDataUser = Depends(get_current_user),
-        db: Session = Depends(get_db),
+        current_user: RoaDataUser = Depends(
+            get_current_user
+        ),
+        db: Session = Depends(
+            get_db
+        ),
     ) -> RoaDataUser:
 
         role = get_user_role(
@@ -180,7 +228,10 @@ def require_roles(*allowed_roles: str):
         if role.name not in allowed_roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="You do not have permission to access this resource",
+                detail=(
+                    "You do not have permission "
+                    "to access this resource"
+                ),
             )
 
         return current_user
@@ -188,26 +239,39 @@ def require_roles(*allowed_roles: str):
     return role_checker
 
 
-# =================================================
-# Login
-# =================================================
-
 @router.post(
     "/login",
-    response_model=TokenResponse,
+    response_model=LoginResponse,
 )
 def login(
     payload: LoginRequest,
-    db: Session = Depends(get_db),
+    db: Session = Depends(
+        get_db
+    ),
 ):
+
+    email = (
+        payload.email
+        .strip()
+        .lower()
+    )
 
     user = (
         db.query(RoaDataUser)
-        .filter(RoaDataUser.email == payload.email)
+        .filter(
+            RoaDataUser.email
+            == email
+        )
         .first()
     )
 
-    if not user or not password_hash.verify(
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+        )
+
+    if not password_hash.verify(
         payload.password,
         user.hashed_password,
     ):
@@ -227,30 +291,45 @@ def login(
         db,
     )
 
-    access_token, _ = create_access_token(user)
+    access_token, _ = (
+        create_access_token(
+            user
+        )
+    )
 
-    refresh_token, refresh_expiry = create_refresh_token(user)
+    refresh_token, refresh_expiry = (
+        create_refresh_token(
+            user
+        )
+    )
 
-    # Store latest refresh token.
-    # A new login replaces the previous refresh token.
-    user.refresh_token = refresh_token
+    user.refresh_token = (
+        refresh_token
+    )
 
-    user.refresh_token_expires_at = refresh_expiry.replace(
-        tzinfo=None
+    user.refresh_token_expires_at = (
+        refresh_expiry.replace(
+            tzinfo=None
+        )
     )
 
     db.commit()
 
-    return TokenResponse(
-        access_token=access_token,
-        refresh_token=refresh_token,
-        role=role.name,
+    return LoginResponse(
+        id=user.id,
+        email=user.email,
+        is_active=user.is_active,
+        role=RoleResponse(
+            id=role.id,
+            name=role.name,
+        ),
+        token=TokenDataResponse(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            token_type="bearer",
+        ),
     )
 
-
-# =================================================
-# Refresh
-# =================================================
 
 @router.post(
     "/refresh",
@@ -258,7 +337,9 @@ def login(
 )
 def refresh(
     payload: RefreshRequest,
-    db: Session = Depends(get_db),
+    db: Session = Depends(
+        get_db
+    ),
 ):
 
     decoded = decode_token(
@@ -271,7 +352,9 @@ def refresh(
             detail="Refresh token required",
         )
 
-    user_id = decoded.get("user_id")
+    user_id = decoded.get(
+        "user_id"
+    )
 
     if not user_id:
         raise HTTPException(
@@ -281,7 +364,10 @@ def refresh(
 
     user = (
         db.query(RoaDataUser)
-        .filter(RoaDataUser.id == user_id)
+        .filter(
+            RoaDataUser.id
+            == user_id
+        )
         .first()
     )
 
@@ -303,13 +389,17 @@ def refresh(
             detail="No active session",
         )
 
-    if user.refresh_token != payload.refresh_token:
+    if (
+        user.refresh_token
+        != payload.refresh_token
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid refresh token",
         )
 
     if not user.refresh_token_expires_at:
+
         user.refresh_token = None
         user.refresh_token_expires_at = None
 
@@ -320,11 +410,20 @@ def refresh(
             detail="Refresh token expired",
         )
 
-    now_utc = datetime.now(timezone.utc).replace(
-        tzinfo=None
+    now_utc = (
+        datetime.now(
+            timezone.utc
+        )
+        .replace(
+            tzinfo=None
+        )
     )
 
-    if user.refresh_token_expires_at <= now_utc:
+    if (
+        user.refresh_token_expires_at
+        <= now_utc
+    ):
+
         user.refresh_token = None
         user.refresh_token_expires_at = None
 
@@ -335,20 +434,27 @@ def refresh(
             detail="Refresh token expired",
         )
 
-    role = get_user_role(
-        user,
-        db,
+    new_access_token, _ = (
+        create_access_token(
+            user
+        )
     )
 
-    new_access_token, _ = create_access_token(user)
+    (
+        new_refresh_token,
+        new_refresh_expiry,
+    ) = create_refresh_token(
+        user
+    )
 
-    new_refresh_token, new_refresh_expiry = create_refresh_token(user)
+    user.refresh_token = (
+        new_refresh_token
+    )
 
-    # Rotate refresh token.
-    user.refresh_token = new_refresh_token
-
-    user.refresh_token_expires_at = new_refresh_expiry.replace(
-        tzinfo=None
+    user.refresh_token_expires_at = (
+        new_refresh_expiry.replace(
+            tzinfo=None
+        )
     )
 
     db.commit()
@@ -356,18 +462,18 @@ def refresh(
     return TokenResponse(
         access_token=new_access_token,
         refresh_token=new_refresh_token,
-        role=role.name,
+        token_type="bearer",
     )
 
 
-# =================================================
-# Logout
-# =================================================
-
-@router.post("/logout")
+@router.post(
+    "/logout"
+)
 def logout(
     payload: RefreshRequest,
-    db: Session = Depends(get_db),
+    db: Session = Depends(
+        get_db
+    ),
 ):
 
     decoded = decode_token(
@@ -380,7 +486,9 @@ def logout(
             detail="Refresh token required",
         )
 
-    user_id = decoded.get("user_id")
+    user_id = decoded.get(
+        "user_id"
+    )
 
     if not user_id:
         raise HTTPException(
@@ -390,7 +498,10 @@ def logout(
 
     user = (
         db.query(RoaDataUser)
-        .filter(RoaDataUser.id == user_id)
+        .filter(
+            RoaDataUser.id
+            == user_id
+        )
         .first()
     )
 
@@ -406,7 +517,10 @@ def logout(
             detail="No active session",
         )
 
-    if user.refresh_token != payload.refresh_token:
+    if (
+        user.refresh_token
+        != payload.refresh_token
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid refresh token",
@@ -426,6 +540,7 @@ def logout(
 # Current User
 # =================================================
 
+
 @router.get(
     "/me",
     response_model=UserResponse,
@@ -434,7 +549,9 @@ def me(
     current_user: RoaDataUser = Depends(
         get_current_user
     ),
-    db: Session = Depends(get_db),
+    db: Session = Depends(
+        get_db
+    ),
 ):
 
     role = get_user_role(
@@ -446,6 +563,8 @@ def me(
         id=current_user.id,
         email=current_user.email,
         is_active=current_user.is_active,
-        role_id=current_user.role_id,
-        role=role.name,
+        role=RoleResponse(
+            id=role.id,
+            name=role.name,
+        ),
     )
