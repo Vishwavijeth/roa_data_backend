@@ -302,6 +302,160 @@ def get_commission_advance_log_dropdowns(
 
 
 @router.get(
+    "/garnishments/{garnishment_id}/detail",
+    response_model=Response[dict[str, Any]],
+)
+def get_garnishment_detail(
+    garnishment_id: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        ca = CommissionAdvance
+        transaction = CommissionAdvanceTransaction
+        garnishment = CommissionAdvanceGarnishment
+
+        # ========================================================
+        # SOURCE TRANSACTION
+        # ========================================================
+
+        source_row = db.execute(
+            select(
+                ca.address,
+                ca.company,
+                ca.original_amount,
+                ca.outstanding_amount,
+            )
+            .join(
+                garnishment,
+                garnishment.source_ca_id == ca.id,
+            )
+            .where(
+                garnishment.id == garnishment_id
+            )
+        ).mappings().first()
+
+        if not source_row:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Wage Garnishment not found",
+            )
+
+        # ========================================================
+        # FIND ALL COMMISSION ADVANCES INVOLVED IN GARNISHMENT
+        # ========================================================
+
+        involved_ca_ids = (
+            select(
+                transaction.ca_id
+            )
+            .where(
+                transaction.garnishment_id == garnishment_id
+            )
+            .distinct()
+            .subquery()
+        )
+
+        # ========================================================
+        # FETCH INVOLVED COMMISSION ADVANCES + ALL LEDGER LOGS
+        # ========================================================
+
+        rows = db.execute(
+            select(
+                ca.id.label("ca_id"),
+                ca.address,
+                ca.company,
+                ca.original_amount,
+                ca.outstanding_amount,
+
+                transaction.id.label("transaction_id"),
+                transaction.garnishment_id,
+                transaction.operation,
+                transaction.type.label("transaction_type"),
+                transaction.amount.label("transaction_amount"),
+                transaction.transaction_date,
+                transaction.notes.label("transaction_notes"),
+                transaction.outstanding_amount.label("transaction_outstanding_amount"),
+                transaction.created_by,
+                transaction.updated_at,
+            )
+            .select_from(ca)
+            .join(
+                involved_ca_ids,
+                involved_ca_ids.c.ca_id == ca.id,
+            )
+            .outerjoin(
+                transaction,
+                transaction.ca_id == ca.id,
+            )
+            .order_by(
+                ca.id.asc(),
+                transaction.id.asc().nullslast(),
+            )
+        ).mappings().all()
+
+        # ========================================================
+        # GROUP BY COMMISSION ADVANCE
+        # ========================================================
+
+        commission_advances_by_id: dict[int, dict[str, Any]] = {}
+
+        for row in rows:
+            ca_id = row["ca_id"]
+
+            if ca_id not in commission_advances_by_id:
+                commission_advances_by_id[ca_id] = {
+                    "address": row["address"],
+                    "company": row["company"],
+                    "original_amount": float(row["original_amount"] or 0),
+                    "outstanding_amount": float(row["outstanding_amount"] or 0),
+                    "transactions": [],
+                }
+
+            if row["transaction_id"] is None:
+                continue
+
+            commission_advances_by_id[ca_id]["transactions"].append(
+                {
+                    "id": row["transaction_id"],
+                    "garnishment_id": row["garnishment_id"],
+                    "operation": row["operation"],
+                    "type": row["transaction_type"],
+                    "amount": float(row["transaction_amount"] or 0),
+                    "transaction_date": row["transaction_date"],
+                    "notes": row["transaction_notes"],
+                    "outstanding_amount": float(row["transaction_outstanding_amount"] or 0),
+                    "created_by": row["created_by"],
+                    "updated_at": row["updated_at"],
+                }
+            )
+
+        return Response[dict[str, Any]](
+            success=True,
+            data={
+                "source_transaction": {
+                    "address": source_row["address"],
+                    "company": source_row["company"],
+                    "original_amount": float(source_row["original_amount"] or 0),
+                    "outstanding_amount": float(source_row["outstanding_amount"] or 0),
+                },
+                "commission_advances": list(
+                    commission_advances_by_id.values()
+                ),
+            },
+            message="Wage Garnishment detail fetched successfully",
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get(
     "/agent-suggestions",
     response_model=FilterResponse,
 )
