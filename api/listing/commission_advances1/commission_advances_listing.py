@@ -27,11 +27,8 @@ from common.pagination import (
 from common.response import FilterResponse, Response
 from db import get_db
 from models.brokerage_engine_users import BrokerageEngineUser
-from models.commisison_advances import (
-    CommissionAdvance,
-    CommissionAdvanceHistory,
-)
-
+from models.commission_advances.commission_advances1 import CommissionAdvance
+from models.commission_advances.commission_advances1 import CommissionAdvanceTransaction
 
 router = APIRouter(prefix="/commission-advances")
 
@@ -394,61 +391,27 @@ def get_commission_advances_detail(
 ):
     try:
         ca = CommissionAdvance
-        history = CommissionAdvanceHistory
+        transaction = CommissionAdvanceTransaction
 
         offset = (page - 1) * page_size
 
-        total_count = (
-            db.execute(
-                select(func.count(ca.id)).where(
-                    ca.agent_name == agent_name
-                )
-            ).scalar()
-            or 0
-        )
+        total_count = db.scalar(
+            select(func.count(ca.id)).where(ca.agent_name == agent_name)
+        ) or 0
 
-        status_order = case(
-            (
-                ca.status
-                == CommissionAdvanceStatus.WAGE_GARNISHMENT.value,
-                1,
-            ),
-            (
-                ca.status
-                == CommissionAdvanceStatus.PENDING.value,
-                2,
-            ),
-            (
-                ca.status
-                == CommissionAdvanceStatus.PENDING_PARTIAL.value,
-                3,
-            ),
-            (
-                ca.status
-                == CommissionAdvanceStatus.PAID.value,
-                4,
-            ),
-            (
-                ca.status
-                == CommissionAdvanceStatus.LEFT_ROA.value,
-                5,
-            ),
-            (
-                ca.status
-                == CommissionAdvanceStatus.CANCELLED.value,
-                6,
-            ),
-            (
-                ca.status
-                == CommissionAdvanceStatus.REPLACEMENT.value,
-                7,
-            ),
-            else_=8,
+        paginated_ca_ids = (
+            select(ca.id)
+            .where(ca.agent_name == agent_name)
+            .order_by(ca.id.asc())
+            .limit(page_size)
+            .offset(offset)
+            .subquery()
         )
 
         detail_stmt = (
             select(
                 ca.id.label("ca_id"),
+                ca.agent_id,
                 ca.agent_name,
                 ca.state,
                 ca.address,
@@ -461,108 +424,74 @@ def get_commission_advances_detail(
                 ca.paid_date,
                 ca.notes,
                 ca.status,
-                history.id.label("history_id"),
-                history.field.label("history_field"),
-                history.old_value.label("history_old_value"),
-                history.new_value.label("history_new_value"),
-                history.edited_at.label("history_edited_at"),
+
+                transaction.id.label("transaction_id"),
+                transaction.garnishment_id,
+                transaction.operation,
+                transaction.type.label("transaction_type"),
+                transaction.amount.label("transaction_amount"),
+                transaction.transaction_date,
+                transaction.notes.label("transaction_notes"),
+                transaction.outstanding_amount.label("transaction_outstanding_amount"),
+                transaction.created_by,
+                transaction.updated_at,
             )
             .select_from(ca)
-            .outerjoin(
-                history,
-                history.ca_id == ca.id,
-            )
-            .where(ca.agent_name == agent_name)
+            .join(paginated_ca_ids, paginated_ca_ids.c.id == ca.id)
+            .outerjoin(transaction, transaction.ca_id == ca.id)
             .order_by(
-                status_order.asc(),
-                ca.paid_date.desc().nullslast(),
-                ca.id.desc(),
-                history.edited_at.desc().nullslast(),
-                history.id.desc().nullslast(),
+                ca.id.asc(),
+                transaction.id.asc().nullslast(),
             )
-            .limit(page_size)
-            .offset(offset)
         )
 
         rows = db.execute(detail_stmt).mappings().all()
 
         items_by_id: Dict[int, Dict[str, Any]] = {}
-        history_by_transaction: Dict[
-            int,
-            Dict[Any, Dict[str, Any]],
-        ] = {}
 
         for row in rows:
-            transaction_id = row["ca_id"]
+            ca_id = row["ca_id"]
 
-            if transaction_id not in items_by_id:
-                items_by_id[transaction_id] = {
+            if ca_id not in items_by_id:
+                items_by_id[ca_id] = {
                     "id": row["ca_id"],
+                    "agent_id": str(row["agent_id"]) if row["agent_id"] is not None else None,
                     "agent_name": row["agent_name"],
                     "state": row["state"],
                     "address": row["address"],
                     "company": row["company"],
-                    "original_amount": float(
-                        row["original_amount"] or 0
-                    ),
-                    "amount_paid": float(
-                        row["amount_paid"] or 0
-                    ),
-                    "outstanding_amount": float(
-                        row["outstanding_amount"] or 0
-                    ),
-                    "saleguid": (
-                        str(row["saleguid"])
-                        if row["saleguid"] is not None
-                        else None
-                    ),
+                    "original_amount": float(row["original_amount"] or 0),
+                    "amount_paid": float(row["amount_paid"] or 0),
+                    "outstanding_amount": float(row["outstanding_amount"] or 0),
+                    "saleguid": str(row["saleguid"]) if row["saleguid"] is not None else None,
                     "approved_date": row["approved_date"],
                     "paid_date": row["paid_date"],
                     "notes": row["notes"],
                     "status": row["status"],
-                    "history": [],
+                    "transactions": [],
                 }
 
-                history_by_transaction[transaction_id] = {}
-
-            if row["history_id"] is None:
+            if row["transaction_id"] is None:
                 continue
 
-            edited_at = row["history_edited_at"]
-            transaction_history = history_by_transaction[
-                transaction_id
-            ]
-
-            if edited_at not in transaction_history:
-                transaction_history[edited_at] = {
-                    "edited_at": edited_at,
-                    "changes": [],
-                }
-
-            transaction_history[edited_at]["changes"].append(
+            items_by_id[ca_id]["transactions"].append(
                 {
-                    "field": row["history_field"],
-                    "old_value": row["history_old_value"],
-                    "new_value": row["history_new_value"],
+                    "id": row["transaction_id"],
+                    "garnishment_id": row["garnishment_id"],
+                    "operation": row["operation"],
+                    "type": row["transaction_type"],
+                    "amount": float(row["transaction_amount"] or 0),
+                    "transaction_date": row["transaction_date"],
+                    "notes": row["transaction_notes"],
+                    "outstanding_amount": float(row["transaction_outstanding_amount"] or 0),
+                    "created_by": row["created_by"],
+                    "updated_at": row["updated_at"],
                 }
             )
 
-        for transaction_id, grouped_history in (
-            history_by_transaction.items()
-        ):
-            items_by_id[transaction_id]["history"] = [
-                history_entry
-                for history_entry in grouped_history.values()
-                if history_entry["changes"]
-            ]
-
         items = list(items_by_id.values())
 
-        total_pages = (
-            max(1, ceil(total_count / page_size))
-            if total_count
-            else 1
-        )
+        total_pages = max(1, ceil(total_count / page_size)) if total_count else 1
 
         return PaginationResponseWithCount[Dict[str, Any]](
             success=True,
