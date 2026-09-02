@@ -26,7 +26,7 @@ QB_SCOPE = "com.intuit.quickbooks.accounting"
 QBO_API_BASE = "https://quickbooks.api.intuit.com"
 QBO_MINOR_VERSION = 75
 
-FRONTEND_BASE_URL = "https://roa-data-ui.vercel.app"
+FRONTEND_BASE_URL = "https://dataportal.realtyofamerica.com"
 
 oauth_state_store = {}
 
