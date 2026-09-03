@@ -25,8 +25,9 @@ def quickbooks_login():
 
 
 @router.get("/auth/callback")
-def quickbooks_callback(request: Request, db: Session = Depends(get_db)):
+async def quickbooks_callback(request: Request, db: Session = Depends(get_db)):
     raw_conn = db.connection().connection
+
     error = request.query_params.get("error")
     code = request.query_params.get("code")
     state = request.query_params.get("state")
@@ -35,50 +36,80 @@ def quickbooks_callback(request: Request, db: Session = Depends(get_db)):
     if error:
         remove_state(state)
         return RedirectResponse(
-            url=build_frontend_redirect(status="error", reason="quickbooks_auth_error"),
+            url=build_frontend_redirect(
+                status="error",
+                reason="quickbooks_auth_error",
+            ),
             status_code=302,
         )
 
     if not code:
         remove_state(state)
         return RedirectResponse(
-            url=build_frontend_redirect(status="error", reason="missing_code"),
+            url=build_frontend_redirect(
+                status="error",
+                reason="missing_code",
+            ),
             status_code=302,
         )
 
     if not validate_and_remove_state(state):
         return RedirectResponse(
-            url=build_frontend_redirect(status="error", reason="invalid_state"),
+            url=build_frontend_redirect(
+                status="error",
+                reason="invalid_state",
+            ),
             status_code=302,
         )
 
     if not realm_id:
         return RedirectResponse(
-            url=build_frontend_redirect(status="error", reason="missing_realm_id"),
+            url=build_frontend_redirect(
+                status="error",
+                reason="missing_realm_id",
+            ),
             status_code=302,
         )
 
     try:
-        token_data = exchange_code_for_tokens(code)
+        token_data = await exchange_code_for_tokens(code)
+
+        access_token = token_data.get("access_token")
+        refresh_token = token_data.get("refresh_token")
+
+        if not access_token or not refresh_token:
+            raise Exception(
+                f"QuickBooks tokens missing from response: {token_data}"
+            )
 
         save_quickbooks_connection(
             conn=raw_conn,
             realm_id=realm_id,
-            access_token=token_data.get("access_token"),
-            refresh_token=token_data.get("refresh_token"),
+            access_token=access_token,
+            refresh_token=refresh_token,
             expires_in=token_data.get("expires_in"),
             token_type=token_data.get("token_type"),
             scope=token_data.get("scope"),
         )
-    except Exception:
+
+    except Exception as exc:
         db.rollback()
+
+        print("QuickBooks callback failed:", repr(exc))
+
         return RedirectResponse(
-            url=build_frontend_redirect(status="error", reason="token_or_db_failed"),
+            url=build_frontend_redirect(
+                status="error",
+                reason="token_or_db_failed",
+            ),
             status_code=302,
         )
 
     return RedirectResponse(
-        url=build_frontend_redirect(status="connected", realm_id=realm_id),
+        url=build_frontend_redirect(
+            status="connected",
+            realm_id=realm_id,
+        ),
         status_code=302,
     )
 
