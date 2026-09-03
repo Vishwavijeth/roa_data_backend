@@ -320,44 +320,6 @@ def create_commission_advance_log(
 
 
 @router.get(
-    "/log-dropdown",
-    response_model=FilterResponse,
-)
-def get_commission_advance_log_dropdowns(
-    db: Session = Depends(get_db),
-):
-    try:
-        ca = CommissionAdvance
-
-        companies = db.execute(
-            select(ca.company)
-            .where(
-                ca.company.isnot(None),
-                func.trim(ca.company) != "",
-            )
-            .distinct()
-            .order_by(ca.company.asc())
-        ).scalars().all()
-
-        return FilterResponse(
-            success=True,
-            filters={
-                "company": companies,
-                "status": [
-                    item.value
-                    for item in CommissionAdvanceStatus
-                ],
-            },
-        )
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to fetch dropdowns",
-        ) from exc
-
-
-@router.get(
     "/garnishments/{garnishment_id}/detail",
     response_model=Response[dict[str, Any]],
 )

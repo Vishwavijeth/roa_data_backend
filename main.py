@@ -43,6 +43,7 @@ from api.reconciliation.recon_data_population import router as recon_data_popula
 from api.reconciliation.data_sync import router as data_sync_router
 from api.quickbooks.qb_customerid_population import router as qb_customerid_population_router
 from api.listing.commission_advances1.commission_advances_listing import router as commission_advances_router
+from api.listing.commission_advances1.meta import router as commission_advances_meta_router
 from api.listing.commission_advances1.log import router as commission_advances1_log_router
 from api.listing.commission_advances.commission_advances_flow_sync import router as commission_advances_flow_sync_router
 from api.listing.commission_advances.commisison_advances_flow_listing import router as commission_advances_flow_listing_router
@@ -103,6 +104,7 @@ app.include_router(recon_data_populate_router)
 app.include_router(data_sync_router)
 app.include_router(cron_router)
 app.include_router(commission_advances_router)
+app.include_router(commission_advances_meta_router)
 app.include_router(commission_advances1_log_router)
 app.include_router(commission_advances_flow_sync_router)
 app.include_router(commission_advances_flow_listing_router)

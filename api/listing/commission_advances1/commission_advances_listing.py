@@ -124,19 +124,6 @@ def get_commission_advances_summary(
 
 
 @router.get(
-    "/status-dropdown",
-    response_model=FilterResponse,
-)
-def get_commission_advance_status_dropdown():
-    return FilterResponse(
-        success=True,
-        filters={
-            "status": CommissionAdvanceStatus.values(),
-        },
-    )
-
-
-@router.get(
     "/listing",
     response_model=PaginationResponseWithCount[Dict[str, Any]],
 )
