@@ -1,10 +1,10 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 from api.listing.commission_advances1.utils import CommissionAdvanceOperation, CommissionAdvanceStatus, CommissionAdvanceTransactionType
 from datetime import date
 from decimal import Decimal
+from uuid import UUID
 
 
-# Update
 class UpdateCommissionAdvanceRequest(BaseModel):
     status: CommissionAdvanceStatus
     amount: Decimal | None = None
@@ -14,6 +14,18 @@ class UpdateCommissionAdvanceRequest(BaseModel):
     paid_date: date | None = None
     notes: str | None = None
     transaction_date: date | None = None
+    saleguid: UUID | None = None
+    address: str | None = None
+
+    @field_validator("address")
+    @classmethod
+    def validate_address(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+
+        value = value.strip()
+
+        return value or None
 
 
 class CommissionAdvanceTransactionResponse(BaseModel):

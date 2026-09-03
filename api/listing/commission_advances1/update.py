@@ -18,63 +18,101 @@ router = APIRouter()
 ZERO = Decimal("0")
 
 
-def get_transaction_type(operation: CommissionAdvanceOperation, transaction_type: CommissionAdvanceTransactionType | None):
+def get_transaction_type(
+    operation: CommissionAdvanceOperation,
+    transaction_type: CommissionAdvanceTransactionType | None,
+):
     if operation == CommissionAdvanceOperation.PAYMENT:
         return CommissionAdvanceTransactionType.CREDIT
 
-    if operation in {CommissionAdvanceOperation.INTEREST, CommissionAdvanceOperation.FEE}:
+    if operation in {
+        CommissionAdvanceOperation.INTEREST,
+        CommissionAdvanceOperation.FEE,
+    }:
         return CommissionAdvanceTransactionType.DEBIT
 
-    if operation in {CommissionAdvanceOperation.ADJUSTMENT, CommissionAdvanceOperation.AMENDMENT}:
+    if operation in {
+        CommissionAdvanceOperation.ADJUSTMENT,
+        CommissionAdvanceOperation.AMENDMENT,
+    }:
         if transaction_type is None:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Type is required for Adjustment and Amendment")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Type is required for Adjustment and Amendment",
+            )
 
         return transaction_type
 
-    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid operation")
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Invalid operation",
+    )
 
 
-def get_commission_advance_garnishment(db: Session, ca_id: int):
+def get_commission_advance_garnishment(
+    db: Session,
+    ca_id: int,
+):
     garnishment_id = db.scalar(
         select(CommissionAdvanceTransaction.garnishment_id)
         .where(
             CommissionAdvanceTransaction.ca_id == ca_id,
             CommissionAdvanceTransaction.garnishment_id.is_not(None),
         )
-        .order_by(CommissionAdvanceTransaction.id.desc())
+        .order_by(
+            CommissionAdvanceTransaction.id.desc()
+        )
         .limit(1)
     )
 
     if garnishment_id is None:
         return None
 
-    garnishment = db.scalar(
+    return db.scalar(
         select(CommissionAdvanceGarnishment)
-        .where(CommissionAdvanceGarnishment.id == garnishment_id)
+        .where(
+            CommissionAdvanceGarnishment.id == garnishment_id
+        )
         .with_for_update()
     )
 
-    return garnishment
 
-
-def validate_current_garnishment_transaction(db: Session, commission_advance: CommissionAdvance, garnishment: CommissionAdvanceGarnishment):
+def validate_current_garnishment_transaction(
+    db: Session,
+    commission_advance: CommissionAdvance,
+    garnishment: CommissionAdvanceGarnishment,
+):
     latest_ca_id = db.scalar(
         select(CommissionAdvanceTransaction.ca_id)
         .where(
             CommissionAdvanceTransaction.garnishment_id == garnishment.id,
             CommissionAdvanceTransaction.operation == CommissionAdvanceOperation.GARNISHMENT_BALANCE.value,
         )
-        .order_by(CommissionAdvanceTransaction.id.desc())
+        .order_by(
+            CommissionAdvanceTransaction.id.desc()
+        )
         .limit(1)
     )
 
-    if latest_ca_id is not None and latest_ca_id != commission_advance.id:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This garnishment has already been carried to another commission transaction")
+    if (
+        latest_ca_id is not None
+        and latest_ca_id != commission_advance.id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This garnishment has already moved to another advance",
+        )
 
 
-def update_garnishment_balance(garnishment: CommissionAdvanceGarnishment, new_outstanding: Decimal):
+def update_garnishment_balance(
+    garnishment: CommissionAdvanceGarnishment,
+    new_outstanding: Decimal,
+):
     if new_outstanding < ZERO:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Garnishment outstanding balance should not be less than 0")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Garnishment balance cannot be negative",
+        )
 
     garnishment.outstanding_amount = new_outstanding
 
@@ -95,35 +133,73 @@ def update_commission_advance(
 ):
     commission_advance = db.scalar(
         select(CommissionAdvance)
-        .where(CommissionAdvance.id == transaction_id)
+        .where(
+            CommissionAdvance.id == transaction_id
+        )
         .with_for_update()
     )
 
     if not commission_advance:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Commission advance not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Commission advance not found",
+        )
 
-    if commission_advance.status == CommissionAdvanceStatus.WAGE_GARNISHMENT.value:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No further updates can be made to a commission advance after it has been moved to Wage Garnishment")
+    if (
+        commission_advance.status
+        == CommissionAdvanceStatus.WAGE_GARNISHMENT.value
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Wage Garnishment advances cannot be updated",
+        )
 
     created_transaction = None
 
     try:
-        current_outstanding = commission_advance.outstanding_amount or ZERO
-        original_amount = commission_advance.original_amount
+        current_outstanding = (
+            commission_advance.outstanding_amount
+            or ZERO
+        )
 
-        garnishment = get_commission_advance_garnishment(db, commission_advance.id)
+        original_amount = (
+            commission_advance.original_amount
+        )
+
+        garnishment = get_commission_advance_garnishment(
+            db,
+            commission_advance.id,
+        )
 
         if garnishment:
-            if garnishment.status == CommissionAdvanceGarnishmentStatus.SETTLED.value:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This Wage Garnishment has already been settled")
+            if (
+                garnishment.status
+                == CommissionAdvanceGarnishmentStatus.SETTLED.value
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Wage Garnishment is already settled",
+                )
 
-            validate_current_garnishment_transaction(db, commission_advance, garnishment)
+            validate_current_garnishment_transaction(
+                db,
+                commission_advance,
+                garnishment,
+            )
+
+        # ========================================================
+        # COMMON FIELD UPDATES
+        # ========================================================
 
         if payload.approved_date is not None:
-            commission_advance.approved_date = payload.approved_date
+            commission_advance.approved_date = (
+                payload.approved_date
+            )
 
         if payload.paid_date is not None:
-            commission_advance.paid_date = payload.paid_date
+            commission_advance.paid_date = (
+                payload.paid_date
+            )
 
         if payload.notes is not None:
             commission_advance.notes = payload.notes
@@ -132,64 +208,74 @@ def update_commission_advance(
         # STATUS = WAGE GARNISHMENT
         # ========================================================
 
-        if payload.status == CommissionAdvanceStatus.WAGE_GARNISHMENT:
+        if (
+            payload.status
+            == CommissionAdvanceStatus.WAGE_GARNISHMENT
+        ):
             if commission_advance.agent_id is None:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Agent ID is required to create a Wage Garnishment")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Agent ID is required",
+                )
 
             if current_outstanding <= ZERO:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Wage Garnishment cannot be created because the current outstanding amount is zero")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Outstanding balance must be greater than 0",
+                )
 
             if payload.operation is not None:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Operation should not be provided when changing status to Wage Garnishment")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Operation is not allowed for Wage Garnishment",
+                )
 
             # ====================================================
             # EXISTING GARNISHMENT
             #
-            # This CA is already carrying an existing garnishment.
-            # Do not create another garnishment.
-            #
-            # Example:
-            # Garnishment #1 = 4000
-            # CA #2 collected 3000
-            # Remaining = 1000
-            #
-            # Marking CA #2 Wage Garnishment means:
-            # - freeze CA #2
-            # - same garnishment_id = 1
-            # - global outstanding stays 1000
-            # - next /log carries 1000 forward
+            # This advance is already carrying a garnishment.
+            # Marking it Wage Garnishment closes this advance and
+            # allows the remaining balance to move forward.
             # ====================================================
 
             if garnishment:
-                garnishment.outstanding_amount = current_outstanding
-                garnishment.status = CommissionAdvanceGarnishmentStatus.ACTIVE.value
+                garnishment.outstanding_amount = (
+                    current_outstanding
+                )
 
-                created_transaction = CommissionAdvanceTransaction(
-                    ca_id=commission_advance.id,
-                    garnishment_id=garnishment.id,
-                    operation=CommissionAdvanceOperation.WAGE_GARNISHMENT.value,
-                    type=CommissionAdvanceTransactionType.STATUS.value,
-                    amount=current_outstanding,
-                    transaction_date=payload.transaction_date,
-                    notes=payload.notes,
-                    created_by=current_user.email,
-                    outstanding_amount=current_outstanding,
+                garnishment.status = (
+                    CommissionAdvanceGarnishmentStatus.ACTIVE.value
+                )
+
+                created_transaction = (
+                    CommissionAdvanceTransaction(
+                        ca_id=commission_advance.id,
+                        garnishment_id=garnishment.id,
+                        operation=CommissionAdvanceOperation.WAGE_GARNISHMENT.value,
+                        type=CommissionAdvanceTransactionType.STATUS.value,
+                        amount=current_outstanding,
+                        transaction_date=payload.transaction_date,
+                        notes=payload.notes,
+                        created_by=current_user.email,
+                        outstanding_amount=current_outstanding,
+                    )
                 )
 
                 db.add(created_transaction)
 
-                commission_advance.status = CommissionAdvanceStatus.WAGE_GARNISHMENT.value
+                commission_advance.status = (
+                    CommissionAdvanceStatus.WAGE_GARNISHMENT.value
+                )
 
             # ====================================================
-            # FIRST TIME WAGE GARNISHMENT
-            #
-            # This CA is the source transaction.
-            # Create the agent-level garnishment.
+            # FIRST WAGE GARNISHMENT
             # ====================================================
 
             else:
                 existing_garnishment = db.scalar(
-                    select(CommissionAdvanceGarnishment)
+                    select(
+                        CommissionAdvanceGarnishment
+                    )
                     .where(
                         CommissionAdvanceGarnishment.agent_id == commission_advance.agent_id,
                         CommissionAdvanceGarnishment.status == CommissionAdvanceGarnishmentStatus.ACTIVE.value,
@@ -201,197 +287,376 @@ def update_commission_advance(
                 if existing_garnishment:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="This agent already has an active Wage Garnishment, but this commission advance is not linked to that garnishment",
+                        detail="Agent already has an active Wage Garnishment",
                     )
 
-                garnishment = CommissionAdvanceGarnishment(
-                    agent_id=commission_advance.agent_id,
-                    agent_name=commission_advance.agent_name,
-                    source_ca_id=commission_advance.id,
-                    original_amount=current_outstanding,
-                    outstanding_amount=current_outstanding,
-                    status=CommissionAdvanceGarnishmentStatus.ACTIVE.value,
-                    notes=payload.notes,
+                garnishment = (
+                    CommissionAdvanceGarnishment(
+                        agent_id=commission_advance.agent_id,
+                        agent_name=commission_advance.agent_name,
+                        source_ca_id=commission_advance.id,
+                        original_amount=current_outstanding,
+                        outstanding_amount=current_outstanding,
+                        status=CommissionAdvanceGarnishmentStatus.ACTIVE.value,
+                        notes=payload.notes,
+                    )
                 )
 
                 db.add(garnishment)
                 db.flush()
 
-                created_transaction = CommissionAdvanceTransaction(
-                    ca_id=commission_advance.id,
-                    garnishment_id=garnishment.id,
-                    operation=CommissionAdvanceOperation.WAGE_GARNISHMENT.value,
-                    type=CommissionAdvanceTransactionType.STATUS.value,
-                    amount=current_outstanding,
-                    transaction_date=payload.transaction_date,
-                    notes=payload.notes,
-                    created_by=current_user.email,
-                    outstanding_amount=current_outstanding,
+                created_transaction = (
+                    CommissionAdvanceTransaction(
+                        ca_id=commission_advance.id,
+                        garnishment_id=garnishment.id,
+                        operation=CommissionAdvanceOperation.WAGE_GARNISHMENT.value,
+                        type=CommissionAdvanceTransactionType.STATUS.value,
+                        amount=current_outstanding,
+                        transaction_date=payload.transaction_date,
+                        notes=payload.notes,
+                        created_by=current_user.email,
+                        outstanding_amount=current_outstanding,
+                    )
                 )
 
                 db.add(created_transaction)
 
-                commission_advance.status = CommissionAdvanceStatus.WAGE_GARNISHMENT.value
+                commission_advance.status = (
+                    CommissionAdvanceStatus.WAGE_GARNISHMENT.value
+                )
+
+        # ========================================================
+        # STATUS = REPLACEMENT
+        #
+        # Replace the associated SkySlope transaction.
+        # Balance and ledger stay unchanged.
+        # ========================================================
+
+        elif (
+            payload.status
+            == CommissionAdvanceStatus.REPLACEMENT
+        ):
+            if payload.address is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Address is required for Replacement",
+                )
+
+            if payload.saleguid is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Sale GUID is required for Replacement",
+                )
+
+            if payload.operation is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Operation is not allowed for Replacement",
+                )
+
+            commission_advance.address = (
+                payload.address
+            )
+
+            commission_advance.saleguid = (
+                payload.saleguid
+            )
+
+            commission_advance.status = (
+                CommissionAdvanceStatus.REPLACEMENT.value
+            )
 
         # ========================================================
         # STATUS = PAID
         # ========================================================
 
-        elif payload.status == CommissionAdvanceStatus.PAID:
+        elif (
+            payload.status
+            == CommissionAdvanceStatus.PAID
+        ):
             if current_outstanding > ZERO:
                 if payload.amount is None:
-                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Amount is required when marking the commission advance as Paid")
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Amount is required",
+                    )
 
                 if payload.amount <= ZERO:
-                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Amount must be greater than 0")
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Amount must be greater than 0",
+                    )
 
                 if payload.amount != current_outstanding:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"Paid amount must equal the current outstanding amount. Current outstanding: {current_outstanding}, Entered amount: {payload.amount}",
+                        detail=(
+                            "Paid amount must equal the "
+                            "current outstanding balance"
+                        ),
                     )
 
-                if payload.operation is not None and payload.operation != CommissionAdvanceOperation.PAYMENT:
-                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Operation must be Payment when marking the commission advance as Paid")
+                if (
+                    payload.operation is not None
+                    and payload.operation
+                    != CommissionAdvanceOperation.PAYMENT
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Operation must be Payment",
+                    )
 
-                current_amount_paid = commission_advance.amount_paid or ZERO
-                commission_advance.amount_paid = current_amount_paid + payload.amount
+                current_amount_paid = (
+                    commission_advance.amount_paid
+                    or ZERO
+                )
 
-                new_outstanding = current_outstanding - payload.amount
+                commission_advance.amount_paid = (
+                    current_amount_paid
+                    + payload.amount
+                )
+
+                new_outstanding = (
+                    current_outstanding
+                    - payload.amount
+                )
 
                 if new_outstanding < ZERO:
-                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Outstanding balance should not be less than 0")
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Outstanding balance cannot be negative",
+                    )
 
-                commission_advance.outstanding_amount = new_outstanding
+                commission_advance.outstanding_amount = (
+                    new_outstanding
+                )
 
                 if garnishment:
-                    update_garnishment_balance(garnishment, new_outstanding)
+                    update_garnishment_balance(
+                        garnishment,
+                        new_outstanding,
+                    )
 
-                created_transaction = CommissionAdvanceTransaction(
-                    ca_id=commission_advance.id,
-                    garnishment_id=garnishment.id if garnishment else None,
-                    operation=CommissionAdvanceOperation.PAYMENT.value,
-                    type=CommissionAdvanceTransactionType.CREDIT.value,
-                    amount=payload.amount,
-                    transaction_date=payload.transaction_date,
-                    notes=payload.notes,
-                    created_by=current_user.email,
-                    outstanding_amount=new_outstanding,
+                created_transaction = (
+                    CommissionAdvanceTransaction(
+                        ca_id=commission_advance.id,
+                        garnishment_id=garnishment.id if garnishment else None,
+                        operation=CommissionAdvanceOperation.PAYMENT.value,
+                        type=CommissionAdvanceTransactionType.CREDIT.value,
+                        amount=payload.amount,
+                        transaction_date=payload.transaction_date,
+                        notes=payload.notes,
+                        created_by=current_user.email,
+                        outstanding_amount=new_outstanding,
+                    )
                 )
 
                 db.add(created_transaction)
 
             else:
-                commission_advance.outstanding_amount = ZERO
+                commission_advance.outstanding_amount = (
+                    ZERO
+                )
 
                 if garnishment:
-                    update_garnishment_balance(garnishment, ZERO)
+                    update_garnishment_balance(
+                        garnishment,
+                        ZERO,
+                    )
 
-            commission_advance.status = CommissionAdvanceStatus.PAID.value
+            commission_advance.status = (
+                CommissionAdvanceStatus.PAID.value
+            )
 
         # ========================================================
         # ALL OTHER STATUSES
         # ========================================================
 
         else:
-            commission_advance.status = payload.status.value
+            commission_advance.status = (
+                payload.status.value
+            )
 
             if payload.operation is not None:
                 if payload.amount is None:
-                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Amount is required when an operation is selected")
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Amount is required",
+                    )
 
                 if payload.amount <= ZERO:
-                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Amount must be greater than 0")
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Amount must be greater than 0",
+                    )
 
-                transaction_type = get_transaction_type(payload.operation, payload.type)
-                new_outstanding = current_outstanding
+                transaction_type = (
+                    get_transaction_type(
+                        payload.operation,
+                        payload.type,
+                    )
+                )
+
+                new_outstanding = (
+                    current_outstanding
+                )
 
                 # ====================================================
                 # PAYMENT
                 # ====================================================
 
-                if payload.operation == CommissionAdvanceOperation.PAYMENT:
-                    if payload.amount > current_outstanding:
+                if (
+                    payload.operation
+                    == CommissionAdvanceOperation.PAYMENT
+                ):
+                    if (
+                        payload.amount
+                        > current_outstanding
+                    ):
                         raise HTTPException(
                             status_code=status.HTTP_400_BAD_REQUEST,
-                            detail=f"Payment amount cannot exceed the current outstanding amount. Current outstanding: {current_outstanding}, Entered amount: {payload.amount}",
+                            detail="Payment exceeds outstanding balance",
                         )
 
-                    new_outstanding = current_outstanding - payload.amount
+                    new_outstanding = (
+                        current_outstanding
+                        - payload.amount
+                    )
 
-                    current_amount_paid = commission_advance.amount_paid or ZERO
-                    commission_advance.amount_paid = current_amount_paid + payload.amount
+                    current_amount_paid = (
+                        commission_advance.amount_paid
+                        or ZERO
+                    )
+
+                    commission_advance.amount_paid = (
+                        current_amount_paid
+                        + payload.amount
+                    )
 
                 # ====================================================
                 # INTEREST / FEE
                 # ====================================================
 
-                elif payload.operation in {CommissionAdvanceOperation.INTEREST, CommissionAdvanceOperation.FEE}:
-                    transaction_type = CommissionAdvanceTransactionType.DEBIT
+                elif payload.operation in {
+                    CommissionAdvanceOperation.INTEREST,
+                    CommissionAdvanceOperation.FEE,
+                }:
+                    transaction_type = (
+                        CommissionAdvanceTransactionType.DEBIT
+                    )
 
                     if original_amount is None:
-                        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Original amount is required to add Interest or Fee")
-
-                    new_outstanding = current_outstanding + payload.amount
-
-                    if new_outstanding > original_amount:
                         raise HTTPException(
                             status_code=status.HTTP_400_BAD_REQUEST,
-                            detail=f"{payload.operation.value} cannot be added because the outstanding amount would exceed the original amount. Current outstanding: {current_outstanding}, Entered amount: {payload.amount}, Original amount: {original_amount}",
+                            detail="Original amount is required",
+                        )
+
+                    new_outstanding = (
+                        current_outstanding
+                        + payload.amount
+                    )
+
+                    if (
+                        new_outstanding
+                        > original_amount
+                    ):
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"{payload.operation.value} exceeds the original amount",
                         )
 
                 # ====================================================
                 # ADJUSTMENT
                 # ====================================================
 
-                elif payload.operation == CommissionAdvanceOperation.ADJUSTMENT:
-                    if transaction_type == CommissionAdvanceTransactionType.CREDIT:
-                        new_outstanding = current_outstanding - payload.amount
+                elif (
+                    payload.operation
+                    == CommissionAdvanceOperation.ADJUSTMENT
+                ):
+                    if (
+                        transaction_type
+                        == CommissionAdvanceTransactionType.CREDIT
+                    ):
+                        new_outstanding = (
+                            current_outstanding
+                            - payload.amount
+                        )
 
-                    elif transaction_type == CommissionAdvanceTransactionType.DEBIT:
-                        new_outstanding = current_outstanding + payload.amount
+                    elif (
+                        transaction_type
+                        == CommissionAdvanceTransactionType.DEBIT
+                    ):
+                        new_outstanding = (
+                            current_outstanding
+                            + payload.amount
+                        )
 
                 # ====================================================
                 # AMENDMENT
                 # ====================================================
 
-                elif payload.operation == CommissionAdvanceOperation.AMENDMENT:
-                    if transaction_type == CommissionAdvanceTransactionType.CREDIT:
-                        new_outstanding = current_outstanding - payload.amount
+                elif (
+                    payload.operation
+                    == CommissionAdvanceOperation.AMENDMENT
+                ):
+                    if (
+                        transaction_type
+                        == CommissionAdvanceTransactionType.CREDIT
+                    ):
+                        new_outstanding = (
+                            current_outstanding
+                            - payload.amount
+                        )
 
-                    elif transaction_type == CommissionAdvanceTransactionType.DEBIT:
-                        new_outstanding = current_outstanding + payload.amount
+                    elif (
+                        transaction_type
+                        == CommissionAdvanceTransactionType.DEBIT
+                    ):
+                        new_outstanding = (
+                            current_outstanding
+                            + payload.amount
+                        )
 
                 # ====================================================
-                # VALIDATION
+                # OUTSTANDING VALIDATION
                 # ====================================================
 
                 if new_outstanding < ZERO:
-                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Outstanding balance should not be less than 0")
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Outstanding balance cannot be negative",
+                    )
 
-                commission_advance.outstanding_amount = new_outstanding
+                commission_advance.outstanding_amount = (
+                    new_outstanding
+                )
 
                 # ====================================================
                 # GLOBAL GARNISHMENT BALANCE
                 # ====================================================
 
                 if garnishment:
-                    update_garnishment_balance(garnishment, new_outstanding)
+                    update_garnishment_balance(
+                        garnishment,
+                        new_outstanding,
+                    )
 
                 # ====================================================
                 # LEDGER
                 # ====================================================
 
-                created_transaction = CommissionAdvanceTransaction(
-                    ca_id=commission_advance.id,
-                    garnishment_id=garnishment.id if garnishment else None,
-                    operation=payload.operation.value,
-                    type=transaction_type.value,
-                    amount=payload.amount,
-                    transaction_date=payload.transaction_date,
-                    notes=payload.notes,
-                    created_by=current_user.email,
-                    outstanding_amount=new_outstanding,
+                created_transaction = (
+                    CommissionAdvanceTransaction(
+                        ca_id=commission_advance.id,
+                        garnishment_id=garnishment.id if garnishment else None,
+                        operation=payload.operation.value,
+                        type=transaction_type.value,
+                        amount=payload.amount,
+                        transaction_date=payload.transaction_date,
+                        notes=payload.notes,
+                        created_by=current_user.email,
+                        outstanding_amount=new_outstanding,
+                    )
                 )
 
                 db.add(created_transaction)
@@ -401,14 +666,20 @@ def update_commission_advance(
                 # ====================================================
 
                 if new_outstanding == ZERO:
-                    commission_advance.status = CommissionAdvanceStatus.PAID.value
+                    commission_advance.status = (
+                        CommissionAdvanceStatus.PAID.value
+                    )
 
         db.commit()
 
-        db.refresh(commission_advance)
+        db.refresh(
+            commission_advance
+        )
 
         if created_transaction:
-            db.refresh(created_transaction)
+            db.refresh(
+                created_transaction
+            )
 
         return UpdateCommissionAdvanceResponse(
             commission_advance=commission_advance,
@@ -421,4 +692,8 @@ def update_commission_advance(
 
     except Exception as error:
         db.rollback()
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(error))
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(error),
+        ) from error
