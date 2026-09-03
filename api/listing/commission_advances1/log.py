@@ -3,10 +3,10 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, field_validator
-from sqlalchemy.orm import Session
 from sqlalchemy import String, cast, func, select
+from sqlalchemy.orm import Session
 
 from common.response import Response, FilterResponse
 from db import get_db
@@ -42,7 +42,7 @@ class CommissionAdvanceLogRequest(BaseModel):
         value = value.strip()
 
         if not value:
-            raise ValueError("Field cannot be empty")
+            raise ValueError("Field is required")
 
         return value
 
@@ -53,7 +53,7 @@ class CommissionAdvanceLogRequest(BaseModel):
             return None
 
         if value < ZERO:
-            raise ValueError("Amount must be greater than or equal to 0")
+            raise ValueError("Amount cannot be negative")
 
         return value
 
@@ -68,6 +68,30 @@ class CommissionAdvanceLogRequest(BaseModel):
         return value or None
 
 
+def get_current_garnishment_ca(
+    db: Session,
+    garnishment: CommissionAdvanceGarnishment,
+):
+    current_ca_id = db.scalar(
+        select(CommissionAdvanceTransaction.ca_id)
+        .where(
+            CommissionAdvanceTransaction.garnishment_id == garnishment.id,
+            CommissionAdvanceTransaction.operation == CommissionAdvanceOperation.GARNISHMENT_BALANCE.value,
+        )
+        .order_by(CommissionAdvanceTransaction.id.desc())
+        .limit(1)
+    )
+
+    if current_ca_id is None:
+        current_ca_id = garnishment.source_ca_id
+
+    return db.scalar(
+        select(CommissionAdvance)
+        .where(CommissionAdvance.id == current_ca_id)
+        .with_for_update()
+    )
+
+
 @router.post(
     "/log",
     response_model=Response[dict[str, Any]],
@@ -79,6 +103,10 @@ def create_commission_advance_log(
     current_user: RoaDataUser = Depends(get_current_user),
 ):
     try:
+        # ========================================================
+        # CHECK ACTIVE GARNISHMENT
+        # ========================================================
+
         active_garnishment = db.scalar(
             select(CommissionAdvanceGarnishment)
             .where(
@@ -91,18 +119,34 @@ def create_commission_advance_log(
         )
 
         # ========================================================
-        # AGENT HAS ACTIVE WAGE GARNISHMENT
+        # AGENT HAS ACTIVE GARNISHMENT
         # ========================================================
 
         if active_garnishment:
+            current_garnishment_ca = get_current_garnishment_ca(
+                db=db,
+                garnishment=active_garnishment,
+            )
+
+            if not current_garnishment_ca:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Current garnishment advance not found",
+                )
+
+            # The current carrying CA must be closed before
+            # the garnishment can move to another CA.
+            if current_garnishment_ca.status != CommissionAdvanceStatus.WAGE_GARNISHMENT.value:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cannot create a new advance. Another advance is still active.",
+                )
+
+            # Garnishment amount comes from garnishment master.
             if payload.amount is not None:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(
-                        "Amount should not be provided when logging a transaction "
-                        "for an agent with an active Wage Garnishment. "
-                        f"Current garnishment outstanding amount: {active_garnishment.outstanding_amount}"
-                    ),
+                    detail="Amount should not be entered for a garnishment advance",
                 )
 
             garnishment_amount = active_garnishment.outstanding_amount or ZERO
@@ -110,8 +154,12 @@ def create_commission_advance_log(
             if garnishment_amount <= ZERO:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Active Wage Garnishment does not have a valid outstanding balance",
+                    detail="No garnishment balance available",
                 )
+
+            # ====================================================
+            # CREATE GARNISHMENT CARRY-FORWARD CA
+            # ====================================================
 
             commission_advance = CommissionAdvance(
                 agent_id=payload.agent_id,
@@ -130,6 +178,10 @@ def create_commission_advance_log(
 
             db.add(commission_advance)
             db.flush()
+
+            # ====================================================
+            # FIRST LEDGER ENTRY = GARNISHMENT BALANCE
+            # ====================================================
 
             ledger_transaction = CommissionAdvanceTransaction(
                 ca_id=commission_advance.id,
@@ -168,21 +220,21 @@ def create_commission_advance_log(
                     "has_wage_garnishment": True,
                     "garnishment_id": active_garnishment.id,
                     "garnishment_source_ca_id": active_garnishment.source_ca_id,
-                    "garnishment_original_amount": float(active_garnishment.original_amount or 0),
                     "garnishment_outstanding_amount": float(active_garnishment.outstanding_amount or 0),
+                    "previous_ca_id": current_garnishment_ca.id,
                     "ledger_transaction_id": ledger_transaction.id,
                 },
-                message="Commission advance logged with active Wage Garnishment",
+                message="Garnishment advance created",
             )
 
         # ========================================================
-        # NORMAL COMMISSION ADVANCE
+        # NORMAL ADVANCE
         # ========================================================
 
         if payload.amount is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Amount is required when logging a normal commission advance",
+                detail="Amount is required",
             )
 
         if payload.amount <= ZERO:
@@ -208,6 +260,10 @@ def create_commission_advance_log(
 
         db.add(commission_advance)
         db.flush()
+
+        # ========================================================
+        # FIRST LEDGER ENTRY = BASE AMOUNT
+        # ========================================================
 
         ledger_transaction = CommissionAdvanceTransaction(
             ca_id=commission_advance.id,
@@ -247,7 +303,7 @@ def create_commission_advance_log(
                 "garnishment_id": None,
                 "ledger_transaction_id": ledger_transaction.id,
             },
-            message="Commission advance logged successfully",
+            message="Advance created",
         )
 
     except HTTPException:
@@ -259,9 +315,9 @@ def create_commission_advance_log(
 
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="Failed to create advance",
         ) from exc
-    
+
 
 @router.get(
     "/log-dropdown",
@@ -297,7 +353,7 @@ def get_commission_advance_log_dropdowns(
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="Failed to fetch dropdowns",
         ) from exc
 
 
@@ -337,17 +393,15 @@ def get_garnishment_detail(
         if not source_row:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Wage Garnishment not found",
+                detail="Garnishment not found",
             )
 
         # ========================================================
-        # FIND ALL COMMISSION ADVANCES INVOLVED IN GARNISHMENT
+        # FIND ALL CA IDs INVOLVED IN THIS GARNISHMENT
         # ========================================================
 
         involved_ca_ids = (
-            select(
-                transaction.ca_id
-            )
+            select(transaction.ca_id)
             .where(
                 transaction.garnishment_id == garnishment_id
             )
@@ -356,7 +410,7 @@ def get_garnishment_detail(
         )
 
         # ========================================================
-        # FETCH INVOLVED COMMISSION ADVANCES + ALL LEDGER LOGS
+        # FETCH ALL LEDGER LOGS OF INVOLVED CAs
         # ========================================================
 
         rows = db.execute(
@@ -442,7 +496,7 @@ def get_garnishment_detail(
                     commission_advances_by_id.values()
                 ),
             },
-            message="Wage Garnishment detail fetched successfully",
+            message="Garnishment details fetched",
         )
 
     except HTTPException:
@@ -451,7 +505,7 @@ def get_garnishment_detail(
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="Failed to fetch garnishment details",
         ) from exc
 
 
@@ -469,7 +523,7 @@ def get_agent_name_suggestions(
     if not query_text:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Query text is required",
+            detail="Search text is required",
         )
 
     beu = BrokerageEngineUser
@@ -505,7 +559,10 @@ def get_agent_name_suggestions(
             active_garnishment.c.garnishment_outstanding_amount,
             active_garnishment.c.garnishment_status,
         )
-        .outerjoin(active_garnishment, active_garnishment.c.garnishment_agent_id == beu.agent_identifier)
+        .outerjoin(
+            active_garnishment,
+            active_garnishment.c.garnishment_agent_id == beu.agent_identifier,
+        )
         .where(
             beu.display_name.isnot(None),
             func.trim(beu.display_name) != "",
@@ -541,14 +598,16 @@ def get_agent_name_suggestions(
 
         return FilterResponse(
             success=True,
-            filters={"agent_name": agent_names},
-            message="Agent suggestions fetched successfully",
+            filters={
+                "agent_name": agent_names
+            },
+            message="Agents fetched",
         )
 
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="Failed to fetch agents",
         ) from exc
 
 
@@ -566,7 +625,7 @@ def get_address_suggestions(
     if not query_text:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Query text is required",
+            detail="Search text is required",
         )
 
     sp = SaleProperty
@@ -590,10 +649,17 @@ def get_address_suggestions(
             sale.saleguid,
         )
         .select_from(sp)
-        .outerjoin(sale, sp.saleguid == sale.saleguid)
-        .where(address_expression.ilike(f"%{query_text}%"))
+        .outerjoin(
+            sale,
+            sp.saleguid == sale.saleguid,
+        )
+        .where(
+            address_expression.ilike(f"%{query_text}%")
+        )
         .distinct()
-        .order_by(address_expression.asc())
+        .order_by(
+            address_expression.asc()
+        )
         .limit(limit)
     )
 
@@ -612,12 +678,14 @@ def get_address_suggestions(
 
         return FilterResponse(
             success=True,
-            filters={"address": addresses},
-            message="Address suggestions fetched successfully",
+            filters={
+                "address": addresses
+            },
+            message="Addresses fetched",
         )
 
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
+            detail="Failed to fetch addresses",
         ) from exc
