@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, HTTPException
 from fastapi.responses import RedirectResponse
 from datetime import datetime, timezone, timedelta
 from sqlalchemy.orm import Session
@@ -95,11 +95,12 @@ def quickbooks_status(db: Session = Depends(get_db)):
     }
 
 @router.get("/auth/quickbooks/token-status")
-def quickbooks_token_status(db: Session = Depends(get_db)):
+async def quickbooks_token_status(db: Session = Depends(get_db)):
     raw_conn = db.connection().connection
+
     try:
         qb = get_latest_quickbooks_connection(raw_conn)
-    except Exception:
+    except HTTPException:
         return {
             "connected": False,
             "status": "reconnect_required",
@@ -122,7 +123,7 @@ def quickbooks_token_status(db: Session = Depends(get_db)):
                     "message": "Access token is valid"
                 }
 
-        refresh_quickbooks_tokens(raw_conn, qb)
+        qb = await refresh_quickbooks_tokens(raw_conn, qb)
 
         return {
             "connected": True,
@@ -131,10 +132,24 @@ def quickbooks_token_status(db: Session = Depends(get_db)):
             "message": "Access token refreshed successfully"
         }
 
-    except Exception:
+    except HTTPException as exc:
         db.rollback()
+
         return {
             "connected": False,
             "status": "reconnect_required",
-            "message": "QuickBooks reconnect required"
+            "realm_id": qb.get("realm_id"),
+            "message": "QuickBooks reconnect required",
+            "error": exc.detail
+        }
+
+    except Exception as exc:
+        db.rollback()
+
+        return {
+            "connected": False,
+            "status": "reconnect_required",
+            "realm_id": qb.get("realm_id"),
+            "message": "QuickBooks reconnect required",
+            "error": str(exc)
         }
