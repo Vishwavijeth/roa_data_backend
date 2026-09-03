@@ -8,12 +8,12 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from api.listing.commission_advances.base import CommissionAdvanceSummary
-from api.listing.commission_advances1.utils import CommissionAdvanceStatus, CommissionAdvanceGarnishmentStatus
+from api.listing.commission_advances.utils import CommissionAdvanceStatus, CommissionAdvanceGarnishmentStatus
 from common.pagination import PaginationData, PaginationResponseWithCount
 from common.response import Response
 from db import get_db
 from models.brokerage_engine_users import BrokerageEngineUser
-from models.commission_advances.commission_advances1 import CommissionAdvance, CommissionAdvanceTransaction, CommissionAdvanceGarnishment
+from models.commission_advances.commission_advances import CommissionAdvance, CommissionAdvanceTransaction, CommissionAdvanceGarnishment
 
 
 router = APIRouter(prefix="/commission-advances")

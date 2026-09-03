@@ -10,7 +10,7 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.postgresql import UUID
-from api.listing.commission_advances1.utils import CommissionAdvanceGarnishmentStatus
+from api.listing.commission_advances.utils import CommissionAdvanceGarnishmentStatus
 from db import Base
 
 

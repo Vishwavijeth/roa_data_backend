@@ -11,14 +11,14 @@ from sqlalchemy.orm import Session
 from common.response import Response, FilterResponse
 from db import get_db
 
-from models.commission_advances.commission_advances1 import CommissionAdvance, CommissionAdvanceTransaction, CommissionAdvanceGarnishment
+from models.commission_advances.commission_advances import CommissionAdvance, CommissionAdvanceTransaction, CommissionAdvanceGarnishment
 from models.roa_data_users import RoaDataUser
 from models.skyslope.sale import Sale
 from models.skyslope.property import SaleProperty
 from models.brokerage_engine_users import BrokerageEngineUser
 
 from api.auth.authentication import get_current_user
-from api.listing.commission_advances1.utils import CommissionAdvanceStatus, CommissionAdvanceGarnishmentStatus, CommissionAdvanceOperation, CommissionAdvanceTransactionType
+from api.listing.commission_advances.utils import CommissionAdvanceStatus, CommissionAdvanceGarnishmentStatus, CommissionAdvanceOperation, CommissionAdvanceTransactionType
 
 
 router = APIRouter(prefix="/commission-advances")

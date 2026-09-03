@@ -6,8 +6,8 @@ from sqlalchemy.orm import Session
 
 from common.response import Response
 from db import get_db
-from models.commission_advances.commission_advances1 import CommissionAdvance
-from api.listing.commission_advances1.utils import CommissionAdvanceOperation, CommissionAdvanceStatus
+from models.commission_advances.commission_advances import CommissionAdvance
+from api.listing.commission_advances.utils import CommissionAdvanceOperation, CommissionAdvanceStatus
 
 
 router = APIRouter(prefix="/commission-advances")

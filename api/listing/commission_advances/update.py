@@ -6,11 +6,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from db import get_db
-from models.commission_advances.commission_advances1 import CommissionAdvance, CommissionAdvanceTransaction, CommissionAdvanceGarnishment
+from models.commission_advances.commission_advances import CommissionAdvance, CommissionAdvanceTransaction, CommissionAdvanceGarnishment
 from models.roa_data_users import RoaDataUser
 from api.auth.authentication import get_current_user
-from api.listing.commission_advances1.utils import CommissionAdvanceOperation, CommissionAdvanceStatus, CommissionAdvanceTransactionType, CommissionAdvanceGarnishmentStatus
-from api.listing.commission_advances1.base import UpdateCommissionAdvanceResponse, UpdateCommissionAdvanceRequest
+from api.listing.commission_advances.utils import CommissionAdvanceOperation, CommissionAdvanceStatus, CommissionAdvanceTransactionType, CommissionAdvanceGarnishmentStatus
+from api.listing.commission_advances.base import UpdateCommissionAdvanceResponse, UpdateCommissionAdvanceRequest
 
 
 router = APIRouter()
