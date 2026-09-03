@@ -2,46 +2,41 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Any, Dict, Optional
 from math import ceil
 
-from sqlalchemy import (
-    case,
-    cast,
-    distinct,
-    func,
-    literal,
-    or_,
-    select,
-)
+from pydantic import BaseModel
+from sqlalchemy import case, cast, exists, func, literal, or_, select, union_all
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
-from api.listing.commission_advances.base import (
-    CommissionAdvanceSummary,
-)
-from api.listing.commission_advances.utils import (
-    CommissionAdvanceStatus,
-)
-from common.pagination import (
-    PaginationData,
-    PaginationResponseWithCount,
-)
-from common.response import FilterResponse, Response
+from api.listing.commission_advances.base import CommissionAdvanceSummary
+from api.listing.commission_advances1.utils import CommissionAdvanceStatus, CommissionAdvanceGarnishmentStatus
+from common.pagination import PaginationData, PaginationResponseWithCount
+from common.response import Response
 from db import get_db
 from models.brokerage_engine_users import BrokerageEngineUser
-from models.commission_advances.commission_advances1 import CommissionAdvance
-from models.commission_advances.commission_advances1 import CommissionAdvanceTransaction
+from models.commission_advances.commission_advances1 import CommissionAdvance, CommissionAdvanceTransaction, CommissionAdvanceGarnishment
+
 
 router = APIRouter(prefix="/commission-advances")
 
 
-def build_listing_filters(
-    status: Optional[CommissionAdvanceStatus],
-    search: Optional[str],
-):
-    """
-    Build filters for commission advance listing.
+class CommissionAdvanceDetailData(BaseModel):
+    total_count: int
+    global_outstanding: float
+    items: list[Dict[str, Any]]
 
-    Search checks both agent_name and address using OR logic.
-    """
+
+class CommissionAdvanceDetailResponse(BaseModel):
+    success: bool = True
+    data: CommissionAdvanceDetailData
+    page: int
+    page_size: int
+    count: int
+    total_pages: int
+    has_next: bool
+    message: str = "Request successful"
+
+
+def build_listing_filters(status: Optional[CommissionAdvanceStatus], search: Optional[str]):
     filters = []
 
     if status:
@@ -49,78 +44,101 @@ def build_listing_filters(
 
     if search and search.strip():
         search_term = search.strip()
-
         filters.append(
             or_(
-                CommissionAdvance.agent_name.ilike(
-                    f"%{search_term}%"
-                ),
-                CommissionAdvance.address.ilike(
-                    f"%{search_term}%"
-                ),
+                CommissionAdvance.agent_name.ilike(f"%{search_term}%"),
+                CommissionAdvance.address.ilike(f"%{search_term}%"),
             )
         )
 
     return filters
 
 
+def build_global_outstanding_cte():
+    ca = CommissionAdvance
+    transaction = CommissionAdvanceTransaction
+    garnishment = CommissionAdvanceGarnishment
+
+    # Normal advances only.
+    # Any CA having a garnishment_id in its ledger is excluded because
+    # that debt is represented by the garnishment master.
+    normal_debt = (
+        select(
+            ca.agent_name.label("agent_name"),
+            ca.outstanding_amount.label("outstanding_amount"),
+        )
+        .where(
+            ca.agent_name.isnot(None),
+            func.trim(ca.agent_name) != "",
+            ca.outstanding_amount > 0,
+            ca.status.in_(CommissionAdvanceStatus.active_values()),
+            ~exists().where(
+                CommissionAdvanceTransaction.ca_id == ca.id,
+                CommissionAdvanceTransaction.garnishment_id.is_not(None),
+            ),
+        )
+    )
+
+    # Once an advance enters Wage Garnishment, this becomes the
+    # authoritative outstanding balance for that entire lifecycle.
+    garnishment_debt = (
+        select(
+            garnishment.agent_name.label("agent_name"),
+            garnishment.outstanding_amount.label("outstanding_amount"),
+        )
+        .where(
+            garnishment.agent_name.isnot(None),
+            func.trim(garnishment.agent_name) != "",
+            garnishment.status == CommissionAdvanceGarnishmentStatus.ACTIVE.value,
+            garnishment.outstanding_amount > 0,
+        )
+    )
+
+    debt_components = union_all(normal_debt, garnishment_debt).subquery("debt_components")
+
+    return (
+        select(
+            debt_components.c.agent_name,
+            func.coalesce(func.sum(debt_components.c.outstanding_amount), 0).label("total_outstanding"),
+        )
+        .group_by(debt_components.c.agent_name)
+        .cte("global_outstanding")
+    )
+
+
 @router.get(
     "/summary",
     response_model=Response[CommissionAdvanceSummary],
 )
-def get_commission_advances_summary(
-    db: Session = Depends(get_db),
-):
+def get_commission_advances_summary(db: Session = Depends(get_db)):
     try:
         ca = CommissionAdvance
 
-        pending_advances = (
-            db.execute(
-                select(func.count(ca.id)).where(
-                    ca.status.in_(
-                        CommissionAdvanceStatus.active_values()
-                    )
-                )
-            ).scalar()
-            or 0
-        )
+        pending_advances = db.scalar(
+            select(func.count(ca.id)).where(ca.status.in_(CommissionAdvanceStatus.active_values()))
+        ) or 0
 
-        commission_advance_received = (
-            db.execute(
-                select(func.count(ca.id)).where(
-                    ca.status == CommissionAdvanceStatus.PAID.value
-                )
-            ).scalar()
-            or 0
-        )
+        commission_advance_received = db.scalar(
+            select(func.count(ca.id)).where(ca.status == CommissionAdvanceStatus.PAID.value)
+        ) or 0
 
-        agents_with_active_advances = (
-            db.execute(
-                select(func.count(distinct(ca.agent_name))).where(
-                    ca.outstanding_amount > 0
-                )
-            ).scalar()
-            or 0
-        )
+        global_outstanding = build_global_outstanding_cte()
+
+        agents_with_active_advances = db.scalar(
+            select(func.count()).select_from(global_outstanding).where(global_outstanding.c.total_outstanding > 0)
+        ) or 0
 
         return Response[CommissionAdvanceSummary](
             success=True,
             data=CommissionAdvanceSummary(
                 pending_advances=pending_advances,
-                commission_advance_received=(
-                    commission_advance_received
-                ),
-                agents_with_active_advances=(
-                    agents_with_active_advances
-                ),
+                commission_advance_received=commission_advance_received,
+                agents_with_active_advances=agents_with_active_advances,
             ),
         )
 
     except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=str(exc),
-        ) from exc
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get(
@@ -141,42 +159,29 @@ def get_commission_advances_listing(
 
         filters = build_listing_filters(status, search)
 
-        total_count = (
-            db.execute(
-                select(
-                    func.count(distinct(ca.agent_name))
-                ).where(*filters)
-            ).scalar()
-            or 0
-        )
-
+        # Filters decide which agents appear.
+        # They do not control the global outstanding calculation.
         filtered_data = (
-            select(
-                ca.agent_name,
-                ca.status,
-                ca.outstanding_amount,
-            )
+            select(ca.agent_name, ca.status)
             .where(*filters)
             .cte("filtered_data")
         )
 
-        agent_totals = (
-            select(
-                filtered_data.c.agent_name,
-                func.coalesce(
-                    func.sum(
-                        filtered_data.c.outstanding_amount
-                    ).filter(
-                        filtered_data.c.status.in_(
-                            CommissionAdvanceStatus.active_values()
-                        )
-                    ),
-                    0,
-                ).label("total_outstanding"),
+        filtered_agents = (
+            select(filtered_data.c.agent_name)
+            .where(
+                filtered_data.c.agent_name.isnot(None),
+                func.trim(filtered_data.c.agent_name) != "",
             )
-            .group_by(filtered_data.c.agent_name)
-            .cte("agent_totals")
+            .distinct()
+            .cte("filtered_agents")
         )
+
+        total_count = db.scalar(
+            select(func.count()).select_from(filtered_agents)
+        ) or 0
+
+        global_outstanding = build_global_outstanding_cte()
 
         status_counts = (
             select(
@@ -188,10 +193,7 @@ def get_commission_advances_listing(
                 filtered_data.c.status.isnot(None),
                 func.trim(filtered_data.c.status) != "",
             )
-            .group_by(
-                filtered_data.c.agent_name,
-                filtered_data.c.status,
-            )
+            .group_by(filtered_data.c.agent_name, filtered_data.c.status)
             .cte("status_counts")
         )
 
@@ -208,50 +210,20 @@ def get_commission_advances_listing(
         )
 
         priority_expression = case(
-            (
-                filtered_data.c.status
-                == CommissionAdvanceStatus.WAGE_GARNISHMENT.value,
-                1,
-            ),
-            (
-                filtered_data.c.status
-                == CommissionAdvanceStatus.PENDING.value,
-                2,
-            ),
-            (
-                filtered_data.c.status
-                == CommissionAdvanceStatus.PENDING_PARTIAL.value,
-                3,
-            ),
-            (
-                filtered_data.c.status
-                == CommissionAdvanceStatus.PAID.value,
-                4,
-            ),
-            (
-                filtered_data.c.status
-                == CommissionAdvanceStatus.CANCELLED.value,
-                5,
-            ),
-            (
-                filtered_data.c.status
-                == CommissionAdvanceStatus.LEFT_ROA.value,
-                6,
-            ),
-            (
-                filtered_data.c.status
-                == CommissionAdvanceStatus.REPLACEMENT.value,
-                7,
-            ),
+            (filtered_data.c.status == CommissionAdvanceStatus.WAGE_GARNISHMENT.value, 1),
+            (filtered_data.c.status == CommissionAdvanceStatus.PENDING.value, 2),
+            (filtered_data.c.status == CommissionAdvanceStatus.PENDING_PARTIAL.value, 3),
+            (filtered_data.c.status == CommissionAdvanceStatus.PAID.value, 4),
+            (filtered_data.c.status == CommissionAdvanceStatus.CANCELLED.value, 5),
+            (filtered_data.c.status == CommissionAdvanceStatus.LEFT_ROA.value, 6),
+            (filtered_data.c.status == CommissionAdvanceStatus.REPLACEMENT.value, 7),
             else_=8,
         )
 
         agent_status_priority = (
             select(
                 filtered_data.c.agent_name,
-                func.min(priority_expression).label(
-                    "status_priority"
-                ),
+                func.min(priority_expression).label("status_priority"),
             )
             .group_by(filtered_data.c.agent_name)
             .cte("agent_status_priority")
@@ -266,41 +238,36 @@ def get_commission_advances_listing(
             .cte("agent_user_status")
         )
 
-        empty_json_object = cast(
-            literal("{}"),
-            JSONB,
-        )
+        empty_json_object = cast(literal("{}"), JSONB)
 
         listing_stmt = (
             select(
-                agent_totals.c.agent_name,
-                agent_totals.c.total_outstanding,
-                func.coalesce(
-                    status_breakdowns.c.status_breakdown,
-                    empty_json_object,
-                ).label("status_breakdown"),
+                filtered_agents.c.agent_name,
+                func.coalesce(global_outstanding.c.total_outstanding, 0).label("total_outstanding"),
+                func.coalesce(status_breakdowns.c.status_breakdown, empty_json_object).label("status_breakdown"),
                 agent_user_status.c.agent_status,
             )
-            .select_from(agent_totals)
+            .select_from(filtered_agents)
+            .outerjoin(
+                global_outstanding,
+                filtered_agents.c.agent_name == global_outstanding.c.agent_name,
+            )
             .outerjoin(
                 status_breakdowns,
-                agent_totals.c.agent_name
-                == status_breakdowns.c.agent_name,
+                filtered_agents.c.agent_name == status_breakdowns.c.agent_name,
             )
             .outerjoin(
                 agent_status_priority,
-                agent_totals.c.agent_name
-                == agent_status_priority.c.agent_name,
+                filtered_agents.c.agent_name == agent_status_priority.c.agent_name,
             )
             .outerjoin(
                 agent_user_status,
-                agent_totals.c.agent_name
-                == agent_user_status.c.agent_name,
+                filtered_agents.c.agent_name == agent_user_status.c.agent_name,
             )
             .order_by(
                 agent_status_priority.c.status_priority.asc(),
-                agent_totals.c.total_outstanding.desc(),
-                agent_totals.c.agent_name.asc(),
+                func.coalesce(global_outstanding.c.total_outstanding, 0).desc(),
+                filtered_agents.c.agent_name.asc(),
             )
             .limit(page_size)
             .offset(offset)
@@ -332,19 +299,13 @@ def get_commission_advances_listing(
             items.append(
                 {
                     "agent_name": row["agent_name"],
-                    "total_outstanding": float(
-                        row["total_outstanding"] or 0
-                    ),
+                    "total_outstanding": float(row["total_outstanding"] or 0),
                     "status_breakdown": ordered_breakdown,
                     "agent_status": row["agent_status"],
                 }
             )
 
-        total_pages = (
-            max(1, ceil(total_count / page_size))
-            if total_count
-            else 1
-        )
+        total_pages = max(1, ceil(total_count / page_size)) if total_count else 1
 
         return PaginationResponseWithCount[Dict[str, Any]](
             success=True,
@@ -360,15 +321,12 @@ def get_commission_advances_listing(
         )
 
     except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=str(exc),
-        ) from exc
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get(
     "/detail",
-    response_model=PaginationResponseWithCount[Dict[str, Any]],
+    response_model=CommissionAdvanceDetailResponse,
 )
 def get_commission_advances_detail(
     agent_name: str = Query(..., min_length=1),
@@ -379,11 +337,19 @@ def get_commission_advances_detail(
     try:
         ca = CommissionAdvance
         transaction = CommissionAdvanceTransaction
-
         offset = (page - 1) * page_size
 
         total_count = db.scalar(
             select(func.count(ca.id)).where(ca.agent_name == agent_name)
+        ) or 0
+
+        # Global outstanding is calculated independently from pagination.
+        # Do not sum the outstanding values of the returned CA items.
+        global_outstanding_cte = build_global_outstanding_cte()
+
+        global_outstanding = db.scalar(
+            select(global_outstanding_cte.c.total_outstanding)
+            .where(global_outstanding_cte.c.agent_name == agent_name)
         ) or 0
 
         paginated_ca_ids = (
@@ -411,7 +377,6 @@ def get_commission_advances_detail(
                 ca.paid_date,
                 ca.notes,
                 ca.status,
-
                 transaction.id.label("transaction_id"),
                 transaction.garnishment_id,
                 transaction.operation,
@@ -477,13 +442,13 @@ def get_commission_advances_detail(
             )
 
         items = list(items_by_id.values())
-
         total_pages = max(1, ceil(total_count / page_size)) if total_count else 1
 
-        return PaginationResponseWithCount[Dict[str, Any]](
+        return CommissionAdvanceDetailResponse(
             success=True,
-            data=PaginationData[Dict[str, Any]](
+            data=CommissionAdvanceDetailData(
                 total_count=total_count,
+                global_outstanding=float(global_outstanding or 0),
                 items=items,
             ),
             page=page,
@@ -495,7 +460,4 @@ def get_commission_advances_detail(
         )
 
     except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=str(exc),
-        ) from exc
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
