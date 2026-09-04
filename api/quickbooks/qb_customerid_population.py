@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from psycopg2.extras import execute_values
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-from services.account_hold_helper import (
+from services.quickbooks import (
     get_valid_quickbooks_connection,
     split_emails,
 )

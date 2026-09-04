@@ -10,7 +10,7 @@ import requests
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
-from services.account_hold_helper import get_valid_quickbooks_connection
+from services.quickbooks import get_valid_quickbooks_connection
 from models.quickbooks import QuickbooksInvoice
 from models.brokerage_engine_users import BrokerageEngineUser
 from sqlalchemy.orm import Session
@@ -294,7 +294,6 @@ def process_invoice_event(
 
 @router.post("/webhooks/quickbooks")
 async def quickbooks_invoice_webhook(request: Request):
-    """QuickBooks Invoice Webhook Endpoint — legacy eventNotifications format."""
     print("webhook :)")
 
     if QB_WEBHOOK_VERIFIER_TOKEN:
@@ -313,8 +312,17 @@ async def quickbooks_invoice_webhook(request: Request):
     logger.info(json.dumps(payload, indent=2, default=str))
     logger.info("=========== QUICKBOOKS WEBHOOK PAYLOAD END ===========")
 
-    event_notifications = payload.get("eventNotifications", [])
-    logger.info(f"QuickBooks Invoice Webhook Received - Notifications: {len(event_notifications)}")
+    # QuickBooks now sends a list of CloudEvents
+    if not isinstance(payload, list):
+        logger.warning("Unexpected QuickBooks webhook payload format")
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "success",
+                "message": "Webhook received",
+                "processed": 0,
+            },
+        )
 
     db = next(get_db())
     conn = db.connection().connection
@@ -323,60 +331,76 @@ async def quickbooks_invoice_webhook(request: Request):
 
     if not qb_connection:
         logger.error("Failed to get QuickBooks connection")
-        raise HTTPException(status_code=500, detail="QuickBooks connection not available")
+        raise HTTPException(
+            status_code=500,
+            detail="QuickBooks connection not available",
+        )
 
     logger.info(f"Using QuickBooks Realm: {qb_connection['realm_id']}")
 
     try:
         results = []
 
-        for notification in event_notifications:
-            realm_id = notification.get("realmId")
+        for event in payload:
+            event_type = event.get("type", "")
+            entity_id = event.get("intuitentityid")
+            realm_id = event.get("intuitaccountid")
 
-            if realm_id != qb_connection["realm_id"]:
+            # Example:
+            # qbo.invoice.updated.v1
+            if not event_type.startswith("qbo.invoice."):
+                logger.info(f"Skipping event type: {event_type}")
+                continue
+
+            if not entity_id:
+                logger.warning("No entity id in event, skipping")
+                continue
+
+            if str(realm_id) != str(qb_connection["realm_id"]):
                 logger.warning(
-                    f"Notification realmId {realm_id} does not match "
+                    f"Event realmId {realm_id} does not match "
                     f"configured realm {qb_connection['realm_id']} — skipping"
                 )
                 continue
 
-            entities = notification.get("dataChangeEvent", {}).get("entities", [])
+            if ".created." in event_type:
+                operation = "create"
+            elif ".updated." in event_type:
+                operation = "update"
+            elif ".deleted." in event_type:
+                operation = "delete"
+            else:
+                logger.warning(f"Unsupported event type: {event_type}")
+                continue
 
-            for entity in entities:
-                entity_name = entity.get("name", "")
-                entity_id = entity.get("id")
-                operation = entity.get("operation", "").lower()  # "Update" -> "update"
+            logger.info(
+                f"Processing Invoice {operation.upper()} - ID: {entity_id}"
+            )
 
-                if entity_name != "Invoice":
-                    logger.info(f"Skipping {entity_name} event")
-                    continue
+            result = process_invoice_event(
+                db=db,
+                qb_connection=qb_connection,
+                invoice_id=str(entity_id),
+                operation=operation,
+            )
 
-                if not entity_id:
-                    logger.warning("No entity id in event, skipping")
-                    continue
+            results.append(result)
 
-                logger.info(f"Processing Invoice {operation.upper()} - ID: {entity_id}")
-
-                result = process_invoice_event(
-                    db=db,
-                    qb_connection=qb_connection,
-                    invoice_id=entity_id,
-                    operation=operation,
-                )
-
-                results.append(result)
-                logger.info(f"Result: {result['message']}")
+            logger.info(f"Result: {result['message']}")
 
         successful = sum(1 for r in results if r["success"])
         failed = sum(1 for r in results if not r["success"])
         skipped = sum(
-            1 for r in results
+            1
+            for r in results
             if r["success"] and not r.get("customer_exists", True)
         )
 
         logger.info(
             f"Summary - Total: {len(results)}, "
-            f"Success: {successful}, Failed: {failed}, Skipped: {skipped}"
+            f"Success: {successful}, "
+            f"Failed: {failed}, "
+            f"Skipped: {skipped}"
         )
 
         return JSONResponse(
@@ -388,7 +412,7 @@ async def quickbooks_invoice_webhook(request: Request):
                 "successful": successful,
                 "failed": failed,
                 "skipped": skipped,
-            }
+            },
         )
 
     except Exception as e:

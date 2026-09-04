@@ -3,7 +3,7 @@ from fastapi.responses import RedirectResponse
 from datetime import datetime, timezone, timedelta
 from sqlalchemy.orm import Session
 from db import get_db
-from services.account_hold_helper import (
+from services.quickbooks import (
     build_frontend_redirect,
     build_quickbooks_auth_url,
     exchange_code_for_tokens,
@@ -135,32 +135,38 @@ async def quickbooks_token_status(db: Session = Depends(get_db)):
         return {
             "connected": False,
             "status": "reconnect_required",
-            "message": "QuickBooks is not connected"
+            "message": "QuickBooks is not connected",
         }
 
+    expires_at = qb.get("expires_at")
+    now = datetime.now(timezone.utc)
+
+    if expires_at and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+    print("QB expires_at:", expires_at)
+    print("Current UTC:", now)
+
+    # Token still valid according to stored expiry
+    if expires_at and expires_at > now + timedelta(minutes=5):
+        return {
+            "connected": True,
+            "status": "valid",
+            "realm_id": qb["realm_id"],
+            "expires_at": expires_at.isoformat(),
+            "message": "Access token has not expired",
+        }
+
+    # Access token expired / close to expiry
     try:
-        expires_at = qb.get("expires_at")
-        now = datetime.now(timezone.utc)
-
-        if expires_at is not None:
-            if expires_at.tzinfo is None:
-                expires_at = expires_at.replace(tzinfo=timezone.utc)
-
-            if expires_at > now + timedelta(minutes=5):
-                return {
-                    "connected": True,
-                    "status": "valid",
-                    "realm_id": qb["realm_id"],
-                    "message": "Access token is valid"
-                }
-
         qb = await refresh_quickbooks_tokens(raw_conn, qb)
 
         return {
             "connected": True,
             "status": "refreshed",
             "realm_id": qb["realm_id"],
-            "message": "Access token refreshed successfully"
+            "expires_at": qb["expires_at"].isoformat() if qb.get("expires_at") else None,
+            "message": "Access token refreshed successfully",
         }
 
     except HTTPException as exc:
@@ -170,17 +176,6 @@ async def quickbooks_token_status(db: Session = Depends(get_db)):
             "connected": False,
             "status": "reconnect_required",
             "realm_id": qb.get("realm_id"),
-            "message": "QuickBooks reconnect required",
-            "error": exc.detail
-        }
-
-    except Exception as exc:
-        db.rollback()
-
-        return {
-            "connected": False,
-            "status": "reconnect_required",
-            "realm_id": qb.get("realm_id"),
-            "message": "QuickBooks reconnect required",
-            "error": str(exc)
+            "message": "Refresh token is invalid or expired. QuickBooks reconnect required.",
+            "error": exc.detail,
         }

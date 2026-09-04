@@ -5,7 +5,7 @@ from psycopg2.extras import execute_batch, Json
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from db import get_db
-from services.account_hold_helper import fetch_ar_balance
+from services.quickbooks import fetch_ar_balance
 
 router = APIRouter()
 
