@@ -1,53 +1,42 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import String, cast, select
 from sqlalchemy.orm import Session
 
 from db import get_db
-from common.response import Response
-
-from api.listing.account_hold.base import (
-    OpenInvoiceItem,
-    AccountHoldDetailData,
-    ARBalanceItem,
-    TransactionItem,
-)
 
 from models.brokerage_engine_users import BrokerageEngineUser
 from models.quickbooks import QuickbooksInvoice
-from models.skyslope.sale import Sale
 
 from api.listing.account_hold.utils import (
-    build_matched_transactions_subquery,
-    build_latest_reconciliation_subquery,
+    build_agent_transactions_subquery,
 )
 
 
 router = APIRouter()
 
 
-def has_account_hold_tag(agenttags):
-    if not agenttags:
-        return False
-
-    return "AccountHold" in str(agenttags)
-
-
 def fetch_agent_by_customer_id(
     db: Session,
-    customer_id: int,
+    customer_id: str,
 ) -> dict | None:
     statement = (
         select(
+            BrokerageEngineUser.agent_identifier,
             BrokerageEngineUser.display_name,
             BrokerageEngineUser.roa_email,
-            BrokerageEngineUser.qb_customerid,
             BrokerageEngineUser.agenttags,
+            BrokerageEngineUser.qb_customerid,
         )
         .where(
-            BrokerageEngineUser.qb_customerid
-            == customer_id
+            cast(
+                BrokerageEngineUser.qb_customerid,
+                String,
+            )
+            == str(
+                customer_id
+            )
         )
         .limit(1)
     )
@@ -56,265 +45,387 @@ def fetch_agent_by_customer_id(
         statement
     ).mappings().first()
 
-    return dict(row) if row else None
+    return (
+        dict(row)
+        if row
+        else None
+    )
 
 
 def fetch_agent_detail_transactions(
     db: Session,
-    email: str,
-    display_name: str,
-) -> list[dict]:
-    target_emails = [email] if email else []
-    target_names = [display_name] if display_name else []
-
-    if not target_emails and not target_names:
-        return []
-
-    matched_transactions = (
-        build_matched_transactions_subquery(
-            target_emails=target_emails,
-            target_names=target_names,
+    agent_identifier,
+) -> tuple[
+    list[dict],
+    int,
+    int,
+    float,
+]:
+    if agent_identifier is None:
+        return (
+            [],
+            0,
+            0,
+            0.0,
         )
-    )
 
-    latest_reconciliation = (
-        build_latest_reconciliation_subquery()
+    agent_transactions = (
+        build_agent_transactions_subquery(
+            [
+                agent_identifier
+            ]
+        )
     )
 
     statement = (
         select(
-            matched_transactions.c.transaction_id.label(
-                "transaction_identifier_transactionid"
-            ),
-            matched_transactions.c.property_address,
-            matched_transactions.c.source_name,
-            matched_transactions.c.source_status,
-            latest_reconciliation.c.be_source_table,
-            latest_reconciliation.c.saleguid,
-            Sale.url.label(
-                "skyslope_url"
-            ),
-            latest_reconciliation.c.be_transaction_specialist,
-            latest_reconciliation.c.skyslope_reviewer,
-            latest_reconciliation.c.be_gross_commission,
-            latest_reconciliation.c.skyslope_gross_commission,
-            latest_reconciliation.c.gross_commission_match,
-            latest_reconciliation.c.be_close_date_value,
-            latest_reconciliation.c.skyslope_close_date_value,
-            latest_reconciliation.c.close_date_match,
-            latest_reconciliation.c.be_status_value,
-            latest_reconciliation.c.skyslope_status_value,
-            latest_reconciliation.c.status_match,
-            latest_reconciliation.c.be_sale_price,
-            latest_reconciliation.c.skyslope_sale_price,
-            latest_reconciliation.c.sale_price_match,
-        )
-        .select_from(matched_transactions)
-        .outerjoin(
-            latest_reconciliation,
-            latest_reconciliation.c.transactionid
-            == matched_transactions.c.transaction_id,
-        )
-        .outerjoin(
-            Sale,
-            Sale.saleguid
-            == latest_reconciliation.c.saleguid,
+            agent_transactions
         )
         .order_by(
-            matched_transactions.c.property_address.asc(),
-            matched_transactions.c.transaction_id.asc(),
+            agent_transactions.c.transaction_id
         )
     )
 
-    try:
-        rows = db.execute(
-            statement
-        ).mappings().all()
+    rows = db.execute(
+        statement
+    ).mappings().all()
 
-        return [dict(row) for row in rows]
+    transactions = []
 
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "Detail transaction query failed: "
-                f"{str(e)}"
-            ),
+    transaction_ids = set()
+    closed_transaction_ids = set()
+
+    total_commission_earned = 0.0
+
+    for row in rows:
+        transaction_id = row.get(
+            "transaction_id"
         )
 
+        if transaction_id is not None:
+            transaction_ids.add(
+                transaction_id
+            )
 
-def fetch_agent_ar_balance(
+        is_closed = bool(
+            row.get(
+                "is_closed"
+            )
+        )
+
+        agent_net = float(
+            row.get(
+                "agent_net"
+            )
+            or 0
+        )
+
+        if is_closed:
+            if transaction_id is not None:
+                closed_transaction_ids.add(
+                    transaction_id
+                )
+
+            total_commission_earned += (
+                agent_net
+            )
+
+        transaction_flags: list[str] = []
+
+        if bool(
+            row.get(
+                "has_transaction_mismatch"
+            )
+        ):
+            transaction_flags.append(
+                "transaction_mismatch"
+            )
+
+        transactions.append(
+            {
+                "transaction_id": (
+                    str(
+                        transaction_id
+                    )
+                    if transaction_id
+                    is not None
+                    else None
+                ),
+
+                "property_address": row.get(
+                    "property_address"
+                ),
+
+                "transaction_status": row.get(
+                    "source_status"
+                ),
+
+                "agent_net": (
+                    agent_net
+                ),
+
+                "saleguid": (
+                    str(
+                        row[
+                            "saleguid"
+                        ]
+                    )
+                    if row.get(
+                        "saleguid"
+                    )
+                    is not None
+                    else None
+                ),
+
+                "be_source_table": row.get(
+                    "be_source_table"
+                ),
+
+                "be_transaction_specialist": row.get(
+                    "be_transaction_specialist"
+                ),
+
+                "skyslope_reviewer": row.get(
+                    "skyslope_reviewer"
+                ),
+
+                "transaction_flags": (
+                    transaction_flags
+                ),
+
+                "mismatch_details": {
+                    "gross_commission": {
+                        "be_value": (
+                            float(
+                                row[
+                                    "be_gross_commission"
+                                ]
+                            )
+                            if row.get(
+                                "be_gross_commission"
+                            )
+                            is not None
+                            else None
+                        ),
+
+                        "skyslope_value": (
+                            float(
+                                row[
+                                    "skyslope_gross_commission"
+                                ]
+                            )
+                            if row.get(
+                                "skyslope_gross_commission"
+                            )
+                            is not None
+                            else None
+                        ),
+
+                        "match": row.get(
+                            "gross_commission_match"
+                        ),
+                    },
+
+                    "close_date": {
+                        "be_value": row.get(
+                            "be_close_date_value"
+                        ),
+
+                        "skyslope_value": row.get(
+                            "skyslope_close_date_value"
+                        ),
+
+                        "match": row.get(
+                            "close_date_match"
+                        ),
+                    },
+
+                    "status": {
+                        "be_value": row.get(
+                            "be_status_value"
+                        ),
+
+                        "skyslope_value": row.get(
+                            "skyslope_status_value"
+                        ),
+
+                        "match": row.get(
+                            "status_match"
+                        ),
+                    },
+
+                    "sale_price": {
+                        "be_value": (
+                            float(
+                                row[
+                                    "be_sale_price"
+                                ]
+                            )
+                            if row.get(
+                                "be_sale_price"
+                            )
+                            is not None
+                            else None
+                        ),
+
+                        "skyslope_value": (
+                            float(
+                                row[
+                                    "skyslope_sale_price"
+                                ]
+                            )
+                            if row.get(
+                                "skyslope_sale_price"
+                            )
+                            is not None
+                            else None
+                        ),
+
+                        "match": row.get(
+                            "sale_price_match"
+                        ),
+                    },
+                },
+            }
+        )
+
+    transaction_count = len(
+        transaction_ids
+    )
+
+    closed_volume = len(
+        closed_transaction_ids
+    )
+
+    return (
+        transactions,
+        transaction_count,
+        closed_volume,
+        total_commission_earned,
+    )
+
+
+def fetch_agent_ar_details(
     db: Session,
-    customer_id: int,
-):
+    qb_customerid: int | str | None,
+) -> dict:
+    if qb_customerid is None:
+        return {
+            "total_open_balance": 0.0,
+            "invoice_count": 0,
+            "updated_at": None,
+            "invoices": [],
+        }
+
+    customer_id = str(
+        qb_customerid
+    )
+
     statement = (
         select(
             QuickbooksInvoice.invoice_id,
+            QuickbooksInvoice.customer_id,
             QuickbooksInvoice.balance,
-            QuickbooksInvoice.total_amt,
-            QuickbooksInvoice.due_date,
-            QuickbooksInvoice.txn_date,
-            QuickbooksInvoice.doc_number,
+            QuickbooksInvoice.updated_at,
         )
         .where(
             QuickbooksInvoice.customer_id
-            == str(customer_id)
+            == customer_id,
+            QuickbooksInvoice.balance
+            > 0,
         )
         .order_by(
-            QuickbooksInvoice.due_date.asc().nullslast()
+            QuickbooksInvoice.updated_at.desc()
         )
     )
 
-    try:
-        invoice_rows = db.execute(
-            statement
-        ).mappings().all()
+    rows = db.execute(
+        statement
+    ).mappings().all()
 
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "AR balance lookup failed: "
-                f"{str(e)}"
-            ),
-        )
-
-    if not invoice_rows:
-        return None, False
-
-    total_balance = sum(
-        float(row["balance"] or 0)
-        for row in invoice_rows
-    )
-
-    has_ar_balance = total_balance > 0
-
-    open_invoices = []
-
-    for row in invoice_rows:
-        invoice_balance = float(
-            row["balance"] or 0
-        )
-
-        if invoice_balance <= 0:
-            continue
-
-        open_invoices.append(
-            OpenInvoiceItem(
-                balance=row["balance"],
-                due_date=row["due_date"],
-                txn_date=row["txn_date"],
-                total_amt=row["total_amt"],
-                doc_number=row["doc_number"],
-                invoice_id=row["invoice_id"],
+    total_open_balance = sum(
+        float(
+            row.get(
+                "balance"
             )
+            or 0
         )
-
-    ar_balance_row = ARBalanceItem(
-        balance=total_balance,
-        open_invoices=open_invoices,
+        for row in rows
     )
 
-    return ar_balance_row, has_ar_balance
-
-
-def build_transaction_flags(
-    row: dict,
-) -> list[str]:
-    if row.get("saleguid") is None:
-        return ["no_skyslope_file_id"]
-
-    transaction_flags = []
-
-    match_mapping = {
-        "gross_commission_match": "gross_commission",
-        "close_date_match": "close_date",
-        "status_match": "status",
-        "sale_price_match": "sale_price",
-    }
-
-    for db_field, response_flag in (
-        match_mapping.items()
-    ):
-        value = row.get(db_field)
-
-        if (
-            value is not None
-            and str(value).strip().lower()
-            != "match"
-        ):
-            transaction_flags.append(
-                response_flag
-            )
-
-    return transaction_flags
-
-
-def build_mismatch_details(
-    row: dict,
-    transaction_flags: list[str],
-) -> dict:
-    if row.get("saleguid") is None:
-        return {}
-
-    mismatch_field_map = {
-        "gross_commission": {
-            "be_key": "be_gross_commission",
-            "skyslope_key": (
-                "skyslope_gross_commission"
+    invoices = [
+        {
+            "invoice_id": (
+                str(
+                    row[
+                        "invoice_id"
+                    ]
+                )
+                if row.get(
+                    "invoice_id"
+                )
+                is not None
+                else None
             ),
-        },
-        "close_date": {
-            "be_key": "be_close_date_value",
-            "skyslope_key": (
-                "skyslope_close_date_value"
-            ),
-        },
-        "status": {
-            "be_key": "be_status_value",
-            "skyslope_key": (
-                "skyslope_status_value"
-            ),
-        },
-        "sale_price": {
-            "be_key": "be_sale_price",
-            "skyslope_key": (
-                "skyslope_sale_price"
-            ),
-        },
-    }
 
-    mismatch_details = {}
-
-    for flag in transaction_flags:
-        config = mismatch_field_map.get(flag)
-
-        if not config:
-            continue
-
-        mismatch_details[flag] = {
-            "be": row.get(
-                config["be_key"]
+            "balance": float(
+                row.get(
+                    "balance"
+                )
+                or 0
             ),
-            "skyslope": row.get(
-                config["skyslope_key"]
+
+            "updated_at": row.get(
+                "updated_at"
             ),
         }
 
-    return mismatch_details
+        for row in rows
+    ]
+
+    updated_at = (
+        rows[
+            0
+        ].get(
+            "updated_at"
+        )
+        if rows
+        else None
+    )
+
+    return {
+        "total_open_balance": (
+            total_open_balance
+        ),
+
+        "invoice_count": len(
+            invoices
+        ),
+
+        "updated_at": (
+            updated_at
+        ),
+
+        "invoices": (
+            invoices
+        ),
+    }
 
 
 @router.get(
     "/account-hold/detail/{customer_id}",
-    response_model=Response[AccountHoldDetailData],
 )
 def get_account_hold_detail(
-    customer_id: int,
-    db: Session = Depends(get_db),
+    customer_id: str,
+    db: Session = Depends(
+        get_db
+    ),
 ):
-    agent = fetch_agent_by_customer_id(
-        db=db,
-        customer_id=customer_id,
+    agent = (
+        fetch_agent_by_customer_id(
+            db=db,
+            customer_id=customer_id,
+        )
     )
 
     if not agent:
@@ -323,34 +434,55 @@ def get_account_hold_detail(
             detail="Agent not found",
         )
 
-    email = agent.get(
-        "roa_email"
-    ) or ""
+    (
+        transactions,
+        transaction_count,
+        closed_volume,
+        total_commission_earned,
+    ) = fetch_agent_detail_transactions(
+        db=db,
+        agent_identifier=agent.get(
+            "agent_identifier"
+        ),
+    )
 
-    display_name = agent.get(
-        "display_name"
-    ) or ""
-
-    transaction_rows = (
-        fetch_agent_detail_transactions(
+    ar_details = (
+        fetch_agent_ar_details(
             db=db,
-            email=email,
-            display_name=display_name,
+            qb_customerid=agent.get(
+                "qb_customerid"
+            ),
         )
     )
 
-    ar_balance_row, has_ar_balance = (
-        fetch_agent_ar_balance(
-            db=db,
-            customer_id=customer_id,
+    has_account_hold = (
+        "AccountHold"
+        in (
+            agent.get(
+                "agenttags"
+            )
+            or ""
         )
     )
 
-    has_account_hold = has_account_hold_tag(
-        agent.get("agenttags")
+    has_ar_balance = (
+        ar_details[
+            "total_open_balance"
+        ]
+        > 0
     )
 
-    broker_flags = []
+    has_transaction_mismatch = any(
+        "transaction_mismatch"
+        in transaction.get(
+            "transaction_flags",
+            [],
+        )
+        for transaction
+        in transactions
+    )
+
+    broker_flags: list[str] = []
 
     if has_account_hold:
         broker_flags.append(
@@ -362,92 +494,77 @@ def get_account_hold_detail(
             "ar_balance"
         )
 
-    transactions = []
-    seen_transactions = set()
+    transaction_flags: list[str] = []
 
-    for row in transaction_rows:
-        transaction_id = row.get(
-            "transaction_identifier_transactionid"
+    if has_transaction_mismatch:
+        transaction_flags.append(
+            "transaction_mismatch"
         )
 
-        dedupe_key = (
-            transaction_id,
-            row.get("source_name"),
-        )
+    return {
+        "success": True,
 
-        if dedupe_key in seen_transactions:
-            continue
+        "data": {
+            "agent_identifier": (
+                str(
+                    agent[
+                        "agent_identifier"
+                    ]
+                )
+                if agent.get(
+                    "agent_identifier"
+                )
+                is not None
+                else None
+            ),
 
-        transaction_flags = (
-            build_transaction_flags(row)
-        )
-
-        mismatch_details = (
-            build_mismatch_details(
-                row=row,
-                transaction_flags=transaction_flags,
-            )
-        )
-
-        transactions.append(
-            TransactionItem(
-                transactionid=transaction_id,
-                property_address=row.get(
-                    "property_address"
-                ),
-                source_table=(
-                    row.get("be_source_table")
-                    or row.get("source_name")
-                ),
-                status=row.get(
-                    "source_status"
-                ),
-                skyslope_url=row.get(
-                    "skyslope_url"
-                ),
-                be_transaction_specialist=(
-                    row.get(
-                        "be_transaction_specialist"
-                    )
-                ),
-                skyslope_reviewer=row.get(
-                    "skyslope_reviewer"
-                ),
-                transaction_flags=(
-                    transaction_flags
-                ),
-                mismatch_details=(
-                    mismatch_details
-                ),
-            )
-        )
-
-        seen_transactions.add(
-            dedupe_key
-        )
-
-    return Response(
-        data=AccountHoldDetailData(
-            display_name=agent.get(
+            "display_name": agent.get(
                 "display_name"
             ),
-            roa_email=agent.get(
+
+            "primary_emailaddress": agent.get(
                 "roa_email"
             ),
-            customer_id=(
+
+            "qb_customerid": (
                 str(
-                    agent["qb_customerid"]
+                    agent[
+                        "qb_customerid"
+                    ]
                 )
                 if agent.get(
                     "qb_customerid"
-                ) is not None
+                )
+                is not None
                 else None
             ),
-            transaction_count=len(
+
+            "broker_flags": (
+                broker_flags
+            ),
+
+            "transaction_flags": (
+                transaction_flags
+            ),
+
+            "transaction_count": (
+                transaction_count
+            ),
+
+            "closed_volume": (
+                closed_volume
+            ),
+
+            "total_commission_earned": (
+                total_commission_earned
+            ),
+
+            "ar_balance": (
+                ar_details
+            ),
+
+            "transactions": (
                 transactions
             ),
-            broker_flags=broker_flags,
-            ar_balance=ar_balance_row,
-            transactions=transactions,
-        )
-    )
+        },
+    }
