@@ -34,90 +34,53 @@ def fetch_agent_by_customer_id(
                 BrokerageEngineUser.qb_customerid,
                 String,
             )
-            == str(
-                customer_id
-            )
+            == str(customer_id)
         )
         .limit(1)
     )
 
-    row = db.execute(
-        statement
-    ).mappings().first()
+    row = db.execute(statement).mappings().first()
 
-    return (
-        dict(row)
-        if row
-        else None
-    )
+    return dict(row) if row else None
 
 
 def fetch_agent_detail_transactions(
     db: Session,
     agent_identifier,
-) -> tuple[
-    list[dict],
-    int,
-    int,
-    float,
-]:
+) -> tuple[list[dict], int, int, float]:
     if agent_identifier is None:
-        return (
-            [],
-            0,
-            0,
-            0.0,
-        )
+        return [], 0, 0, 0.0
 
-    agent_transactions = (
-        build_agent_transactions_subquery(
-            [
-                agent_identifier
-            ]
-        )
+    agent_transactions = build_agent_transactions_subquery(
+        [agent_identifier]
     )
 
     statement = (
-        select(
-            agent_transactions
-        )
+        select(agent_transactions)
         .order_by(
             agent_transactions.c.transaction_id
         )
     )
 
-    rows = db.execute(
-        statement
-    ).mappings().all()
+    rows = db.execute(statement).mappings().all()
 
     transactions = []
-
     transaction_ids = set()
     closed_transaction_ids = set()
-
     total_commission_earned = 0.0
 
     for row in rows:
-        transaction_id = row.get(
-            "transaction_id"
-        )
+        transaction_id = row.get("transaction_id")
 
         if transaction_id is not None:
-            transaction_ids.add(
-                transaction_id
-            )
+            transaction_ids.add(transaction_id)
 
         is_closed = bool(
-            row.get(
-                "is_closed"
-            )
+            row.get("is_closed")
         )
 
         agent_net = float(
-            row.get(
-                "agent_net"
-            )
-            or 0
+            row.get("agent_net") or 0
         )
 
         if is_closed:
@@ -126,16 +89,12 @@ def fetch_agent_detail_transactions(
                     transaction_id
                 )
 
-            total_commission_earned += (
-                agent_net
-            )
+            total_commission_earned += agent_net
 
         transaction_flags: list[str] = []
 
         if bool(
-            row.get(
-                "has_transaction_mismatch"
-            )
+            row.get("has_transaction_mismatch")
         ):
             transaction_flags.append(
                 "transaction_mismatch"
@@ -144,143 +103,84 @@ def fetch_agent_detail_transactions(
         transactions.append(
             {
                 "transaction_id": (
-                    str(
-                        transaction_id
-                    )
-                    if transaction_id
-                    is not None
+                    str(transaction_id)
+                    if transaction_id is not None
                     else None
                 ),
-
                 "property_address": row.get(
                     "property_address"
                 ),
-
                 "transaction_status": row.get(
                     "source_status"
                 ),
-
-                "agent_net": (
-                    agent_net
-                ),
-
+                "agent_net": agent_net,
                 "saleguid": (
-                    str(
-                        row[
-                            "saleguid"
-                        ]
-                    )
-                    if row.get(
-                        "saleguid"
-                    )
-                    is not None
+                    str(row["saleguid"])
+                    if row.get("saleguid") is not None
                     else None
                 ),
-
+                "skyslope_url": row.get(
+                    "skyslope_url"
+                ),
                 "be_source_table": row.get(
                     "be_source_table"
                 ),
-
                 "be_transaction_specialist": row.get(
                     "be_transaction_specialist"
                 ),
-
                 "skyslope_reviewer": row.get(
                     "skyslope_reviewer"
                 ),
-
-                "transaction_flags": (
-                    transaction_flags
-                ),
-
+                "transaction_flags": transaction_flags,
                 "mismatch_details": {
                     "gross_commission": {
                         "be_value": (
-                            float(
-                                row[
-                                    "be_gross_commission"
-                                ]
-                            )
-                            if row.get(
-                                "be_gross_commission"
-                            )
-                            is not None
+                            float(row["be_gross_commission"])
+                            if row.get("be_gross_commission") is not None
                             else None
                         ),
-
                         "skyslope_value": (
-                            float(
-                                row[
-                                    "skyslope_gross_commission"
-                                ]
-                            )
-                            if row.get(
-                                "skyslope_gross_commission"
-                            )
-                            is not None
+                            float(row["skyslope_gross_commission"])
+                            if row.get("skyslope_gross_commission") is not None
                             else None
                         ),
-
                         "match": row.get(
                             "gross_commission_match"
                         ),
                     },
-
                     "close_date": {
                         "be_value": row.get(
                             "be_close_date_value"
                         ),
-
                         "skyslope_value": row.get(
                             "skyslope_close_date_value"
                         ),
-
                         "match": row.get(
                             "close_date_match"
                         ),
                     },
-
                     "status": {
                         "be_value": row.get(
                             "be_status_value"
                         ),
-
                         "skyslope_value": row.get(
                             "skyslope_status_value"
                         ),
-
                         "match": row.get(
                             "status_match"
                         ),
                     },
-
                     "sale_price": {
                         "be_value": (
-                            float(
-                                row[
-                                    "be_sale_price"
-                                ]
-                            )
-                            if row.get(
-                                "be_sale_price"
-                            )
-                            is not None
+                            float(row["be_sale_price"])
+                            if row.get("be_sale_price") is not None
                             else None
                         ),
-
                         "skyslope_value": (
-                            float(
-                                row[
-                                    "skyslope_sale_price"
-                                ]
-                            )
-                            if row.get(
-                                "skyslope_sale_price"
-                            )
-                            is not None
+                            float(row["skyslope_sale_price"])
+                            if row.get("skyslope_sale_price") is not None
                             else None
                         ),
-
                         "match": row.get(
                             "sale_price_match"
                         ),
@@ -317,9 +217,7 @@ def fetch_agent_ar_details(
             "invoices": [],
         }
 
-    customer_id = str(
-        qb_customerid
-    )
+    customer_id = str(qb_customerid)
 
     statement = (
         select(
@@ -329,86 +227,49 @@ def fetch_agent_ar_details(
             QuickbooksInvoice.updated_at,
         )
         .where(
-            QuickbooksInvoice.customer_id
-            == customer_id,
-            QuickbooksInvoice.balance
-            > 0,
+            QuickbooksInvoice.customer_id == customer_id,
+            QuickbooksInvoice.balance > 0,
         )
         .order_by(
             QuickbooksInvoice.updated_at.desc()
         )
     )
 
-    rows = db.execute(
-        statement
-    ).mappings().all()
+    rows = db.execute(statement).mappings().all()
 
     total_open_balance = sum(
-        float(
-            row.get(
-                "balance"
-            )
-            or 0
-        )
+        float(row.get("balance") or 0)
         for row in rows
     )
 
     invoices = [
         {
             "invoice_id": (
-                str(
-                    row[
-                        "invoice_id"
-                    ]
-                )
-                if row.get(
-                    "invoice_id"
-                )
-                is not None
+                str(row["invoice_id"])
+                if row.get("invoice_id") is not None
                 else None
             ),
-
             "balance": float(
-                row.get(
-                    "balance"
-                )
-                or 0
+                row.get("balance") or 0
             ),
-
             "updated_at": row.get(
                 "updated_at"
             ),
         }
-
         for row in rows
     ]
 
     updated_at = (
-        rows[
-            0
-        ].get(
-            "updated_at"
-        )
+        rows[0].get("updated_at")
         if rows
         else None
     )
 
     return {
-        "total_open_balance": (
-            total_open_balance
-        ),
-
-        "invoice_count": len(
-            invoices
-        ),
-
-        "updated_at": (
-            updated_at
-        ),
-
-        "invoices": (
-            invoices
-        ),
+        "total_open_balance": total_open_balance,
+        "invoice_count": len(invoices),
+        "updated_at": updated_at,
+        "invoices": invoices,
     }
 
 
@@ -417,15 +278,11 @@ def fetch_agent_ar_details(
 )
 def get_account_hold_detail(
     customer_id: str,
-    db: Session = Depends(
-        get_db
-    ),
+    db: Session = Depends(get_db),
 ):
-    agent = (
-        fetch_agent_by_customer_id(
-            db=db,
-            customer_id=customer_id,
-        )
+    agent = fetch_agent_by_customer_id(
+        db=db,
+        customer_id=customer_id,
     )
 
     if not agent:
@@ -446,30 +303,23 @@ def get_account_hold_detail(
         ),
     )
 
-    ar_details = (
-        fetch_agent_ar_details(
-            db=db,
-            qb_customerid=agent.get(
-                "qb_customerid"
-            ),
-        )
+    ar_details = fetch_agent_ar_details(
+        db=db,
+        qb_customerid=agent.get(
+            "qb_customerid"
+        ),
     )
 
     has_account_hold = (
         "AccountHold"
         in (
-            agent.get(
-                "agenttags"
-            )
+            agent.get("agenttags")
             or ""
         )
     )
 
     has_ar_balance = (
-        ar_details[
-            "total_open_balance"
-        ]
-        > 0
+        ar_details["total_open_balance"] > 0
     )
 
     has_transaction_mismatch = any(
@@ -478,8 +328,7 @@ def get_account_hold_detail(
             "transaction_flags",
             [],
         )
-        for transaction
-        in transactions
+        for transaction in transactions
     )
 
     broker_flags: list[str] = []
@@ -503,68 +352,29 @@ def get_account_hold_detail(
 
     return {
         "success": True,
-
         "data": {
             "agent_identifier": (
-                str(
-                    agent[
-                        "agent_identifier"
-                    ]
-                )
-                if agent.get(
-                    "agent_identifier"
-                )
-                is not None
+                str(agent["agent_identifier"])
+                if agent.get("agent_identifier") is not None
                 else None
             ),
-
             "display_name": agent.get(
                 "display_name"
             ),
-
-            "primary_emailaddress": agent.get(
+            "roa_email": agent.get(
                 "roa_email"
             ),
-
             "qb_customerid": (
-                str(
-                    agent[
-                        "qb_customerid"
-                    ]
-                )
-                if agent.get(
-                    "qb_customerid"
-                )
-                is not None
+                str(agent["qb_customerid"])
+                if agent.get("qb_customerid") is not None
                 else None
             ),
-
-            "broker_flags": (
-                broker_flags
-            ),
-
-            "transaction_flags": (
-                transaction_flags
-            ),
-
-            "transaction_count": (
-                transaction_count
-            ),
-
-            "closed_volume": (
-                closed_volume
-            ),
-
-            "total_commission_earned": (
-                total_commission_earned
-            ),
-
-            "ar_balance": (
-                ar_details
-            ),
-
-            "transactions": (
-                transactions
-            ),
+            "broker_flags": broker_flags,
+            "transaction_flags": transaction_flags,
+            "transaction_count": transaction_count,
+            "closed_volume": closed_volume,
+            "total_commission_earned": total_commission_earned,
+            "ar_balance": ar_details,
+            "transactions": transactions,
         },
     }

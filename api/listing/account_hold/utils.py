@@ -3,6 +3,7 @@ from sqlalchemy import String, and_, case, false, func, literal, or_, select, tr
 from models.brokerage_engine.sale_transactions import BESaleTransactions
 from models.brokerage_engine.other_income_transactions import BEOtherIncomeTransaction
 from models.reconciliation_data import ReconciliationData
+from models.skyslope.sale import Sale
 
 
 def normalize_agent_identifiers(agent_identifiers: list) -> list[str]:
@@ -30,73 +31,32 @@ def build_matched_transactions_subquery(target_agent_identifiers: list):
             .subquery("matched_transactions")
         )
 
-    buying_identifier_text = type_coerce(
-        BESaleTransactions.buying_agent_identifier,
-        String,
-    )
+    buying_identifier_text = type_coerce(BESaleTransactions.buying_agent_identifier, String)
+    listing_identifier_text = type_coerce(BESaleTransactions.listing_agent_identifier, String)
+    other_income_identifier_text = type_coerce(BEOtherIncomeTransaction.agents_identifier, String)
 
-    listing_identifier_text = type_coerce(
-        BESaleTransactions.listing_agent_identifier,
-        String,
-    )
-
-    other_income_identifier_text = type_coerce(
-        BEOtherIncomeTransaction.agents_identifier,
-        String,
-    )
-
-    tags = func.lower(
-        func.coalesce(
-            BESaleTransactions.tags,
-            "",
-        )
-    )
-
+    tags = func.lower(func.coalesce(BESaleTransactions.tags, ""))
     has_selling_side = tags.like("%sellingside%")
     has_listing_side = tags.like("%listingside%")
 
     buying_identifier_array = func.string_to_array(
-        func.lower(
-            func.replace(
-                func.coalesce(
-                    buying_identifier_text,
-                    "",
-                ),
-                " ",
-                "",
-            )
-        ),
+        func.lower(func.replace(func.coalesce(buying_identifier_text, ""), " ", "")),
         ",",
     )
 
     listing_identifier_array = func.string_to_array(
-        func.lower(
-            func.replace(
-                func.coalesce(
-                    listing_identifier_text,
-                    "",
-                ),
-                " ",
-                "",
-            )
-        ),
+        func.lower(func.replace(func.coalesce(listing_identifier_text, ""), " ", "")),
         ",",
     )
 
     split_buying_identifiers = (
-        func.unnest(
-            buying_identifier_array
-        )
-        .table_valued(
-            "agent_identifier"
-        )
+        func.unnest(buying_identifier_array)
+        .table_valued("agent_identifier")
         .render_derived()
         .lateral()
     )
 
-    buying_agent_identifier = func.trim(
-        split_buying_identifiers.c.agent_identifier
-    )
+    buying_agent_identifier = func.trim(split_buying_identifiers.c.agent_identifier)
 
     buying_agent_is_listing_agent = and_(
         has_listing_side,
@@ -124,32 +84,21 @@ def build_matched_transactions_subquery(target_agent_identifiers: list):
             buying_agent_net.label("agent_net"),
         )
         .select_from(BESaleTransactions)
-        .join(
-            split_buying_identifiers,
-            true(),
-        )
+        .join(split_buying_identifiers, true())
         .where(
             has_selling_side,
-            buying_agent_identifier.in_(
-                target_identifiers
-            ),
+            buying_agent_identifier.in_(target_identifiers),
         )
     )
 
     split_listing_identifiers = (
-        func.unnest(
-            listing_identifier_array
-        )
-        .table_valued(
-            "agent_identifier"
-        )
+        func.unnest(listing_identifier_array)
+        .table_valued("agent_identifier")
         .render_derived()
         .lateral()
     )
 
-    listing_agent_identifier = func.trim(
-        split_listing_identifiers.c.agent_identifier
-    )
+    listing_agent_identifier = func.trim(split_listing_identifiers.c.agent_identifier)
 
     listing_agent_is_buying_agent = and_(
         has_selling_side,
@@ -177,22 +126,15 @@ def build_matched_transactions_subquery(target_agent_identifiers: list):
             listing_agent_net.label("agent_net"),
         )
         .select_from(BESaleTransactions)
-        .join(
-            split_listing_identifiers,
-            true(),
-        )
+        .join(split_listing_identifiers, true())
         .where(
             has_listing_side,
-            listing_agent_identifier.in_(
-                target_identifiers
-            ),
+            listing_agent_identifier.in_(target_identifiers),
         )
     )
 
     normalized_other_income_identifier = func.lower(
-        func.trim(
-            other_income_identifier_text
-        )
+        func.trim(other_income_identifier_text)
     )
 
     other_income_matches = (
@@ -207,9 +149,7 @@ def build_matched_transactions_subquery(target_agent_identifiers: list):
         .where(
             other_income_identifier_text.is_not(None),
             other_income_identifier_text != "",
-            normalized_other_income_identifier.in_(
-                target_identifiers
-            ),
+            normalized_other_income_identifier.in_(target_identifiers),
         )
     )
 
@@ -220,14 +160,13 @@ def build_matched_transactions_subquery(target_agent_identifiers: list):
     ).subquery("matched_transactions")
 
 
-def build_latest_reconciliation_subquery(
-    matched_transactions,
-):
+def build_latest_reconciliation_subquery(matched_transactions):
     return (
         select(
             ReconciliationData.transactionid.label("transactionid"),
             ReconciliationData.be_source_table.label("be_source_table"),
             ReconciliationData.saleguid.label("saleguid"),
+            Sale.url.label("skyslope_url"),
             ReconciliationData.be_transaction_specialist.label("be_transaction_specialist"),
             ReconciliationData.skyslope_reviewer.label("skyslope_reviewer"),
             ReconciliationData.be_gross_commission.label("be_gross_commission"),
@@ -243,69 +182,49 @@ def build_latest_reconciliation_subquery(
             ReconciliationData.skyslope_sale_price.label("skyslope_sale_price"),
             ReconciliationData.sale_price_match.label("sale_price_match"),
         )
+        .select_from(ReconciliationData)
+        .outerjoin(
+            Sale,
+            Sale.saleguid == ReconciliationData.saleguid,
+        )
         .where(
-            ReconciliationData.transactionid
-            == matched_transactions.c.transaction_id
+            ReconciliationData.transactionid == matched_transactions.c.transaction_id
         )
         .order_by(
-            ReconciliationData.evaluated_at
-            .desc()
-            .nullslast()
+            ReconciliationData.evaluated_at.desc().nullslast()
         )
         .limit(1)
-        .lateral(
-            "latest_reconciliation"
-        )
+        .lateral("latest_reconciliation")
     )
 
 
-def build_mismatch_expression(
-    latest_reconciliation,
-):
+def build_mismatch_expression(latest_reconciliation):
     def not_match(column):
         return and_(
             column.is_not(None),
-            func.lower(
-                func.trim(column)
-            ) != "match",
+            func.lower(func.trim(column)) != "match",
         )
 
     return or_(
         latest_reconciliation.c.transactionid.is_(None),
-        not_match(
-            latest_reconciliation.c.gross_commission_match
-        ),
-        not_match(
-            latest_reconciliation.c.close_date_match
-        ),
-        not_match(
-            latest_reconciliation.c.status_match
-        ),
-        not_match(
-            latest_reconciliation.c.sale_price_match
-        ),
+        not_match(latest_reconciliation.c.gross_commission_match),
+        not_match(latest_reconciliation.c.close_date_match),
+        not_match(latest_reconciliation.c.status_match),
+        not_match(latest_reconciliation.c.sale_price_match),
     )
 
 
-def build_agent_transactions_subquery(
-    target_agent_identifiers: list,
-):
-    matched_transactions = (
-        build_matched_transactions_subquery(
-            target_agent_identifiers
-        )
+def build_agent_transactions_subquery(target_agent_identifiers: list):
+    matched_transactions = build_matched_transactions_subquery(
+        target_agent_identifiers
     )
 
-    latest_reconciliation = (
-        build_latest_reconciliation_subquery(
-            matched_transactions
-        )
+    latest_reconciliation = build_latest_reconciliation_subquery(
+        matched_transactions
     )
 
-    mismatch_expression = (
-        build_mismatch_expression(
-            latest_reconciliation
-        )
+    mismatch_expression = build_mismatch_expression(
+        latest_reconciliation
     )
 
     is_closed = (
@@ -329,37 +248,40 @@ def build_agent_transactions_subquery(
             matched_transactions.c.source_name,
             matched_transactions.c.agent_net,
             is_closed.label("is_closed"),
+
             latest_reconciliation.c.transactionid.label(
                 "reconciliation_transactionid"
             ),
             latest_reconciliation.c.be_source_table,
             latest_reconciliation.c.saleguid,
+            latest_reconciliation.c.skyslope_url,
             latest_reconciliation.c.be_transaction_specialist,
             latest_reconciliation.c.skyslope_reviewer,
+
             latest_reconciliation.c.be_gross_commission,
             latest_reconciliation.c.skyslope_gross_commission,
             latest_reconciliation.c.gross_commission_match,
+
             latest_reconciliation.c.be_close_date_value,
             latest_reconciliation.c.skyslope_close_date_value,
             latest_reconciliation.c.close_date_match,
+
             latest_reconciliation.c.be_status_value,
             latest_reconciliation.c.skyslope_status_value,
             latest_reconciliation.c.status_match,
+
             latest_reconciliation.c.be_sale_price,
             latest_reconciliation.c.skyslope_sale_price,
             latest_reconciliation.c.sale_price_match,
+
             mismatch_expression.label(
                 "has_transaction_mismatch"
             ),
         )
-        .select_from(
-            matched_transactions
-        )
+        .select_from(matched_transactions)
         .outerjoin(
             latest_reconciliation,
             true(),
         )
-        .subquery(
-            "agent_transactions"
-        )
+        .subquery("agent_transactions")
     )
