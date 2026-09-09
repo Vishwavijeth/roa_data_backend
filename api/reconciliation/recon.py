@@ -196,6 +196,11 @@ def build_base_reconciliation_subquery():
         else_=2,
     )
 
+    status_priority = case(
+        (func.lower(func.trim(rd.be_status)) == "cancelled", 1),
+        else_=0,
+    )
+
     saleguid_group_flags = (
         select(
             rd.saleguid.label("saleguid"),
@@ -230,7 +235,7 @@ def build_base_reconciliation_subquery():
         )
         .where(rd.saleguid.is_not(None))
         .distinct(rd.saleguid)
-        .order_by(rd.saleguid, source_priority, rd.transactionid)
+        .order_by(rd.saleguid, source_priority, status_priority, rd.transactionid)
         .cte("deduplicated_reconciliation")
     )
 

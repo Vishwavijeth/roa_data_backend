@@ -161,6 +161,11 @@ def apply_common_filters_orm(
 
         if office_state_conditions:
             conditions.append(or_(*office_state_conditions))
+        else:
+            # A state filter was supplied, but none of the supplied values
+            # could be resolved to a known state. Do not silently ignore
+            # the filter, because that would return the entire dataset.
+            conditions.append(False)
 
     if stage_name:
         normalized_stages = [

@@ -8,8 +8,8 @@ class CommissionAdvanceOperation(str, Enum):
     FEE = "Fee"
     ADJUSTMENT = "Adjustment"
     AMENDMENT = "Amendment"
-    WAGE_GARNISHMENT = "Wage Garnishment"
-    GARNISHMENT_BALANCE = "Garnishment Balance"
+    LEGAL_HOLD = "Legal Hold"
+    LEGAL_HOLD_BALANCE = "Legal-Hold Balance"
 
 
 class CommissionAdvanceTransactionType(str, Enum):
@@ -17,14 +17,14 @@ class CommissionAdvanceTransactionType(str, Enum):
     DEBIT = "Debit"
     STATUS = "Status"
 
-class CommissionAdvanceGarnishmentStatus(str, Enum):
+class CommissionAdvanceLegalHoldStatus(str, Enum):
     ACTIVE = "Active"
     SETTLED = "Settled"
 
 class CommissionAdvanceStatus(str, Enum):
     PENDING = "Pending"
     PENDING_PARTIAL = "Pending Partial"
-    WAGE_GARNISHMENT = "Wage Garnishment"
+    LEGAL_HOLD = "Legal Hold"
     REPLACEMENT = "Replacement"
     CANCELLED = "Cancelled"
     LEFT_ROA = "Left ROA"
@@ -39,6 +39,6 @@ class CommissionAdvanceStatus(str, Enum):
         return [
             cls.PENDING.value,
             cls.PENDING_PARTIAL.value,
-            cls.WAGE_GARNISHMENT.value,
+            cls.LEGAL_HOLD.value,
             cls.REPLACEMENT.value,
         ]
