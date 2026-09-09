@@ -10,7 +10,7 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.postgresql import UUID
-from api.listing.commission_advances.utils import CommissionAdvanceGarnishmentStatus
+from api.listing.commission_advances.utils import CommissionAdvanceLegalHoldStatus
 from db import Base
 
 
@@ -33,8 +33,8 @@ class CommissionAdvance(Base):
     saleguid = Column(UUID(as_uuid=True), nullable=True, index=True)
 
 
-class CommissionAdvanceGarnishment(Base):
-    __tablename__ = "commission_advance_garnishments"
+class CommissionAdvanceLegalHold(Base):
+    __tablename__ = "commission_advance_legalhold"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     agent_id = Column(UUID(as_uuid=True), nullable=False)
@@ -42,7 +42,7 @@ class CommissionAdvanceGarnishment(Base):
     source_ca_id = Column(Integer, ForeignKey("commission_advances1.id"), nullable=False)
     original_amount = Column(Numeric, nullable=False)
     outstanding_amount = Column(Numeric, nullable=False)
-    status = Column(String(20), nullable=False, default=CommissionAdvanceGarnishmentStatus.ACTIVE.value)
+    status = Column(String(20), nullable=False, default=CommissionAdvanceLegalHoldStatus.ACTIVE.value)
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
@@ -54,7 +54,7 @@ class CommissionAdvanceTransaction(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     ca_id = Column(Integer, ForeignKey("commission_advances1.id"), nullable=False)
-    garnishment_id = Column(Integer, ForeignKey("commission_advance_garnishments.id"), nullable=True)
+    legal_hold_id = Column(Integer, ForeignKey("commission_advance_legalhold.id"), nullable=True)
     operation = Column(String(30), nullable=False)
     type = Column(String(10), nullable=False)
     amount = Column(Numeric, nullable=False)
