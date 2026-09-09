@@ -79,7 +79,7 @@ def build_agent_base_subquery():
     ).subquery("agent_base")
 
 
-def apply_listing_filters(statement, base, search: str | None = None, account_hold: bool | None = None, ar_balance: bool | None = None, match_mode: Literal["and", "or"] = "and"):
+def apply_listing_filters(statement, base, search: str | None = None, account_hold: bool | None = None, ar_balance: bool | None = None, legal_hold: bool | None = None, match_mode: Literal["and", "or"] = "and"):
     filters = []
 
     if search and search.strip():
@@ -97,6 +97,11 @@ def apply_listing_filters(statement, base, search: str | None = None, account_ho
         boolean_filters.append(base.c.has_ar_balance.is_(True))
     elif ar_balance is False:
         boolean_filters.append(base.c.has_ar_balance.is_(False))
+
+    if legal_hold is True:
+        boolean_filters.append(base.c.has_legal_hold.is_(True))
+    elif legal_hold is False:
+        boolean_filters.append(base.c.has_legal_hold.is_(False))
 
     if boolean_filters:
         filters.append(or_(*boolean_filters) if match_mode == "or" else and_(*boolean_filters))
@@ -201,6 +206,7 @@ def get_account_hold_listing(
     size: int = Query(50, ge=1, le=100),
     account_hold: bool | None = Query(None),
     ar_balance: bool | None = Query(None),
+    legal_hold: bool | None = Query(None),
     match_mode: Literal["and", "or"] = Query("and"),
     search: str | None = Query(None, max_length=100),
     db: Session = Depends(get_db),
@@ -213,6 +219,7 @@ def get_account_hold_listing(
         search=search,
         account_hold=account_hold,
         ar_balance=ar_balance,
+        legal_hold=legal_hold,
         match_mode=match_mode,
     )
 
