@@ -7,7 +7,9 @@ from sqlalchemy.orm import Session
 from db import get_db
 from models.brokerage_engine_users import BrokerageEngineUser
 from models.quickbooks import QuickbooksInvoice
+from models.commission_advances.commission_advances import CommissionAdvanceLegalHold
 from api.listing.account_hold.utils import build_agent_transactions_subquery
+from api.listing.commission_advances.utils import CommissionAdvanceLegalHoldStatus
 
 router = APIRouter()
 
@@ -27,6 +29,24 @@ def fetch_agent_by_customer_id(db: Session, customer_id: str) -> dict | None:
 
     row = db.execute(statement).mappings().first()
     return dict(row) if row else None
+
+
+def fetch_agent_legal_hold_balance(db: Session, agent_identifier) -> float:
+    if agent_identifier is None:
+        return 0.0
+
+    legal_hold_balance = db.scalar(
+        select(CommissionAdvanceLegalHold.outstanding_amount)
+        .where(
+            CommissionAdvanceLegalHold.agent_id == agent_identifier,
+            CommissionAdvanceLegalHold.status == CommissionAdvanceLegalHoldStatus.ACTIVE.value,
+            CommissionAdvanceLegalHold.outstanding_amount > 0,
+        )
+        .order_by(CommissionAdvanceLegalHold.id.desc())
+        .limit(1)
+    )
+
+    return float(legal_hold_balance or 0)
 
 
 def fetch_agent_detail_transactions(db: Session, agent_identifier) -> tuple[list[dict], int, int, float]:
@@ -198,6 +218,11 @@ def get_account_hold_detail(customer_id: str, db: Session = Depends(get_db)):
         qb_customerid=agent.get("qb_customerid"),
     )
 
+    legal_hold_balance = fetch_agent_legal_hold_balance(
+        db=db,
+        agent_identifier=agent.get("agent_identifier"),
+    )
+
     has_account_hold = "AccountHold" in (agent.get("agenttags") or "")
     has_ar_balance = ar_details["total_open_balance"] > 0
 
@@ -226,6 +251,7 @@ def get_account_hold_detail(customer_id: str, db: Session = Depends(get_db)):
             "display_name": agent.get("display_name"),
             "roa_email": agent.get("roa_email"),
             "qb_customerid": str(agent["qb_customerid"]) if agent.get("qb_customerid") is not None else None,
+            "legal_hold_balance": legal_hold_balance,
             "broker_flags": broker_flags,
             "transaction_flags": transaction_flags,
             "transaction_count": transaction_count,

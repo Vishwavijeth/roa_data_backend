@@ -15,7 +15,7 @@ class AccountHoldItem(BaseModel):
     roa_email: str | None = None
     customer_id: str | None = None
     transaction_count: int
-    broker_flags: list[str]
+    agent_flags: list[str]
     transaction_flags: list[str]
 
 # ----------- Detail -----------

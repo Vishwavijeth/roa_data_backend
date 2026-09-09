@@ -10,727 +10,288 @@ from sqlalchemy.orm import Session
 from db import get_db
 from common.pagination import PaginationResponse
 from common.response import Response
-
-from api.listing.account_hold.base import (
-    AccountHoldItem,
-    AccountHoldSummaryData,
-)
-
+from api.listing.account_hold.base import AccountHoldItem, AccountHoldSummaryData
+from api.listing.account_hold.utils import build_agent_transactions_subquery
+from api.listing.commission_advances.utils import CommissionAdvanceLegalHoldStatus
 from models.brokerage_engine_users import BrokerageEngineUser
 from models.quickbooks import QuickbooksInvoice
-
-from api.listing.account_hold.utils import (
-    build_agent_transactions_subquery,
-)
+from models.commission_advances.commission_advances import CommissionAdvanceLegalHold
 
 
 router = APIRouter()
 
 
 def account_hold_expression():
-    return func.coalesce(
-        BrokerageEngineUser.agenttags,
-        "",
-    ).contains(
-        "AccountHold"
-    )
+    return func.coalesce(BrokerageEngineUser.agenttags, "").contains("AccountHold")
 
 
 def build_invoice_summary_subquery():
-    return (
-        select(
-            QuickbooksInvoice.customer_id.label(
-                "customer_id"
-            ),
-            func.coalesce(
-                func.sum(
-                    QuickbooksInvoice.balance
-                ),
-                0,
-            ).label(
-                "total_open_balance"
-            ),
-            func.count(
-                QuickbooksInvoice.invoice_id
-            ).label(
-                "invoice_count"
-            ),
-            func.max(
-                QuickbooksInvoice.updated_at
-            ).label(
-                "ar_updated_at"
-            ),
-        )
-        .group_by(
-            QuickbooksInvoice.customer_id
-        )
-        .subquery(
-            "invoice_summary"
-        )
-    )
+    return select(
+        QuickbooksInvoice.customer_id.label("customer_id"),
+        func.coalesce(func.sum(QuickbooksInvoice.balance), 0).label("total_open_balance"),
+        func.count(QuickbooksInvoice.invoice_id).label("invoice_count"),
+        func.max(QuickbooksInvoice.updated_at).label("ar_updated_at"),
+    ).group_by(QuickbooksInvoice.customer_id).subquery("invoice_summary")
+
+
+def build_active_legal_hold_agents_subquery():
+    return select(
+        CommissionAdvanceLegalHold.agent_id.label("agent_id")
+    ).where(
+        CommissionAdvanceLegalHold.agent_id.isnot(None),
+        CommissionAdvanceLegalHold.status == CommissionAdvanceLegalHoldStatus.ACTIVE.value,
+        CommissionAdvanceLegalHold.outstanding_amount > 0,
+    ).distinct().subquery("active_legal_hold_agents")
 
 
 def build_agent_base_subquery():
-    invoice_summary = (
-        build_invoice_summary_subquery()
-    )
+    invoice_summary = build_invoice_summary_subquery()
+    active_legal_hold_agents = build_active_legal_hold_agents_subquery()
 
-    customer_join_condition = (
-        cast(
-            BrokerageEngineUser.qb_customerid,
-            String,
-        )
-        == invoice_summary.c.customer_id
-    )
+    customer_join_condition = cast(BrokerageEngineUser.qb_customerid, String) == invoice_summary.c.customer_id
+    legal_hold_join_condition = BrokerageEngineUser.agent_identifier == active_legal_hold_agents.c.agent_id
 
-    total_open_balance = func.coalesce(
-        invoice_summary.c.total_open_balance,
-        0,
-    )
+    total_open_balance = func.coalesce(invoice_summary.c.total_open_balance, 0)
+    invoice_count = func.coalesce(invoice_summary.c.invoice_count, 0)
+    has_account_hold = account_hold_expression()
+    has_ar_balance = total_open_balance > 0
+    has_legal_hold = active_legal_hold_agents.c.agent_id.is_not(None)
 
-    invoice_count = func.coalesce(
-        invoice_summary.c.invoice_count,
-        0,
-    )
-
-    has_account_hold = (
-        account_hold_expression()
-    )
-
-    has_ar_balance = (
-        total_open_balance > 0
-    )
-
-    return (
-        select(
-            BrokerageEngineUser.agent_identifier.label(
-                "agent_identifier"
-            ),
-            BrokerageEngineUser.display_name.label(
-                "display_name"
-            ),
-            BrokerageEngineUser.roa_email.label(
-                "roa_email"
-            ),
-            BrokerageEngineUser.agenttags.label(
-                "agenttags"
-            ),
-            BrokerageEngineUser.qb_customerid.label(
-                "qb_customerid"
-            ),
-            invoice_summary.c.customer_id.label(
-                "matched_customer_id"
-            ),
-            total_open_balance.label(
-                "total_open_balance"
-            ),
-            invoice_count.label(
-                "invoice_count"
-            ),
-            invoice_summary.c.ar_updated_at.label(
-                "ar_updated_at"
-            ),
-            has_account_hold.label(
-                "has_account_hold"
-            ),
-            has_ar_balance.label(
-                "has_ar_balance"
-            ),
-        )
-        .select_from(
-            BrokerageEngineUser
-        )
-        .outerjoin(
-            invoice_summary,
-            customer_join_condition,
-        )
-        .subquery(
-            "agent_base"
-        )
-    )
+    return select(
+        BrokerageEngineUser.agent_identifier.label("agent_identifier"),
+        BrokerageEngineUser.display_name.label("display_name"),
+        BrokerageEngineUser.roa_email.label("roa_email"),
+        BrokerageEngineUser.agenttags.label("agenttags"),
+        BrokerageEngineUser.qb_customerid.label("qb_customerid"),
+        invoice_summary.c.customer_id.label("matched_customer_id"),
+        total_open_balance.label("total_open_balance"),
+        invoice_count.label("invoice_count"),
+        invoice_summary.c.ar_updated_at.label("ar_updated_at"),
+        has_account_hold.label("has_account_hold"),
+        has_ar_balance.label("has_ar_balance"),
+        has_legal_hold.label("has_legal_hold"),
+    ).select_from(
+        BrokerageEngineUser
+    ).outerjoin(
+        invoice_summary, customer_join_condition
+    ).outerjoin(
+        active_legal_hold_agents, legal_hold_join_condition
+    ).subquery("agent_base")
 
 
-def apply_listing_filters(
-    statement,
-    base,
-    search: str | None = None,
-    account_hold: bool | None = None,
-    ar_balance: bool | None = None,
-    match_mode: Literal["and", "or"] = "and",
-):
+def apply_listing_filters(statement, base, search: str | None = None, account_hold: bool | None = None, ar_balance: bool | None = None, match_mode: Literal["and", "or"] = "and"):
     filters = []
 
     if search and search.strip():
-        search_value = (
-            f"%{search.strip()}%"
-        )
-
-        filters.append(
-            or_(
-                base.c.display_name.ilike(
-                    search_value
-                ),
-                base.c.roa_email.ilike(
-                    search_value
-                ),
-            )
-        )
+        search_value = f"%{search.strip()}%"
+        filters.append(or_(base.c.display_name.ilike(search_value), base.c.roa_email.ilike(search_value)))
 
     boolean_filters = []
 
     if account_hold is True:
-        boolean_filters.append(
-            base.c.has_account_hold.is_(
-                True
-            )
-        )
-
+        boolean_filters.append(base.c.has_account_hold.is_(True))
     elif account_hold is False:
-        boolean_filters.append(
-            base.c.has_account_hold.is_(
-                False
-            )
-        )
+        boolean_filters.append(base.c.has_account_hold.is_(False))
 
     if ar_balance is True:
-        boolean_filters.append(
-            base.c.has_ar_balance.is_(
-                True
-            )
-        )
-
+        boolean_filters.append(base.c.has_ar_balance.is_(True))
     elif ar_balance is False:
-        boolean_filters.append(
-            base.c.has_ar_balance.is_(
-                False
-            )
-        )
+        boolean_filters.append(base.c.has_ar_balance.is_(False))
 
     if boolean_filters:
-        filters.append(
-            or_(
-                *boolean_filters
-            )
-            if match_mode == "or"
-            else and_(
-                *boolean_filters
-            )
-        )
+        filters.append(or_(*boolean_filters) if match_mode == "or" else and_(*boolean_filters))
 
     if filters:
-        statement = statement.where(
-            and_(
-                *filters
-            )
-        )
+        statement = statement.where(and_(*filters))
 
     return statement
 
 
-def fetch_agent_transaction_summary(
-    db: Session,
-    agent_rows: list[dict],
-) -> dict[str, dict]:
-    agent_identifiers = list({
-        row["agent_identifier"]
-        for row in agent_rows
-        if row.get(
-            "agent_identifier"
-        ) is not None
-    })
+def fetch_agent_transaction_summary(db: Session, agent_rows: list[dict]) -> dict[str, dict]:
+    agent_identifiers = list({row["agent_identifier"] for row in agent_rows if row.get("agent_identifier") is not None})
 
     if not agent_identifiers:
         return {}
 
-    agent_transactions = (
-        build_agent_transactions_subquery(
-            agent_identifiers
-        )
-    )
+    agent_transactions = build_agent_transactions_subquery(agent_identifiers)
 
-    statement = (
-        select(
-            agent_transactions.c.agent_key,
-            func.count(
-                func.distinct(
-                    agent_transactions.c.transaction_id
-                )
-            ).label(
-                "transaction_count"
-            ),
-            func.bool_or(
-                agent_transactions.c.has_transaction_mismatch
-            ).label(
-                "has_transaction_mismatch"
-            ),
-        )
-        .select_from(
-            agent_transactions
-        )
-        .group_by(
-            agent_transactions.c.agent_key
-        )
-    )
+    statement = select(
+        agent_transactions.c.agent_key,
+        func.count(func.distinct(agent_transactions.c.transaction_id)).label("transaction_count"),
+        func.bool_or(agent_transactions.c.has_transaction_mismatch).label("has_transaction_mismatch"),
+    ).select_from(agent_transactions).group_by(agent_transactions.c.agent_key)
 
-    rows = db.execute(
-        statement
-    ).mappings().all()
+    rows = db.execute(statement).mappings().all()
 
     return {
-        str(
-            row["agent_key"]
-        ).strip().lower(): {
-            "transaction_count": int(
-                row[
-                    "transaction_count"
-                ]
-                or 0
-            ),
-            "has_transaction_mismatch": bool(
-                row[
-                    "has_transaction_mismatch"
-                ]
-            ),
+        str(row["agent_key"]).strip().lower(): {
+            "transaction_count": int(row["transaction_count"] or 0),
+            "has_transaction_mismatch": bool(row["has_transaction_mismatch"]),
         }
         for row in rows
-        if row[
-            "agent_key"
-        ] is not None
+        if row["agent_key"] is not None
     }
 
 
-def fetch_agent_by_email(
-    db: Session,
-    email: str,
-) -> dict | None:
-    statement = (
-        select(
-            BrokerageEngineUser.agent_identifier,
-            BrokerageEngineUser.display_name,
-            BrokerageEngineUser.roa_email,
-            BrokerageEngineUser.agenttags,
-            BrokerageEngineUser.qb_customerid,
-        )
-        .where(
-            func.trim(
-                BrokerageEngineUser.roa_email
-            )
-            == func.trim(
-                email
-            )
-        )
-        .limit(1)
-    )
+def fetch_agent_by_email(db: Session, email: str) -> dict | None:
+    statement = select(
+        BrokerageEngineUser.agent_identifier,
+        BrokerageEngineUser.display_name,
+        BrokerageEngineUser.roa_email,
+        BrokerageEngineUser.agenttags,
+        BrokerageEngineUser.qb_customerid,
+    ).where(
+        func.trim(BrokerageEngineUser.roa_email) == func.trim(email)
+    ).limit(1)
 
-    row = db.execute(
-        statement
-    ).mappings().first()
-
-    return (
-        dict(row)
-        if row
-        else None
-    )
+    row = db.execute(statement).mappings().first()
+    return dict(row) if row else None
 
 
-def fetch_agent_ar_balance(
-    db: Session,
-    qb_customerid: int | str | None,
-) -> dict | None:
+def fetch_agent_ar_balance(db: Session, qb_customerid: int | str | None) -> dict | None:
     if qb_customerid is None:
         return None
 
-    statement = (
-        select(
-            QuickbooksInvoice.customer_id.label(
-                "customer_id"
-            ),
-            func.coalesce(
-                func.sum(
-                    QuickbooksInvoice.balance
-                ),
-                0,
-            ).label(
-                "total_open_balance"
-            ),
-            func.count(
-                QuickbooksInvoice.invoice_id
-            ).label(
-                "invoice_count"
-            ),
-            func.max(
-                QuickbooksInvoice.updated_at
-            ).label(
-                "updated_at"
-            ),
-        )
-        .where(
-            QuickbooksInvoice.customer_id
-            == str(
-                qb_customerid
-            )
-        )
-        .group_by(
-            QuickbooksInvoice.customer_id
-        )
-    )
+    statement = select(
+        QuickbooksInvoice.customer_id.label("customer_id"),
+        func.coalesce(func.sum(QuickbooksInvoice.balance), 0).label("total_open_balance"),
+        func.count(QuickbooksInvoice.invoice_id).label("invoice_count"),
+        func.max(QuickbooksInvoice.updated_at).label("updated_at"),
+    ).where(
+        QuickbooksInvoice.customer_id == str(qb_customerid)
+    ).group_by(QuickbooksInvoice.customer_id)
 
-    row = db.execute(
-        statement
-    ).mappings().first()
+    row = db.execute(statement).mappings().first()
 
     if not row:
         return None
 
     return {
-        "customer_id": str(
-            row["customer_id"]
-        ),
-        "total_open_balance": row[
-            "total_open_balance"
-        ],
-        "invoice_count": int(
-            row["invoice_count"]
-            or 0
-        ),
-        "updated_at": row[
-            "updated_at"
-        ],
+        "customer_id": str(row["customer_id"]),
+        "total_open_balance": row["total_open_balance"],
+        "invoice_count": int(row["invoice_count"] or 0),
+        "updated_at": row["updated_at"],
     }
 
 
-@router.get(
-    "/account-hold/summary",
-    response_model=Response[
-        AccountHoldSummaryData
-    ],
-)
-def get_account_hold_summary(
-    db: Session = Depends(
-        get_db
-    ),
-):
-    base = (
-        build_agent_base_subquery()
-    )
+@router.get("/account-hold/summary", response_model=Response[AccountHoldSummaryData])
+def get_account_hold_summary(db: Session = Depends(get_db)):
+    base = build_agent_base_subquery()
 
     statement = select(
-        func.count().label(
-            "total_agents"
-        ),
-        func.count()
-        .filter(
-            base.c.has_ar_balance.is_(
-                True
-            )
-        )
-        .label(
-            "agents_with_ar_balance"
-        ),
-        func.count()
-        .filter(
-            base.c.has_account_hold.is_(
-                True
-            )
-        )
-        .label(
-            "agents_with_account_hold"
-        ),
+        func.count().label("total_agents"),
+        func.count().filter(base.c.has_ar_balance.is_(True)).label("agents_with_ar_balance"),
+        func.count().filter(base.c.has_account_hold.is_(True)).label("agents_with_account_hold"),
     )
 
-    row = db.execute(
-        statement
-    ).mappings().one()
+    row = db.execute(statement).mappings().one()
 
     return Response(
         data=AccountHoldSummaryData(
-            total_agents=int(
-                row[
-                    "total_agents"
-                ]
-                or 0
-            ),
-            agents_with_ar_balance=int(
-                row[
-                    "agents_with_ar_balance"
-                ]
-                or 0
-            ),
-            agents_with_account_hold=int(
-                row[
-                    "agents_with_account_hold"
-                ]
-                or 0
-            ),
+            total_agents=int(row["total_agents"] or 0),
+            agents_with_ar_balance=int(row["agents_with_ar_balance"] or 0),
+            agents_with_account_hold=int(row["agents_with_account_hold"] or 0),
         )
     )
 
 
-@router.get(
-    "/account-hold",
-    response_model=PaginationResponse[
-        AccountHoldItem
-    ],
-)
+@router.get("/account-hold", response_model=PaginationResponse[AccountHoldItem])
 def get_account_hold_listing(
-    page: int = Query(
-        1,
-        ge=1,
-    ),
-    size: int = Query(
-        50,
-        ge=1,
-        le=100,
-    ),
-    account_hold: bool | None = Query(
-        None
-    ),
-    ar_balance: bool | None = Query(
-        None
-    ),
-    match_mode: Literal[
-        "and",
-        "or",
-    ] = Query(
-        "and"
-    ),
-    search: str | None = Query(
-        None,
-        max_length=100,
-    ),
-    db: Session = Depends(
-        get_db
-    ),
+    page: int = Query(1, ge=1),
+    size: int = Query(50, ge=1, le=100),
+    account_hold: bool | None = Query(None),
+    ar_balance: bool | None = Query(None),
+    match_mode: Literal["and", "or"] = Query("and"),
+    search: str | None = Query(None, max_length=100),
+    db: Session = Depends(get_db),
 ):
-    base = (
-        build_agent_base_subquery()
+    base = build_agent_base_subquery()
+
+    statement = apply_listing_filters(
+        statement=select(base),
+        base=base,
+        search=search,
+        account_hold=account_hold,
+        ar_balance=ar_balance,
+        match_mode=match_mode,
     )
 
-    statement = (
-        apply_listing_filters(
-            statement=select(
-                base
-            ),
-            base=base,
-            search=search,
-            account_hold=account_hold,
-            ar_balance=ar_balance,
-            match_mode=match_mode,
-        )
-    )
+    offset = (page - 1) * size
 
-    offset = (
-        page - 1
-    ) * size
+    data_statement = statement.add_columns(
+        func.count().over().label("_total_count")
+    ).order_by(
+        desc(base.c.has_account_hold),
+        desc(base.c.has_legal_hold),
+        desc(base.c.total_open_balance),
+        base.c.display_name.asc(),
+        base.c.roa_email.asc(),
+    ).offset(offset).limit(size)
 
-    data_statement = (
-        statement
-        .add_columns(
-            func.count()
-            .over()
-            .label(
-                "_total_count"
-            )
-        )
-        .order_by(
-            desc(
-                base.c.has_account_hold
-            ),
-            desc(
-                base.c.total_open_balance
-            ),
-            base.c.display_name.asc(),
-            base.c.roa_email.asc(),
-        )
-        .offset(
-            offset
-        )
-        .limit(
-            size
-        )
-    )
-
-    result_rows = [
-        dict(
-            row
-        )
-        for row in db.execute(
-            data_statement
-        ).mappings().all()
-    ]
+    result_rows = [dict(row) for row in db.execute(data_statement).mappings().all()]
 
     if result_rows:
-        total_count = int(
-            result_rows[
-                0
-            ][
-                "_total_count"
-            ]
-            or 0
-        )
-
+        total_count = int(result_rows[0]["_total_count"] or 0)
     elif page == 1:
         total_count = 0
-
     else:
-        count_statement = (
-            select(
-                func.count()
-            )
-            .select_from(
-                statement.subquery()
-            )
-        )
-
-        total_count = int(
-            db.scalar(
-                count_statement
-            )
-            or 0
-        )
+        count_statement = select(func.count()).select_from(statement.subquery())
+        total_count = int(db.scalar(count_statement) or 0)
 
     agent_rows = []
 
     for row in result_rows:
-        row.pop(
-            "_total_count",
-            None,
-        )
+        row.pop("_total_count", None)
+        agent_rows.append(row)
 
-        agent_rows.append(
-            row
-        )
+    transaction_summary_map = fetch_agent_transaction_summary(db=db, agent_rows=agent_rows)
 
-    transaction_summary_map = (
-        fetch_agent_transaction_summary(
-            db=db,
-            agent_rows=agent_rows,
-        )
-    )
-
-    data: list[
-        AccountHoldItem
-    ] = []
+    data: list[AccountHoldItem] = []
 
     for row in agent_rows:
-        agent_identifier = (
-            str(
-                row[
-                    "agent_identifier"
-                ]
-            )
-            .strip()
-            .lower()
-            if row.get(
-                "agent_identifier"
-            )
-            is not None
-            else None
-        )
+        agent_identifier = str(row["agent_identifier"]).strip().lower() if row.get("agent_identifier") is not None else None
+        transaction_summary = transaction_summary_map.get(agent_identifier, {}) if agent_identifier else {}
 
-        transaction_summary = (
-            transaction_summary_map.get(
-                agent_identifier,
-                {},
-            )
-            if agent_identifier
-            else {}
-        )
+        has_account_hold = bool(row.get("has_account_hold"))
+        total_open_balance = float(row.get("total_open_balance") or 0)
+        has_ar_balance = total_open_balance > 0
+        has_legal_hold = bool(row.get("has_legal_hold"))
 
-        has_account_hold = bool(
-            row.get(
-                "has_account_hold"
-            )
-        )
-
-        total_open_balance = float(
-            row.get(
-                "total_open_balance"
-            )
-            or 0
-        )
-
-        has_ar_balance = (
-            total_open_balance > 0
-        )
-
-        broker_flags: list[str] = []
+        agent_flags: list[str] = []
 
         if has_account_hold:
-            broker_flags.append(
-                "account_hold"
-            )
+            agent_flags.append("account_hold")
 
         if has_ar_balance:
-            broker_flags.append(
-                "ar_balance"
-            )
+            agent_flags.append("ar_balance")
+
+        if has_legal_hold:
+            agent_flags.append("legal_hold")
 
         transaction_flags: list[str] = []
 
-        if transaction_summary.get(
-            "has_transaction_mismatch",
-            False,
-        ):
-            transaction_flags.append(
-                "transaction_mismatch"
-            )
+        if transaction_summary.get("has_transaction_mismatch", False):
+            transaction_flags.append("transaction_mismatch")
 
         data.append(
             AccountHoldItem(
-                display_name=row.get(
-                    "display_name"
-                ),
-                roa_email=row.get(
-                    "roa_email"
-                ),
-                customer_id=(
-                    str(
-                        row[
-                            "qb_customerid"
-                        ]
-                    )
-                    if row.get(
-                        "qb_customerid"
-                    )
-                    is not None
-                    else None
-                ),
-                transaction_count=int(
-                    transaction_summary.get(
-                        "transaction_count",
-                        0,
-                    )
-                ),
-                broker_flags=(
-                    broker_flags
-                ),
-                transaction_flags=(
-                    transaction_flags
-                ),
+                display_name=row.get("display_name"),
+                roa_email=row.get("roa_email"),
+                customer_id=str(row["qb_customerid"]) if row.get("qb_customerid") is not None else None,
+                transaction_count=int(transaction_summary.get("transaction_count", 0)),
+                agent_flags=agent_flags,
+                transaction_flags=transaction_flags,
             )
         )
 
-    total_pages = (
-        ceil(
-            total_count
-            / size
-        )
-        if total_count
-        else 1
-    )
+    total_pages = ceil(total_count / size) if total_count else 1
 
     return PaginationResponse(
         data=data,
         page=page,
         page_size=size,
-        count=len(
-            data
-        ),
+        count=len(data),
         total_count=total_count,
         total_pages=total_pages,
-        has_next=(
-            page
-            < total_pages
-        ),
+        has_next=page < total_pages,
     )
