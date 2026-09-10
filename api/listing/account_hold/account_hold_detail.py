@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import String, cast, select
+from sqlalchemy import String, and_, cast, func, select
 from sqlalchemy.orm import Session
 
 from db import get_db
@@ -14,58 +14,163 @@ from api.listing.commission_advances.utils import CommissionAdvanceLegalHoldStat
 router = APIRouter()
 
 
-def fetch_agent_by_customer_id(db: Session, customer_id: str) -> dict | None:
-    statement = (
+def fetch_agent_and_ar_details(db: Session, customer_id: str) -> tuple[dict | None, dict]:
+    customer_id = str(customer_id)
+
+    agent_base = (
         select(
-            BrokerageEngineUser.agent_identifier,
-            BrokerageEngineUser.display_name,
-            BrokerageEngineUser.roa_email,
-            BrokerageEngineUser.agenttags,
-            BrokerageEngineUser.qb_customerid,
+            BrokerageEngineUser.agent_identifier.label("agent_identifier"),
+            BrokerageEngineUser.display_name.label("display_name"),
+            BrokerageEngineUser.roa_email.label("roa_email"),
+            BrokerageEngineUser.agenttags.label("agenttags"),
+            BrokerageEngineUser.qb_customerid.label("qb_customerid"),
         )
-        .where(cast(BrokerageEngineUser.qb_customerid, String) == str(customer_id))
+        .where(cast(BrokerageEngineUser.qb_customerid, String) == customer_id)
         .limit(1)
+        .subquery("agent_base")
     )
 
-    row = db.execute(statement).mappings().first()
-    return dict(row) if row else None
-
-
-def fetch_agent_legal_hold_balance(db: Session, agent_identifier) -> float:
-    if agent_identifier is None:
-        return 0.0
-
-    legal_hold_balance = db.scalar(
+    legal_hold_balance_subquery = (
         select(CommissionAdvanceLegalHold.outstanding_amount)
         .where(
-            CommissionAdvanceLegalHold.agent_id == agent_identifier,
+            CommissionAdvanceLegalHold.agent_id == agent_base.c.agent_identifier,
             CommissionAdvanceLegalHold.status == CommissionAdvanceLegalHoldStatus.ACTIVE.value,
             CommissionAdvanceLegalHold.outstanding_amount > 0,
         )
         .order_by(CommissionAdvanceLegalHold.id.desc())
         .limit(1)
+        .scalar_subquery()
     )
 
-    return float(legal_hold_balance or 0)
-
-
-def fetch_agent_detail_transactions(db: Session, agent_identifier) -> tuple[list[dict], int, int, float]:
-    if agent_identifier is None:
-        return [], 0, 0, 0.0
-
-    agent_transactions = build_agent_transactions_subquery([agent_identifier])
-
     statement = (
-        select(agent_transactions)
-        .order_by(agent_transactions.c.transaction_id)
+        select(
+            agent_base.c.agent_identifier,
+            agent_base.c.display_name,
+            agent_base.c.roa_email,
+            agent_base.c.agenttags,
+            agent_base.c.qb_customerid,
+            func.coalesce(legal_hold_balance_subquery, 0).label("legal_hold_balance"),
+            QuickbooksInvoice.invoice_id,
+            QuickbooksInvoice.doc_number,
+            QuickbooksInvoice.txn_date,
+            QuickbooksInvoice.due_date,
+            QuickbooksInvoice.total_amt,
+            QuickbooksInvoice.balance,
+            QuickbooksInvoice.updated_at,
+        )
+        .select_from(agent_base)
+        .outerjoin(
+            QuickbooksInvoice,
+            and_(
+                QuickbooksInvoice.customer_id == cast(agent_base.c.qb_customerid, String),
+                QuickbooksInvoice.balance > 0,
+            ),
+        )
+        .order_by(
+            QuickbooksInvoice.due_date.asc().nullslast(),
+            QuickbooksInvoice.txn_date.asc().nullslast(),
+        )
     )
 
     rows = db.execute(statement).mappings().all()
 
+    if not rows:
+        return None, {
+            "total_open_balance": 0.0,
+            "updated_at": None,
+            "invoices": [],
+        }
+
+    first_row = rows[0]
+
+    agent = {
+        "agent_identifier": first_row.get("agent_identifier"),
+        "display_name": first_row.get("display_name"),
+        "roa_email": first_row.get("roa_email"),
+        "agenttags": first_row.get("agenttags"),
+        "qb_customerid": first_row.get("qb_customerid"),
+        "legal_hold_balance": float(first_row.get("legal_hold_balance") or 0),
+    }
+
+    total_open_balance = 0.0
+    updated_at = None
+    invoices = []
+
+    for row in rows:
+        if row.get("invoice_id") is None:
+            continue
+
+        balance = float(row.get("balance") or 0)
+        total_open_balance += balance
+
+        row_updated_at = row.get("updated_at")
+
+        if row_updated_at is not None and (updated_at is None or row_updated_at > updated_at):
+            updated_at = row_updated_at
+
+        invoices.append(
+            {
+                "invoice_id": str(row["invoice_id"]),
+                "doc_number": row.get("doc_number"),
+                "txn_date": row.get("txn_date"),
+                "due_date": row.get("due_date"),
+                "total_amt": float(row["total_amt"]) if row.get("total_amt") is not None else 0.0,
+                "balance": balance,
+            }
+        )
+
+    return agent, {
+        "total_open_balance": total_open_balance,
+        "updated_at": updated_at,
+        "invoices": invoices,
+    }
+
+
+def fetch_agent_detail_transactions(db: Session, agent_identifier) -> tuple[list[dict], int, int, float, float, bool]:
+    if agent_identifier is None:
+        return [], 0, 0, 0.0, 0.0, False
+
+    agent_transactions = build_agent_transactions_subquery([agent_identifier])
+
+    statement = (
+        select(
+            agent_transactions.c.transaction_id,
+            agent_transactions.c.property_address,
+            agent_transactions.c.source_status,
+            agent_transactions.c.is_closed,
+            agent_transactions.c.agent_net,
+            agent_transactions.c.saleguid,
+            agent_transactions.c.skyslope_url,
+            agent_transactions.c.be_source_table,
+            agent_transactions.c.be_transaction_specialist,
+            agent_transactions.c.skyslope_reviewer,
+            agent_transactions.c.has_transaction_mismatch,
+            agent_transactions.c.be_gross_commission,
+            agent_transactions.c.skyslope_gross_commission,
+            agent_transactions.c.gross_commission_match,
+            agent_transactions.c.be_close_date_value,
+            agent_transactions.c.skyslope_close_date_value,
+            agent_transactions.c.close_date_match,
+            agent_transactions.c.be_status_value,
+            agent_transactions.c.skyslope_status_value,
+            agent_transactions.c.status_match,
+            agent_transactions.c.be_sale_price,
+            agent_transactions.c.skyslope_sale_price,
+            agent_transactions.c.sale_price_match,
+        )
+        .order_by(agent_transactions.c.transaction_id)
+    )
+
+    rows = db.execute(statement).mappings()
+
     transactions = []
     transaction_ids = set()
     closed_transaction_ids = set()
+    sale_volume_transaction_ids = set()
+
     total_commission_earned = 0.0
+    total_sale_volume = 0.0
+    has_transaction_mismatch = False
 
     for row in rows:
         transaction_id = row.get("transaction_id")
@@ -75,6 +180,7 @@ def fetch_agent_detail_transactions(db: Session, agent_identifier) -> tuple[list
 
         is_closed = bool(row.get("is_closed"))
         agent_net = float(row.get("agent_net") or 0)
+        be_source_table = str(row.get("be_source_table") or "").strip().lower()
 
         if is_closed:
             if transaction_id is not None:
@@ -82,10 +188,20 @@ def fetch_agent_detail_transactions(db: Session, agent_identifier) -> tuple[list
 
             total_commission_earned += agent_net
 
-        transaction_flags: list[str] = []
+            if (
+                be_source_table == "sale income"
+                and transaction_id is not None
+                and transaction_id not in sale_volume_transaction_ids
+            ):
+                total_sale_volume += float(row.get("be_sale_price") or 0)
+                sale_volume_transaction_ids.add(transaction_id)
 
-        if bool(row.get("has_transaction_mismatch")):
-            transaction_flags.append("transaction_mismatch")
+        row_has_mismatch = bool(row.get("has_transaction_mismatch"))
+
+        if row_has_mismatch:
+            has_transaction_mismatch = True
+
+        transaction_flags = ["transaction_mismatch"] if row_has_mismatch else []
 
         transactions.append(
             {
@@ -127,77 +243,19 @@ def fetch_agent_detail_transactions(db: Session, agent_identifier) -> tuple[list
     transaction_count = len(transaction_ids)
     closed_volume = len(closed_transaction_ids)
 
-    return transactions, transaction_count, closed_volume, total_commission_earned
-
-
-def fetch_agent_ar_details(db: Session, qb_customerid: int | str | None) -> dict:
-    if qb_customerid is None:
-        return {
-            "total_open_balance": 0.0,
-            "updated_at": None,
-            "invoices": [],
-        }
-
-    customer_id = str(qb_customerid)
-
-    statement = (
-        select(
-            QuickbooksInvoice.invoice_id,
-            QuickbooksInvoice.doc_number,
-            QuickbooksInvoice.txn_date,
-            QuickbooksInvoice.due_date,
-            QuickbooksInvoice.total_amt,
-            QuickbooksInvoice.balance,
-            QuickbooksInvoice.updated_at,
-        )
-        .where(
-            QuickbooksInvoice.customer_id == customer_id,
-            QuickbooksInvoice.balance > 0,
-        )
-        .order_by(
-            QuickbooksInvoice.due_date.asc().nullslast(),
-            QuickbooksInvoice.txn_date.asc().nullslast(),
-        )
+    return (
+        transactions,
+        transaction_count,
+        closed_volume,
+        total_commission_earned,
+        total_sale_volume,
+        has_transaction_mismatch,
     )
-
-    rows = db.execute(statement).mappings().all()
-
-    total_open_balance = sum(
-        float(row.get("balance") or 0)
-        for row in rows
-    )
-
-    updated_at = max(
-        (
-            row["updated_at"]
-            for row in rows
-            if row.get("updated_at") is not None
-        ),
-        default=None,
-    )
-
-    invoices = [
-        {
-            "invoice_id": str(row["invoice_id"]) if row.get("invoice_id") is not None else None,
-            "doc_number": row.get("doc_number"),
-            "txn_date": row.get("txn_date"),
-            "due_date": row.get("due_date"),
-            "total_amt": float(row["total_amt"]) if row.get("total_amt") is not None else 0.0,
-            "balance": float(row["balance"]) if row.get("balance") is not None else 0.0,
-        }
-        for row in rows
-    ]
-
-    return {
-        "total_open_balance": total_open_balance,
-        "updated_at": updated_at,
-        "invoices": invoices,
-    }
 
 
 @router.get("/account-hold/detail/{customer_id}")
 def get_account_hold_detail(customer_id: str, db: Session = Depends(get_db)):
-    agent = fetch_agent_by_customer_id(
+    agent, ar_details = fetch_agent_and_ar_details(
         db=db,
         customer_id=customer_id,
     )
@@ -208,30 +266,24 @@ def get_account_hold_detail(customer_id: str, db: Session = Depends(get_db)):
             detail="Agent not found",
         )
 
-    transactions, transaction_count, closed_volume, total_commission_earned = fetch_agent_detail_transactions(
+    (
+        transactions,
+        transaction_count,
+        closed_volume,
+        total_commission_earned,
+        total_sale_volume,
+        has_transaction_mismatch,
+    ) = fetch_agent_detail_transactions(
         db=db,
         agent_identifier=agent.get("agent_identifier"),
     )
 
-    ar_details = fetch_agent_ar_details(
-        db=db,
-        qb_customerid=agent.get("qb_customerid"),
-    )
-
-    legal_hold_balance = fetch_agent_legal_hold_balance(
-        db=db,
-        agent_identifier=agent.get("agent_identifier"),
-    )
+    legal_hold_balance = float(agent.get("legal_hold_balance") or 0)
 
     has_account_hold = "AccountHold" in (agent.get("agenttags") or "")
     has_ar_balance = ar_details["total_open_balance"] > 0
 
-    has_transaction_mismatch = any(
-        "transaction_mismatch" in transaction.get("transaction_flags", [])
-        for transaction in transactions
-    )
-
-    broker_flags: list[str] = []
+    broker_flags = []
 
     if has_account_hold:
         broker_flags.append("account_hold")
@@ -239,7 +291,7 @@ def get_account_hold_detail(customer_id: str, db: Session = Depends(get_db)):
     if has_ar_balance:
         broker_flags.append("ar_balance")
 
-    transaction_flags: list[str] = []
+    transaction_flags = []
 
     if has_transaction_mismatch:
         transaction_flags.append("transaction_mismatch")
@@ -257,6 +309,7 @@ def get_account_hold_detail(customer_id: str, db: Session = Depends(get_db)):
             "transaction_count": transaction_count,
             "closed_volume": closed_volume,
             "total_commission_earned": total_commission_earned,
+            "total_sale_volume": total_sale_volume,
             "ar_balance": ar_details,
             "transactions": transactions,
         },
